@@ -6,7 +6,6 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
 
 import boto3
 import jwt
@@ -49,7 +48,7 @@ def list_bot_pool(sender_login: str) -> dict[str, str]:
     return bots
 
 
-def get_telegram_user_id(sender_login: str) -> Optional[str]:
+def get_telegram_user_id(sender_login: str) -> str | None:
     try:
         resp = ssm.get_parameter(
             Name=f"{SSM_PATH}/users/{sender_login}/telegram/allowed-user-id",
@@ -66,7 +65,7 @@ def _lock_key(sender_login: str, bot_name: str) -> str:
     return f"{BOT_POOL_LOCK_PREFIX}/{sender_login}/{bot_name}.json"
 
 
-def _get_lock(sender_login: str, bot_name: str, bucket: str) -> Optional[dict]:
+def _get_lock(sender_login: str, bot_name: str, bucket: str) -> dict | None:
     try:
         resp = s3.get_object(Bucket=bucket, Key=_lock_key(sender_login, bot_name))
         data = json.loads(resp["Body"].read().decode())
@@ -89,7 +88,7 @@ def _get_lock(sender_login: str, bot_name: str, bucket: str) -> Optional[dict]:
 
 def acquire_bot_token(
     sender_login: str, instance_id: str, repo: str, issue_number: int
-) -> Optional[Tuple[str, str]]:
+) -> tuple[str, str] | None:
     bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
     pool = list_bot_pool(sender_login)
     if not pool:
@@ -215,7 +214,7 @@ def verify_github_signature(secret: str, payload: bytes, signature: str) -> bool
     return hmac.compare_digest(expected, signature)
 
 
-def extract_event_data(payload: dict) -> Optional[dict]:
+def extract_event_data(payload: dict) -> dict | None:
     if "detail" in payload:
         detail = payload["detail"]
         action = detail.get("action", "")
@@ -259,7 +258,7 @@ def get_instance_profile_arn() -> str:
 SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
 
 
-def get_spot_prices(instance_types: List[str]) -> List[Tuple[str, str, float]]:
+def get_spot_prices(instance_types: list[str]) -> list[tuple[str, str, float]]:
     try:
         resp = ec2.describe_spot_price_history(
             InstanceTypes=instance_types,
@@ -267,7 +266,7 @@ def get_spot_prices(instance_types: List[str]) -> List[Tuple[str, str, float]]:
             StartTime=datetime.now(timezone.utc),
             EndTime=datetime.now(timezone.utc),
         )
-        results: List[Tuple[str, str, float]] = []
+        results: list[tuple[str, str, float]] = []
         for entry in resp.get("SpotPriceHistory", []):
             price = float(entry["SpotPrice"])
             results.append((entry["AvailabilityZone"], entry["InstanceType"], price))
@@ -496,7 +495,7 @@ opencode --version
 
 
 def _write_opencode_config_script(autonomous: bool = True) -> str:
-    compaction = '"auto": false' if autonomous else '"auto": false'
+    compaction = '"auto": false'
     agent_prompt = (
         ""
         if autonomous
@@ -1456,7 +1455,7 @@ def lambda_handler(event, context):
 
     try:
         webhook_secret = get_ssm_param("github-webhook/secret")
-    except Exception as e:
+    except ClientError as e:
         logger.error("Failed to read webhook secret from SSM: %s", e)
         return {
             "statusCode": 500,
@@ -1499,7 +1498,8 @@ def lambda_handler(event, context):
     try:
         github_token = get_github_app_token(repo_full_name)
     except Exception as e:
-        logger.error("GitHub App auth failed: %s", e, exc_info=True)
+        logger.exception("GitHub App auth failed")
+
         return {
             "statusCode": 500,
             "body": json.dumps({"error": f"GitHub App auth failed: {e}"}),
@@ -1577,7 +1577,7 @@ def lambda_handler(event, context):
                 sender_login, bot_name, instance_id, repo_full_name, issue_number
             )
     except ClientError as e:
-        logger.error("EC2 launch failed: %s", e, exc_info=True)
+        logger.exception("EC2 launch failed")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": f"EC2 launch failed: {e}"}),
