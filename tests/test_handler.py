@@ -4,30 +4,30 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lambda"))
 
 from handler import (
-    get_spot_prices,
-    get_az_subnet_map,
-    build_autonomous_user_data,
-    build_assisted_user_data,
-    _build_s3_downloader_script,
-    _read_secrets_from_ssm_script,
-    _configure_git_script,
-    _install_toolchain_script,
-    _write_opencode_config_script,
-    _decode_api_errors_script,
-    _SHUTDOWN_TOOL_JS,
     _IDLE_WATCHDOG_PLUGIN_JS,
-    _SPOT_WATCHDOG_PLUGIN_JS,
     _PERIODIC_AUTOSAVE_PLUGIN_JS,
-    _write_spot_watchdog_plugin_script,
+    _SHUTDOWN_TOOL_JS,
+    _SPOT_WATCHDOG_PLUGIN_JS,
+    _build_s3_downloader_script,
+    _configure_git_script,
+    _decode_api_errors_script,
+    _install_toolchain_script,
+    _read_secrets_from_ssm_script,
+    _write_opencode_config_script,
     _write_periodic_autosave_plugin_script,
+    _write_spot_watchdog_plugin_script,
     acquire_bot_token,
+    build_assisted_user_data,
+    build_autonomous_user_data,
+    get_az_subnet_map,
+    get_spot_prices,
 )
 
 
@@ -226,7 +226,11 @@ class TestOpencodeProviderConfig(unittest.TestCase):
         self.assertIn("{env:OPENCODE_API_KEY}", script)
 
     @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"}
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
     )
     def test_autonomous_user_data_uses_minimax_model(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
@@ -234,7 +238,11 @@ class TestOpencodeProviderConfig(unittest.TestCase):
         self.assertIn("OPENCODE_MODEL", user_data)
 
     @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"}
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
     )
     def test_assisted_user_data_uses_minimax_model(self):
         user_data = build_assisted_user_data("owner/repo", 42)
@@ -242,7 +250,11 @@ class TestOpencodeProviderConfig(unittest.TestCase):
         self.assertIn("OPENCODE_MODEL_PROVIDER=minimax-coding-plan", user_data)
 
     @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"}
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
     )
     def test_autonomous_user_data_logs_config_diagnostic(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
@@ -250,7 +262,11 @@ class TestOpencodeProviderConfig(unittest.TestCase):
         self.assertIn("api_key_prefix", user_data)
 
     @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"}
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
     )
     def test_assisted_user_data_logs_config_diagnostic(self):
         user_data = build_assisted_user_data("owner/repo", 42)
@@ -260,10 +276,12 @@ class TestOpencodeProviderConfig(unittest.TestCase):
     def test_default_opencode_model_is_minimax(self):
         with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):
             self.assertIn(
-                "minimax-coding-plan/MiniMax-M3", build_autonomous_user_data("owner/repo", 1)
+                "minimax-coding-plan/MiniMax-M3",
+                build_autonomous_user_data("owner/repo", 1),
             )
             self.assertIn(
-                "minimax-coding-plan/MiniMax-M3", build_assisted_user_data("owner/repo", 1)
+                "minimax-coding-plan/MiniMax-M3",
+                build_assisted_user_data("owner/repo", 1),
             )
 
 
@@ -286,7 +304,10 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         self.assertIn("rate", script.lower())
 
     def test_watchdog_invokes_decoder(self):
-        with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}):
+        with patch.dict(
+            os.environ,
+            {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+        ):
             user_data = build_autonomous_user_data("owner/repo", 42)
         self.assertIn("ACTIONABLE", user_data)
         self.assertIn("insufficient_balance", user_data)
@@ -448,23 +469,34 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertIn("bash /tmp/bootstrap.sh", user_data)
         self.assertNotIn("opencode", user_data)
 
-    @patch("handler.get_instance_profile_arn", return_value="arn:aws:iam::123:instance-profile/test")
+    @patch(
+        "handler.get_instance_profile_arn",
+        return_value="arn:aws:iam::123:instance-profile/test",
+    )
     @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
-    @patch.dict(os.environ, {
-        "EC2_SECURITY_GROUP_ID": "sg-123",
-        "EC2_SUBNET_ID": "subnet-123",
-        "VPC_ID": "vpc-123",
-        "S3_LOGS_BUCKET": "test-bucket",
-    })
-    def test_ec2_volume_size_is_20gb(self, mock_ec2, mock_ssm, mock_s3, mock_ami, mock_profile):
+    @patch.dict(
+        os.environ,
+        {
+            "EC2_SECURITY_GROUP_ID": "sg-123",
+            "EC2_SUBNET_ID": "subnet-123",
+            "VPC_ID": "vpc-123",
+            "S3_LOGS_BUCKET": "test-bucket",
+        },
+    )
+    def test_ec2_volume_size_is_20gb(
+        self, mock_ec2, mock_ssm, mock_s3, mock_ami, mock_profile
+    ):
         from handler import launch_ec2_spot_instance
+
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        launch_ec2_spot_instance("org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data)
+        launch_ec2_spot_instance(
+            "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data
+        )
 
         run_args = mock_ec2.run_instances.call_args
         block_device = run_args[1]["BlockDeviceMappings"]
@@ -815,19 +847,25 @@ class TestPeriodicAutosavePlugin(unittest.TestCase):
 
 
 class TestSpotWatchdogInUserData(unittest.TestCase):
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_autonomous_user_data_contains_spot_watchdog_plugin(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
         self.assertIn("spot-watchdog.js", user_data)
         self.assertIn("SpotWatchdog", user_data)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_assisted_user_data_contains_spot_watchdog_plugin(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertIn("spot-watchdog.js", user_data)
         self.assertIn("SpotWatchdog", user_data)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_spot_watchdog_uses_global_directory(self):
         script = _write_spot_watchdog_plugin_script()
         self.assertIn("/root/.config/opencode/plugins/spot-watchdog.js", script)
@@ -835,25 +873,33 @@ class TestSpotWatchdogInUserData(unittest.TestCase):
 
 
 class TestPeriodicAutosaveInUserData(unittest.TestCase):
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_autonomous_user_data_contains_periodic_autosave_plugin(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
         self.assertIn("periodic-autosave.js", user_data)
         self.assertIn("PeriodicAutosave", user_data)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_assisted_user_data_contains_periodic_autosave_plugin(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertIn("periodic-autosave.js", user_data)
         self.assertIn("PeriodicAutosave", user_data)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_periodic_autosave_uses_global_directory(self):
         script = _write_periodic_autosave_plugin_script()
         self.assertIn("/root/.config/opencode/plugins/periodic-autosave.js", script)
         self.assertNotIn("/workspace/repo/.opencode/plugins", script)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_autonomous_plugins_after_session_archive(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
         archive_pos = user_data.index("session-archive.js")
@@ -862,7 +908,9 @@ class TestPeriodicAutosaveInUserData(unittest.TestCase):
         self.assertGreater(spot_pos, archive_pos)
         self.assertGreater(periodic_pos, archive_pos)
 
-    @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"})
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_assisted_plugins_after_session_archive(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         archive_pos = user_data.index("session-archive.js")
@@ -1183,9 +1231,7 @@ class TestBotPoolInUserData(unittest.TestCase):
         )
         self.assertNotIn("/blitzlog/telegram/bot-token", user_data)
         self.assertNotIn("/blitzlog/telegram/allowed-user-id", user_data)
-        self.assertNotIn(
-            "/blitzlog/users/octocat/telegram/allowed-user-id", user_data
-        )
+        self.assertNotIn("/blitzlog/users/octocat/telegram/allowed-user-id", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -1241,9 +1287,7 @@ class TestGetGithubAppToken(unittest.TestCase):
         mock_jwt_encode.assert_called_once()
         mock_post.assert_called_once()
         call_kwargs = mock_post.call_args.kwargs
-        self.assertEqual(
-            call_kwargs["json"], {"repositories": ["repo"]}
-        )
+        self.assertEqual(call_kwargs["json"], {"repositories": ["repo"]})
         url = mock_post.call_args.args[0]
         self.assertIn("/installations/67890/access_tokens", url)
 
@@ -1277,7 +1321,6 @@ class TestGetGithubAppToken(unittest.TestCase):
         self, mock_ssm, mock_post, mock_jwt_encode
     ):
         import requests as real_requests
-
         from handler import get_github_app_token
 
         mock_ssm.side_effect = lambda name, with_decryption=True: {
@@ -1297,9 +1340,7 @@ class TestGetGithubAppToken(unittest.TestCase):
             get_github_app_token("owner/repo")
 
         call_kwargs = mock_post.call_args.kwargs
-        self.assertEqual(
-            call_kwargs["json"], {"repositories": ["repo"]}
-        )
+        self.assertEqual(call_kwargs["json"], {"repositories": ["repo"]})
 
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
