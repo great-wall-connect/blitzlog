@@ -1,0 +1,55 @@
+name: lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    name: Lint + test (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Install Python toolchain
+        run: mise install
+
+      - name: Install Python dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Black
+        run: black --check .
+
+      - name: Pytest
+        run: python -m pytest tests/ -v
+
+  terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.x
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (backend disabled)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate

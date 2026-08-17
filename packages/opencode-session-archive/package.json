@@ -1,0 +1,8 @@
+{
+  "name": "@blitzlog/opencode-session-archive",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that automatically archives sessions to S3 for audit trail and cross-instance resume",
+  "main": "index.js",
+  "keywords": ["blitzlog", "opencode", "opencode-plugin", "s3", "session-archive"],
+  "license": "MIT"
+}

@@ -1,0 +1,6 @@
+# Per-user Terraform state (when using local backend instead of S3)
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfvars

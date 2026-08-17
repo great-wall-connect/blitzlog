@@ -1,0 +1,25 @@
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform.lock.hcl
+infra/lambda_function.zip
+infra/build/
+infra/*-backend.hcl
+*.tfvars
+*.private-key.pem
+terraform.tfstate
+
+# OpenCode session logs (autonomous agent exports them explicitly)
+.opencode/sessions/
+
+# IDE
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+out/

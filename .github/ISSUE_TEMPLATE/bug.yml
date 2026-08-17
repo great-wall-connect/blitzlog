@@ -1,0 +1,43 @@
+name: Bug report
+about: Report something that doesn't work as expected
+title: "[bug] "
+labels: ["bug"]
+assignees: []
+
+---
+
+## Summary
+
+A short description of the bug.
+
+## Reproduction steps
+
+1.
+2.
+3.
+
+## Expected behaviour
+
+What you expected to happen.
+
+## Actual behaviour
+
+What actually happened.
+
+## Environment
+
+- Blitzlog commit SHA:
+- AWS region:
+- OpenCode provider/model:
+- Terraform version (`terraform version`):
+
+## Logs / output
+
+```
+Paste relevant CloudWatch / `terraform plan` / Lambda output here.
+Do not paste secrets (API keys, webhook secrets, GitHub tokens).
+```
+
+## Impact
+
+How severe is this? (e.g. blocks my own use, blocks my team, doesn't matter much)

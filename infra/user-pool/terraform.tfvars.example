@@ -1,0 +1,7 @@
+owner_login              = "your-github-username"
+telegram_allowed_user_id = "12345678"
+
+telegram_bot_tokens = {
+  escobar  = "<BOT_TOKEN>"
+  chaparro = "<BOT_TOKEN>"
+}

@@ -1,0 +1,27 @@
+name: Feature request
+about: Suggest a new capability
+title: "[feat] "
+labels: ["enhancement"]
+assignees: []
+
+---
+
+## Problem
+
+What problem are you trying to solve? Why does the current behaviour get in the way?
+
+## Proposed solution
+
+What you would like Blitzlog to do.
+
+## Alternatives considered
+
+What other approaches did you weigh? Why is this one better?
+
+## Use case
+
+A concrete scenario where this would help. The more specific, the better — actual code paths, actual issue titles, actual repo sizes.
+
+## Out of scope
+
+What does this proposal **not** include?

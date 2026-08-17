@@ -1,0 +1,3 @@
+# Shared infra no longer holds Telegram bot tokens or allowed user IDs.
+# Each user provisions their own pool via infra/user-pool/ — see
+# infra/user-pool/terraform.tfvars.example for the per-user template.

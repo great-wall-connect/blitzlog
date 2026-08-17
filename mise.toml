@@ -1,0 +1,34 @@
+[tools]
+python = "3.12"
+terraform = "1.9"
+node = "20"
+
+[tasks.test]
+description = "Run Python unit tests"
+run = "pip install -q -r requirements.txt && python -m pytest tests/ -v"
+
+[tasks.lint]
+description = "Lint Python code (ruff + black)"
+run = "pip install -q -r requirements-dev.txt && ruff check . && black --check ."
+
+[tasks.build]
+description = "Package Lambda and init Terraform"
+run = """
+rm -rf infra/build infra/.build-venv
+mkdir -p infra/build
+cp lambda/handler.py infra/build/
+python3 -m venv infra/.build-venv
+infra/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t infra/build/
+rm -rf infra/.build-venv
+cd infra && terraform init
+"""
+
+[tasks."tf-plan"]
+description = "Terraform plan"
+dir = "infra"
+run = "terraform plan"
+
+[tasks."tf-apply"]
+description = "Terraform apply"
+dir = "infra"
+run = "terraform apply"
