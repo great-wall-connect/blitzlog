@@ -2,21 +2,6 @@ resource "aws_s3_bucket" "agent_logs" {
   bucket = var.agent_logs_bucket_name
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "agent_logs" {
-  bucket = aws_s3_bucket.agent_logs.id
-
-  rule {
-    id     = "cleanup"
-    status = "Enabled"
-
-    filter {}
-
-    expiration {
-      days = 30
-    }
-  }
-}
-
 resource "aws_s3_bucket_server_side_encryption_configuration" "agent_logs" {
   bucket = aws_s3_bucket.agent_logs.id
 

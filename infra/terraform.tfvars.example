@@ -1,3 +1,40 @@
+# Copy this file to terraform.tfvars and fill in your real values.
+#
+# Required variables (no defaults — Terraform apply will fail without these):
+# ------------------------------------------------------------------------------
+aws_region                 = "ap-east-1"                         # any AWS region with spot capacity
+vpc_id                     = "vpc-0123456789abcdef0"             # VPC where the agent EC2 instance will launch
+ec2_subnet_id              = "subnet-0123456789abcdef0"          # public subnet inside vpc_id
+github_app_id              = "123456"                            # GitHub App numeric ID
+github_app_private_key     = "LS0tLS1CRUdJTi..."                 # base64-encoded PEM of the App's private key (paste the full string)
+github_app_installation_id = "987654"                            # GitHub App installation ID for this repo
+github_webhook_secret      = "replace-with-a-long-random-string" # HMAC secret you also paste into the GitHub webhook config
+opencode_api_key           = "sk-cp-..."                         # API key for the OpenCode inference provider (e.g. MiniMax coding plan)
+agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket holding agent run logs + session archives (must exist beforehand)
+
+# Optional variables (uncomment to override defaults):
+# ------------------------------------------------------------------------------
+# ssh_allowed_cidrs         = ["1.2.3.4/32"]                     # CIDRs allowed SSH ingress; empty = no SSH
+# alert_email               = "dev-team@example.com"             # CloudWatch alarm email; empty = no email subscription
+# opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the OpenCode CLI on EC2
+
+# Per-user Telegram bot pools (assisted mode)
+# ------------------------------------------------------------------------------
 # Shared infra no longer holds Telegram bot tokens or allowed user IDs.
 # Each user provisions their own pool via infra/user-pool/ — see
 # infra/user-pool/terraform.tfvars.example for the per-user template.
+
+# Terraform state bucket (supplied at init time, not via tfvars):
+# ------------------------------------------------------------------------------
+# The S3 backend bucket is intentionally NOT a tfvars variable —
+# Terraform cannot evaluate input variables inside the backend block.
+# Supply it instead via a -backend.hcl file (gitignored), e.g.:
+#
+#   # infra/prod-backend.hcl
+#   bucket = "<your-terraform-state-bucket>"
+#
+# then run:
+#
+#   terraform init -backend-config=infra/prod-backend.hcl
+#
+# See README.md for the full setup walkthrough.

@@ -1,3 +1,5 @@
+<img src="assets/blitzlog-mark.svg" alt="Blitzlog" width="120" />
+
 # Blitzlog
 
 **Pin, blitz, merge.**
@@ -75,7 +77,6 @@ aws_region              = "ap-east-1"             # or any region with spot capa
 vpc_id                  = "<your-vpc-id>"
 ec2_subnet_id           = "<your-subnet-id>"
 agent_logs_bucket_name  = "<your-agent-logs-bucket>"  # must exist or be created beforehand
-tf_state_bucket         = "<your-tf-state-bucket>"     # must exist or be created beforehand
 
 github_app_id              = "123456"
 github_app_private_key     = "<base64 encoded PEM>"
@@ -89,7 +90,7 @@ opencode_api_key    = "<your-provider-api-key>"
 # ssh_allowed_cidrs = ["1.2.3.4/32"]            # optional; empty = no SSH ingress
 ```
 
-The state backend (`backend "s3"`) in `infra/main.tf` is generic — supply the bucket via a `-backend.hcl` file:
+The state backend (`backend "s3"`) in `infra/main.tf` is generic — the `bucket` field is intentionally empty. Supply it via a `-backend.hcl` file:
 
 ```hcl
 # infra/prod-backend.hcl  (gitignored)
