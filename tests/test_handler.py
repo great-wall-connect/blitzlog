@@ -1343,6 +1343,54 @@ class TestGetGithubAppToken(unittest.TestCase):
         self.assertEqual(call_kwargs["json"], {"repositories": ["repo"]})
 
 
+class TestNodeVersionGuard(unittest.TestCase):
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_installs_node_22(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("Installing Node.js 22...", user_data)
+        self.assertIn(
+            "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.xz",
+            user_data,
+        )
+        self.assertNotIn("v20.19.2", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_has_minor_version_check(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("NODE_MINOR", user_data)
+        self.assertIn('"$NODE_MINOR" -lt 14', user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_fails_fast_on_unsupported_node(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("Verifying Node.js meets opencode-telegram-bot", user_data)
+        self.assertIn("below the minimum required", user_data)
+        self.assertIn("exit 1", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_check_runs_before_bot_install(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index("Verifying Node.js meets opencode-telegram-bot")
+        install_pos = user_data.index("npm install -g @grinev/opencode-telegram-bot")
+        self.assertLess(guard_pos, install_pos)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_node_major_check_uses_22_not_20(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn('"$NODE_MAJOR" -lt 22', user_data)
+        self.assertNotIn('"$NODE_MAJOR" -lt 20', user_data)
+
+
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")
     @patch("handler.launch_ec2_spot_instance", return_value="i-123")

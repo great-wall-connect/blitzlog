@@ -1183,11 +1183,11 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Installing system packages..."
 {_install_system_packages_script()}
 
-log "Installing Node.js 20..."
+log "Installing Node.js 22..."
 NODE_MAJOR=$(node --version 2>/dev/null | cut -d. -f1 | tr -d 'v' || echo "0")
-if [ "$NODE_MAJOR" -lt 20 ]; then
-    log "Node.js $NODE_MAJOR detected, installing Node.js 20 via binary..."
-    curl -fsSL https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-arm64.tar.xz \
+if [ "$NODE_MAJOR" -lt 22 ]; then
+    log "Node.js $NODE_MAJOR detected, installing Node.js 22 via binary..."
+    curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.xz \
         | tar -xJ -C /usr/local --strip-components=1
 fi
 node --version
@@ -1261,6 +1261,15 @@ fi
 
 log "Installing build tools for native npm modules..."
 dnf install -y gcc-c++ make python3
+
+log "Verifying Node.js meets opencode-telegram-bot requirements..."
+NODE_FULL=$(node --version 2>/dev/null | tr -d 'v' || echo "0.0.0")
+NODE_MINOR=$(printf '%s' "$NODE_FULL" | cut -d. -f2)
+if [ "$NODE_MAJOR" -lt 22 ] || {{ [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 14 ]; }}; then
+    log "ERROR: Node.js $NODE_FULL is below the minimum required by @grinev/opencode-telegram-bot (>=22.14.0). The bot would segfault silently on startup."
+    exit 1
+fi
+log "Node.js $NODE_FULL OK"
 
 log "Installing opencode-telegram-bot..."
 npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
