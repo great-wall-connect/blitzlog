@@ -1390,6 +1390,36 @@ class TestNodeVersionGuard(unittest.TestCase):
         self.assertIn('"$NODE_MAJOR" -lt 22', user_data)
         self.assertNotIn('"$NODE_MAJOR" -lt 20', user_data)
 
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_check_uses_usr_local_node(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("/usr/local/bin/node --version", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_node_reinstalled_before_bot_install(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        reinstall_pos = user_data.index(
+            "Reinstalling Node.js 22 to /usr/local for the bot installer"
+        )
+        guard_pos = user_data.index("Verifying Node.js meets opencode-telegram-bot")
+        install_pos = user_data.index("npm install -g @grinev/opencode-telegram-bot")
+        self.assertLess(reinstall_pos, guard_pos)
+        self.assertLess(guard_pos, install_pos)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_bot_install_prefixes_usr_local_path(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn(
+            "PATH=/usr/local/bin:$PATH npm install -g @grinev/opencode-telegram-bot",
+            user_data,
+        )
+
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")

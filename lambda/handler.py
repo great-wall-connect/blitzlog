@@ -1262,17 +1262,23 @@ fi
 log "Installing build tools for native npm modules..."
 dnf install -y gcc-c++ make python3
 
+log "Reinstalling Node.js 22 to /usr/local for the bot installer..."
+curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.xz \
+    | tar -xJ -C /usr/local --strip-components=1
+log "/usr/local/bin/node is now: $(/usr/local/bin/node --version)"
+
 log "Verifying Node.js meets opencode-telegram-bot requirements..."
-NODE_FULL=$(node --version 2>/dev/null | tr -d 'v' || echo "0.0.0")
+NODE_FULL=$(/usr/local/bin/node --version 2>/dev/null | tr -d 'v' || echo "0.0.0")
+NODE_MAJOR=$(printf '%s' "$NODE_FULL" | cut -d. -f1)
 NODE_MINOR=$(printf '%s' "$NODE_FULL" | cut -d. -f2)
 if [ "$NODE_MAJOR" -lt 22 ] || {{ [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 14 ]; }}; then
-    log "ERROR: Node.js $NODE_FULL is below the minimum required by @grinev/opencode-telegram-bot (>=22.14.0). The bot would segfault silently on startup."
+    log "ERROR: Node.js $NODE_FULL at /usr/local/bin is below the minimum required by @grinev/opencode-telegram-bot (>=22.14.0). The bot would segfault silently on startup."
     exit 1
 fi
 log "Node.js $NODE_FULL OK"
 
 log "Installing opencode-telegram-bot..."
-npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
+PATH=/usr/local/bin:$PATH npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
 
 log "Configuring opencode-telegram-bot..."
 mkdir -p /root/.config/opencode-telegram-bot
