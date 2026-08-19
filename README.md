@@ -49,7 +49,7 @@ Two modes:
 | `infra/lambda.tf` | Lambda function, CloudWatch logs, DLQ |
 | `infra/apigateway.tf` | API Gateway HTTP API as webhook endpoint |
 | `infra/alerting.tf` | SNS topic, SQS DLQ, CloudWatch alarm |
-| `infra/user-pool/` | Per-user Telegram bot pool module (assisted mode) |
+| `infra/user-pool/` | Per-user Terraform module (local state) that provisions that user's Telegram bot pool into SSM Parameter Store |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
 
@@ -133,6 +133,113 @@ Register in your GitHub repo → **Settings → Webhooks**:
 ### 4. Label an issue
 
 Label any issue with **`autonomous`** to trigger the autonomous pipeline, or **`assisted`** (with a configured Telegram bot pool) to start an interactive session.
+
+---
+
+## Per-user bot pool setup (assisted mode)
+
+The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
+
+### Prerequisites
+
+- Terraform >= 1.0.
+- AWS credentials for an IAM principal with permissions scoped to **your own** user namespace under `/blitzlog/users/<your-github-login>/`:
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "BlitzlogUserPoolSelfService",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:GetParametersByPath",
+        "ssm:DescribeParameters"
+      ],
+      "Resource": "arn:aws:ssm:*:*:parameter/blitzlog/users/${aws:username}/*"
+    }]
+  }
+  ```
+  The `${aws:username}` placeholder resolves to your IAM user/role session name, which must match (or be mapped to) your GitHub login. If you log in with a different IAM principal name, either rename it or expand the resource pattern. The shared infra owner may also grant broader SSM access under `arn:aws:ssm:*:*:parameter/blitzlog/users/*` if self-service scoping is too restrictive.
+
+### Step 1 — Create your tfvars
+
+From the repository root:
+
+```bash
+cp infra/user-pool/terraform.tfvars.example infra/user-pool/terraform.tfvars
+```
+
+Open `infra/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
+
+```hcl
+owner_login              = "your-github-username"   # exactly as it appears in the issue sender
+telegram_allowed_user_id = "12345678"               # your Telegram numeric user ID
+
+telegram_bot_tokens = {
+  escobar = "<bot-token-from-botfather>"
+  bot2    = "<another-bot-token>"
+}
+```
+
+- `owner_login` must match the `sender.login` field on the issues you'll trigger, because the Lambda routes bots by sender (`list_bot_pool` in `lambda/handler.py:37`).
+- `telegram_allowed_user_id` is the single Telegram user ID permitted to interact with any bot in your pool. The Lambda refuses to acquire a bot if this parameter is missing (see `lambda/handler.py:51`).
+- `telegram_bot_tokens` is a map of friendly bot names to BotFather tokens. Each entry becomes one `SecureString` SSM parameter; the map's keys are the bot names the EC2 user-data script receives (`bot_name` in `lambda/handler.py:1140`).
+
+### Step 2 — Apply
+
+```bash
+cd infra/user-pool
+terraform init
+terraform plan    # reviews the SSM parameters that will be created
+terraform apply   # type 'yes' to confirm
+```
+
+What gets created in AWS (all under `/blitzlog/users/<owner_login>/`):
+
+| Parameter name                                | Type        |
+|-----------------------------------------------|-------------|
+| `telegram/allowed-user-id`                    | `String`    |
+| `telegram/pool/<each key of telegram_bot_tokens>` | `SecureString` |
+
+### Step 3 — Verify
+
+```bash
+aws ssm get-parameters-by-path \
+  --path "/blitzlog/users/<owner_login>/telegram/" \
+  --recursive --with-decryption \
+  --query "Parameters[].Name"
+```
+
+You should see your `allowed-user-id` parameter and one `pool/<bot>` parameter per bot.
+
+### Rotate, add, or remove bots
+
+1. Edit `infra/user-pool/terraform.tfvars`.
+2. `terraform plan` — review the diff.
+3. `terraform apply` — adds are created, renames move parameters, deletions remove them.
+
+To add a bot, add a new key/token pair. To remove one, delete the line. To rotate (leaked) tokens, replace the value of an existing key.
+
+### Tear down
+
+```bash
+cd infra/user-pool
+terraform destroy
+```
+
+Removes all SSM parameters under `/blitzlog/users/<owner_login>/`. The local `terraform.tfstate` is then safe to delete.
+
+### Migrating from a prior S3-backed state
+
+If you have a stale remote state file from an earlier version of this module, migrate it on the next `terraform init`:
+
+```bash
+terraform init -migrate-state
+```
+
+Or, since the resolution is deterministic from `terraform.tfvars`, simply delete the local `.terraform/`, `terraform.tfstate`, and `terraform.tfstate.backup`, then re-run `terraform init && terraform apply` to recreate the local cache.
 
 ---
 

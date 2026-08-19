@@ -22,6 +22,9 @@ once the project reaches `1.0.0`.
 - `resume-aborted-session` OpenCode skill.
 - Open-source boilerplate: LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY.
 
+### Changed
+- Per-user bot pool module (`infra/user-pool/`) uses local Terraform state instead of a shared S3 backend, eliminating S3 state-key collisions across users and the central DynamoDB lock-table requirement. `terraform.tfvars` remains the per-user source of truth; the local `terraform.tfstate` is a regenerable cache of resolved SSM ARNs.
+
 ### Notes
 - This is the first public release. The git history is intentionally clean — LICENSE is commit 1, the full import is commit 2.
 - The internal pre-release history (private repository) is not part of this codebase and contains different commit authors.

@@ -20,9 +20,10 @@ agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket hol
 
 # Per-user Telegram bot pools (assisted mode)
 # ------------------------------------------------------------------------------
-# Shared infra no longer holds Telegram bot tokens or allowed user IDs.
-# Each user provisions their own pool via infra/user-pool/ — see
-# infra/user-pool/terraform.tfvars.example for the per-user template.
+# Shared infra holds no Telegram bot tokens or allowed user IDs.
+# Each user provisions their own pool by running infra/user-pool/ locally
+# (no shared S3 backend, no DynamoDB lock table) — see README.md,
+# "Per-user bot pool setup (assisted mode)", for the full walkthrough.
 
 # Terraform state bucket (supplied at init time, not via tfvars):
 # ------------------------------------------------------------------------------
