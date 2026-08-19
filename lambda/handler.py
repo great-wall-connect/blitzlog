@@ -1183,13 +1183,9 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Installing system packages..."
 {_install_system_packages_script()}
 
-log "Installing Node.js 20..."
-NODE_MAJOR=$(node --version 2>/dev/null | cut -d. -f1 | tr -d 'v' || echo "0")
-if [ "$NODE_MAJOR" -lt 20 ]; then
-    log "Node.js $NODE_MAJOR detected, installing Node.js 20 via binary..."
-    curl -fsSL https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-arm64.tar.xz \
-        | tar -xJ -C /usr/local --strip-components=1
-fi
+log "Installing Node.js 22 via dnf..."
+dnf install -y nodejs22 nodejs22-npm 2>&1 | tail -5
+alternatives --set node /usr/bin/node-22
 node --version
 npm --version
 
@@ -1258,12 +1254,6 @@ if [ "$RESUMED" = "true" ] && [ -f /tmp/session-import.json ]; then
     opencode import /tmp/session-import.json 2>&1 || log "WARNING: Session import failed"
     log "Session imported from S3"
 fi
-
-log "Installing build tools for native npm modules..."
-dnf install -y gcc-c++ make python3
-
-log "Installing opencode-telegram-bot..."
-npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
 
 log "Configuring opencode-telegram-bot..."
 mkdir -p /root/.config/opencode-telegram-bot
@@ -1431,7 +1421,7 @@ systemctl start blitzlog-cleanup.service
 
 log "Starting opencode-telegram-bot (foreground)..."
 cd /workspace/repo
-opencode-telegram start 2>&1 | tee -a "$LOG_FILE"
+npx -y @grinev/opencode-telegram-bot@latest start 2>&1 | tee -a "$LOG_FILE"
 """
 
 

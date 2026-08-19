@@ -1343,6 +1343,68 @@ class TestGetGithubAppToken(unittest.TestCase):
         self.assertEqual(call_kwargs["json"], {"repositories": ["repo"]})
 
 
+class TestNodeVersionGuard(unittest.TestCase):
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_installs_node_22_via_dnf(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("dnf install -y nodejs22 nodejs22-npm", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_sets_node_alternative_to_22(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("alternatives --set node /usr/bin/node-22", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_invokes_bot_via_npx(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest start", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_tarball_install(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("nodejs.org/dist/v", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_bot_install_line(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("npm install -g @grinev/opencode-telegram-bot", user_data)
+        self.assertNotIn("npm-22 install -g @grinev/opencode-telegram-bot", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_build_tools_install(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("dnf install -y gcc-c++ make python3", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_hardcoded_cli_path(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn(
+            "/usr/local/lib/node_modules/@grinev/opencode-telegram-bot/dist/cli.js",
+            user_data,
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_shebang_patch(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("sed -i '1c", user_data)
+
+
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")
     @patch("handler.launch_ec2_spot_instance", return_value="i-123")
