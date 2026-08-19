@@ -1420,6 +1420,34 @@ class TestNodeVersionGuard(unittest.TestCase):
             user_data,
         )
 
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_patches_bot_shebang_to_absolute_node(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn(
+            "sed -i '1c #!/usr/local/bin/node' /usr/local/bin/opencode-telegram",
+            user_data,
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_shebang_patch_runs_after_install_and_before_configure(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        install_pos = user_data.index("npm install -g @grinev/opencode-telegram-bot")
+        patch_pos = user_data.index("Patching bot shebang to /usr/local/bin/node")
+        configure_pos = user_data.index("Configuring opencode-telegram-bot")
+        self.assertLess(install_pos, patch_pos)
+        self.assertLess(patch_pos, configure_pos)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_shebang_patch_handles_missing_binary(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("WARNING: /usr/local/bin/opencode-telegram not found", user_data)
+
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")

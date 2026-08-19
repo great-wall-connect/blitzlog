@@ -1280,6 +1280,14 @@ log "Node.js $NODE_FULL OK"
 log "Installing opencode-telegram-bot..."
 PATH=/usr/local/bin:$PATH npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
 
+log "Patching bot shebang to /usr/local/bin/node..."
+if [ -f /usr/local/bin/opencode-telegram ]; then
+    sed -i '1c #!/usr/local/bin/node' /usr/local/bin/opencode-telegram
+    log "Bot shebang: $(head -1 /usr/local/bin/opencode-telegram)"
+else
+    log "WARNING: /usr/local/bin/opencode-telegram not found after install"
+fi
+
 log "Configuring opencode-telegram-bot..."
 mkdir -p /root/.config/opencode-telegram-bot
 cat > /root/.config/opencode-telegram-bot/.env <<TELEGRAMCFG
