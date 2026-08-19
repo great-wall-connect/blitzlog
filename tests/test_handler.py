@@ -1347,16 +1347,16 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_installs_node_22_via_dnf(self):
+    def test_assisted_installs_node_24_via_dnf(self):
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("dnf install -y nodejs22 nodejs22-npm", user_data)
+        self.assertIn("dnf install -y nodejs24 nodejs24-npm", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_sets_node_alternative_to_22(self):
+    def test_assisted_sets_node_alternative_to_24(self):
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("alternatives --set node /usr/bin/node-22", user_data)
+        self.assertIn("alternatives --set node /usr/bin/node-24", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}

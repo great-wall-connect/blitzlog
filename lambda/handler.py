@@ -1183,9 +1183,9 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Installing system packages..."
 {_install_system_packages_script()}
 
-log "Installing Node.js 22 via dnf..."
-dnf install -y nodejs22 nodejs22-npm 2>&1 | tail -5
-alternatives --set node /usr/bin/node-22
+log "Installing Node.js 24 via dnf..."
+dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
+alternatives --set node /usr/bin/node-24
 node --version
 npm --version
 
