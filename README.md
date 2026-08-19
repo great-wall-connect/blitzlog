@@ -178,8 +178,8 @@ owner_login              = "your-github-username"   # exactly as it appears in t
 telegram_allowed_user_id = "12345678"               # your Telegram numeric user ID
 
 telegram_bot_tokens = {
-  escobar = "<bot-token-from-botfather>"
-  bot2    = "<another-bot-token>"
+  bot1 = "<bot-token-from-botfather>"
+  bot2 = "<another-bot-token>"
 }
 ```
 
