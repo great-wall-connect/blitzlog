@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 96 96" role="img" aria-label="Blitzlog">
+  <title>Blitzlog</title>
+  <desc>Blitzlog project mark. Copyright © 2026 Great Wall Connect Limited. Licensed under the MIT License. See LICENSE in the project root.</desc>
+  <rect width="96" height="96" rx="20" fill="#0e0e10"/>
+  <path d="M 10 86 C 10 60, 35 58, 90 60" fill="none" stroke="#f5d90a" stroke-width="2" stroke-opacity="0.25" stroke-linecap="round"/>
+  <path d="M52 14 L26 52 L42 52 L34 82 L66 40 L48 40 L60 14 Z" fill="#f5d90a" stroke="#f5d90a" stroke-linejoin="round" stroke-width="2"/>
+  <text x="80" y="80" text-anchor="end" fill="#f5d90a" font-family="'Poppins', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-weight="700" font-size="18" letter-spacing="-0.5">log</text>
+</svg>

@@ -62,12 +62,6 @@ variable "opencode_api_key" {
   sensitive   = true
 }
 
-variable "tf_state_bucket" {
-  description = "S3 bucket for Terraform state backend. Required; supply via terraform.tfvars or a -backend.hcl file."
-  type        = string
-  default     = ""
-}
-
 variable "agent_logs_bucket_name" {
   description = "Name of the S3 bucket that stores agent logs and session archives. Required; supply via terraform.tfvars."
   type        = string
