@@ -1306,6 +1306,21 @@ else
     log "WARNING: Could not auto-select project, user will need /projects"
 fi
 
+log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
+npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
+PRE_WARM_EXIT=$?
+if [ "$PRE_WARM_EXIT" -ne 0 ]; then
+    log "WARNING: Pre-warm failed with exit code $PRE_WARM_EXIT; will attempt bot start anyway and notify user"
+    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+        -d chat_id="${{TELEGRAM_USER_ID}}" \\
+        -d parse_mode="Markdown" \\
+        -d text="Assisted agent cannot be started [Bot: {bot_name}]
+
+Repo: ${{REPO}}
+[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
+Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
+fi
+
 log "Sending Telegram notification..."
 ISSUE_TITLE=$(gh issue view $ISSUE_NUMBER --json title --jq .title 2>/dev/null || echo "unknown")
 RESUME_STATUS=""

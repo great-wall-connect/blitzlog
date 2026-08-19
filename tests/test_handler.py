@@ -1404,6 +1404,129 @@ class TestNodeVersionGuard(unittest.TestCase):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertNotIn("sed -i '1c", user_data)
 
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warms_npx_cache(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest status", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_before_notification(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        pre_warm_pos = user_data.index("Pre-warming opencode-telegram-bot")
+        notification_pos = user_data.index("Sending Telegram notification")
+        self.assertLess(pre_warm_pos, notification_pos)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_runs_once(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertEqual(
+            user_data.count("npx -y @grinev/opencode-telegram-bot@latest status"),
+            1,
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_uses_status_subcommand(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest status", user_data)
+        self.assertNotIn(
+            "npx -y @grinev/opencode-telegram-bot@latest --help", user_data
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_captures_exit_code(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("PRE_WARM_EXIT=$?", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_failure_sends_telegram(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos:]
+        self.assertIn("Assisted agent cannot be started", failure_block)
+        self.assertIn("sendMessage", failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_uses_real_chat_id(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos:]
+        self.assertIn('chat_id="${TELEGRAM_USER_ID}"', failure_block)
+        self.assertIn("bot${TELEGRAM_BOT_TOKEN}", failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_continues_on_failure(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        failure_end = user_data.index("Sending Telegram notification")
+        bot_install = user_data.index(
+            "npx -y @grinev/opencode-telegram-bot@latest start", failure_end
+        )
+        self.assertGreater(bot_install, failure_end)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_log_written_to_var_log(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn("> /var/log/pre-warm.log", user_data)
+        self.assertNotIn("/tmp/pre-warm.log", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_failure_includes_repo_context(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos : guard_pos + 1500]
+        self.assertIn("Repo: ${REPO}", failure_block)
+        self.assertIn(
+            "[Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}]",
+            failure_block,
+        )
+        self.assertIn("Mode: Assisted (interactive via Telegram)", failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_failure_includes_resume_status(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos : guard_pos + 1500]
+        self.assertIn("$RESUME_STATUS", failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_failure_uses_markdown(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos : guard_pos + 1500]
+        self.assertIn('parse_mode="Markdown"', failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_pre_warm_failure_omits_log_path_hint(self):
+        user_data = build_assisted_user_data("owner/repo", 42)
+        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
+        failure_block = user_data[guard_pos : guard_pos + 1500]
+        self.assertNotIn("/var/log", failure_block)
+
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")
