@@ -1183,13 +1183,9 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Installing system packages..."
 {_install_system_packages_script()}
 
-log "Installing Node.js 20..."
-NODE_MAJOR=$(node --version 2>/dev/null | cut -d. -f1 | tr -d 'v' || echo "0")
-if [ "$NODE_MAJOR" -lt 20 ]; then
-    log "Node.js $NODE_MAJOR detected, installing Node.js 20 via binary..."
-    curl -fsSL https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-arm64.tar.xz \
-        | tar -xJ -C /usr/local --strip-components=1
-fi
+log "Installing Node.js 24 via dnf..."
+dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
+alternatives --set node /usr/bin/node-24
 node --version
 npm --version
 
@@ -1259,12 +1255,6 @@ if [ "$RESUMED" = "true" ] && [ -f /tmp/session-import.json ]; then
     log "Session imported from S3"
 fi
 
-log "Installing build tools for native npm modules..."
-dnf install -y gcc-c++ make python3
-
-log "Installing opencode-telegram-bot..."
-npm install -g @grinev/opencode-telegram-bot 2>&1 | tail -5
-
 log "Configuring opencode-telegram-bot..."
 mkdir -p /root/.config/opencode-telegram-bot
 cat > /root/.config/opencode-telegram-bot/.env <<TELEGRAMCFG
@@ -1314,6 +1304,21 @@ SETTINGS_EOF
     fi
 else
     log "WARNING: Could not auto-select project, user will need /projects"
+fi
+
+log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
+npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
+PRE_WARM_EXIT=$?
+if [ "$PRE_WARM_EXIT" -ne 0 ]; then
+    log "WARNING: Pre-warm failed with exit code $PRE_WARM_EXIT; will attempt bot start anyway and notify user"
+    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+        -d chat_id="${{TELEGRAM_USER_ID}}" \\
+        -d parse_mode="Markdown" \\
+        -d text="Assisted agent cannot be started [Bot: {bot_name}]
+
+Repo: ${{REPO}}
+[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
+Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
 fi
 
 log "Sending Telegram notification..."
@@ -1431,7 +1436,7 @@ systemctl start blitzlog-cleanup.service
 
 log "Starting opencode-telegram-bot (foreground)..."
 cd /workspace/repo
-opencode-telegram start 2>&1 | tee -a "$LOG_FILE"
+npx -y @grinev/opencode-telegram-bot@latest start 2>&1 | tee -a "$LOG_FILE"
 """
 
 
