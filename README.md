@@ -7,7 +7,7 @@
 
 An autonomous coding pipeline for GitHub. Label an issue — Blitzlog spins up an EC2 spot instance, runs an OpenCode agent on your repo, opens a pull request, and shuts itself down.
 
-![Blitzlog demo — issue to PR end-to-end](assets/blitzlog-demo.mp4)
+![Blitzlog demo — issue to PR end-to-end](assets/blitzlog-demo.gif)
 
 ---
 
