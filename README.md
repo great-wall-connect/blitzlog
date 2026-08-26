@@ -292,6 +292,109 @@ For vulnerability disclosure, see [SECURITY.md](SECURITY.md).
 
 ---
 
+## Troubleshooting
+
+Symptom → diagnostic step → fix for the failure modes operators hit most often.
+
+### HMAC signature mismatch
+
+**Symptom:** Webhook deliveries fail with HTTP `401` and Lambda returns `{"error": "Invalid signature"}`.
+
+**Diagnose:** Compare the secret configured on the GitHub webhook with the value stored in SSM:
+
+```bash
+# GitHub: repo → Settings → Webhooks → your webhook → Secret
+# SSM:
+aws ssm get-parameter \
+  --name "/blitzlog/github-webhook/secret" \
+  --with-decryption \
+  --query "Parameter.Value" \
+  --output text
+```
+
+In CloudWatch (`/aws/lambda/blitzlog`), look for `Signature present: True` followed by the invalid-signature path.
+
+**Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/`, and pasting the new secret into GitHub.
+
+### Label added but no instance launched
+
+**Symptom:** You labeled an issue and nothing happens — no EC2 instance, no PR branch.
+
+**Diagnose:** Confirm the label is exactly `autonomous` or `assisted` (case-sensitive). In CloudWatch Logs Insights / log filter, search for `No relevant label` — the Lambda returns HTTP `200` with that body when the issue event has no trigger label (see `lambda/handler.py`).
+
+**Fix:** Remove and re-add the correct label, or use the exact names above. If the label is correct but still no launch, check later log lines for bot-pool or spot-capacity errors.
+
+### `No bot pool configured for user X`
+
+**Symptom:** Assisted mode fails; Lambda logs `No bot pool configured for user <login>` (and the API body reports the same).
+
+**Diagnose:** `owner_login` in `infra/user-pool/terraform.tfvars` must match the issue `sender.login` exactly. Verify SSM under that login:
+
+```bash
+aws ssm get-parameters-by-path \
+  --path "/blitzlog/users/<owner_login>/telegram/" \
+  --recursive --with-decryption \
+  --query "Parameters[].Name"
+```
+
+You should see `.../telegram/allowed-user-id` and at least one `.../telegram/pool/<bot>`.
+
+**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, re-run `terraform apply` in `infra/user-pool/`, and confirm the path above exists.
+
+### All bot pool bots locked
+
+**Symptom:** Assisted launches fail because every bot in the pool is held; logs show bots locked or `All bots in pool for user … are locked`.
+
+**Diagnose:** Locks live in the agent logs bucket under `bot-pool-locks/<sender_login>/<bot_name>.json`. Locks older than `BOT_POOL_LOCK_TTL_HOURS=4` (`lambda/handler.py:26`) are treated as stale and ignored; younger locks block acquisition.
+
+**Fix:** Wait for TTL expiry, or clear a stuck lock manually:
+
+```bash
+aws s3 rm \
+  "s3://<agent_logs_bucket>/bot-pool-locks/<sender_login>/<bot_name>.json" \
+  --region <your-region>
+```
+
+List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recursive` if you are unsure which key is stuck.
+
+### `DescribeSpotPriceHistory` empty / capacity errors
+
+**Symptom:** Spot price lookup returns nothing, or every spot launch attempt fails; capacity / availability errors in Lambda logs.
+
+**Diagnose:** Blitzlog prefers spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (`SPOT_INSTANCE_TYPES` in `lambda/handler.py`). Some regions have little or no spot capacity for `t4g.*`.
+
+**Fix:** Switch `aws_region` in `infra/terraform.tfvars` to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
+
+### OpenCode provider 401 / 1008 / 429
+
+**Symptom:** The EC2 agent starts but the LLM call fails; no useful PR.
+
+**Diagnose:** Bootstrap already emits searchable `ACTIONABLE:` lines via `_decode_api_errors_script` in `lambda/handler.py`. Grep agent logs (CloudWatch on the instance trail, or `s3://<agent_logs_bucket>/<repo>/issue/<N>/logs/...`) for:
+
+| Code | Meaning |
+|---|---|
+| `401` | Unauthorized / invalid API key |
+| `1008` | Insufficient balance / zero credits |
+| `429` | Rate limit / quota exceeded |
+
+**Fix:** Follow the matching `ACTIONABLE:` lines — rotate `/blitzlog/opencode/api-key` in SSM and re-apply Terraform for `401`; top up the provider plan for `1008`; wait or upgrade for `429`.
+
+### Lambda timeouts
+
+**Symptom:** Invocations fail after ~3 minutes; messages appear on the SQS DLQ `blitzlog-lambda-dlq`.
+
+**Diagnose:** Lambda `timeout = 180` in `infra/lambda.tf`. Work that runs longer than that (slow GitHub App auth, SSM, or especially EC2 spot launch retries across AZs) will time out. Check CloudWatch `/aws/lambda/blitzlog` for the truncated request, then inspect DLQ:
+
+```bash
+aws sqs receive-message \
+  --queue-url "$(aws sqs get-queue-url --queue-name blitzlog-lambda-dlq --query QueueUrl --output text)" \
+  --max-number-of-messages 5
+```
+
+**Fix:** Address the underlying hang (spot capacity, SSM/GitHub connectivity). Raising the timeout is a last resort and should stay aligned with how long a single webhook handler is expected to block before returning.
+
+---
+
 ## Monitoring
 
 - Lambda errors trigger a CloudWatch alarm → SNS → email (via `alert_email`).
