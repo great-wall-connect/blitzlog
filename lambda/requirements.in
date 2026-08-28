@@ -1,0 +1,6 @@
+# Lambda runtime dependencies (compiled to requirements.txt by pip-compile).
+# Edit this file to add or upgrade runtime packages.
+boto3
+PyJWT
+cryptography
+requests

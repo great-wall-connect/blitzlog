@@ -43,6 +43,10 @@ mise install
 # Install Python deps
 pip install -r requirements.txt
 
+# Install pre-commit hooks (gitleaks, terraform fmt, ruff, black)
+pip install pre-commit
+pre-commit install
+
 # Run lint and tests
 mise run lint
 mise run test
@@ -50,6 +54,31 @@ mise run test
 # Build the Lambda package locally
 mise run build
 ```
+
+### Updating Python dependencies
+
+Direct dependencies live in `requirements-dev.in` and `lambda/requirements.in`. After editing an `.in` file, regenerate the hash-locked `.txt` next to it:
+
+```bash
+pip install pip-tools
+pip-compile --allow-unsafe --generate-hashes --upgrade lambda/requirements.in
+pip-compile --allow-unsafe --generate-hashes --upgrade requirements-dev.in
+```
+
+Commit both the `.in` and the regenerated `.txt` together. CI installs from the locked `.txt` files only.
+
+### Updating Terraform providers
+
+Provider versions are pinned in `infra/.terraform.lock.hcl` and `infra/user-pool/.terraform.lock.hcl`. To bump a provider deliberately (e.g. as part of a release):
+
+```bash
+cd infra
+terraform init -upgrade
+cd user-pool
+terraform init -upgrade
+```
+
+Otherwise `terraform init` should be a no-op — the lockfile is the source of truth.
 
 ### Pull request process
 

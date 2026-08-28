@@ -2,7 +2,6 @@
 infra/.terraform/
 infra/*.tfstate
 infra/*.tfstate.*
-infra/.terraform.lock.hcl
 infra/lambda_function.zip
 infra/build/
 infra/*-backend.hcl

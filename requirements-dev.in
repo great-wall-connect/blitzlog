@@ -1,0 +1,7 @@
+# Development dependencies (compiled to requirements-dev.txt by pip-compile).
+# Edit this file to add or upgrade dev packages.
+pytest
+pytest-cov
+ruff
+black
+pip-tools
