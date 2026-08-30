@@ -347,15 +347,39 @@ You should see `.../telegram/allowed-user-id` and at least one `.../telegram/poo
 
 **Diagnose:** Locks live in the agent logs bucket under `bot-pool-locks/<sender_login>/<bot_name>.json`. Locks older than `BOT_POOL_LOCK_TTL_HOURS=4` (`lambda/handler.py:26`) are treated as stale and ignored; younger locks block acquisition.
 
-**Fix:** Wait for TTL expiry, or clear a stuck lock manually:
+**Fix:** Wait for TTL expiry, or use the `scripts/release-bot-lock.py` helper to inspect and clear stuck locks without needing to construct S3 keys by hand.
+
+Release a single bot's lock:
 
 ```bash
+python scripts/release-bot-lock.py \
+  --sender <sender_login> \
+  --bot <bot_name> \
+  --bucket <agent_logs_bucket>
+```
+
+Release all locks for a sender at once:
+
+```bash
+python scripts/release-bot-lock.py \
+  --sender <sender_login> \
+  --all \
+  --bucket <agent_logs_bucket>
+```
+
+The script lists every lock it finds (bot name, acquisition time, linked repo and issue) and asks for confirmation before deleting. Pass `-y` / `--yes` to skip the prompt in automation. The bucket defaults to `$S3_LOGS_BUCKET` and the region to `$AWS_REGION` / `$AWS_DEFAULT_REGION` if those environment variables are set.
+
+If you prefer the raw AWS CLI, you can still remove a key directly:
+
+```bash
+# List all locks first
+aws s3 ls "s3://<agent_logs_bucket>/bot-pool-locks/" --recursive
+
+# Remove a specific lock
 aws s3 rm \
   "s3://<agent_logs_bucket>/bot-pool-locks/<sender_login>/<bot_name>.json" \
   --region <your-region>
 ```
-
-List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recursive` if you are unsure which key is stuck.
 
 ### `DescribeSpotPriceHistory` empty / capacity errors
 
