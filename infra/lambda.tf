@@ -10,7 +10,6 @@ resource "null_resource" "lambda_build" {
   triggers = {
     handler      = filemd5("${path.module}/../lambda/handler.py")
     requirements = filemd5("${path.module}/../lambda/requirements.txt")
-    timestamp    = timestamp()
   }
 
   provisioner "local-exec" {
