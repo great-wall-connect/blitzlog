@@ -10,6 +10,10 @@ jobs:
   gitleaks:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
+    # Skip Dependabot PRs — they only modify lockfiles and never introduce
+    # secrets, so the gitleaks scan is pure noise (and Dependabot runs can't
+    # access repo secrets without an extra Dependabot-secrets entry).
+    if: github.actor != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
