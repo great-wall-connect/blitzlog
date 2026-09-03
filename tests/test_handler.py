@@ -15,6 +15,7 @@ from handler import (
     _PERIODIC_AUTOSAVE_PLUGIN_JS,
     _SHUTDOWN_TOOL_JS,
     _SPOT_WATCHDOG_PLUGIN_JS,
+    MISE_VERSION,
     _build_s3_downloader_script,
     _configure_git_script,
     _decode_api_errors_script,
@@ -780,6 +781,21 @@ class TestToolchainBootstrapScript(unittest.TestCase):
         script = _install_toolchain_script()
         self.assertIn("mise.run", script)
         self.assertIn("mise install", script)
+        self.assertIn(f'MISE_VERSION="{MISE_VERSION}"', script)
+
+    def test_mise_version_constant_is_pinned(self):
+
+        self.assertRegex(MISE_VERSION, r"\Av\d{4}\.\d+\.\d+\Z")
+        self.assertNotEqual(
+            MISE_VERSION,
+            "v2026.7.0",
+            "v2026.7.0 requires GLIBC_2.38/2.39 and breaks AL2023",
+        )
+
+    def test_script_pins_mise_version_env(self):
+        script = _install_toolchain_script()
+        self.assertIn("MISE_VERSION=", script)
+        self.assertNotIn('MISE_VERSION="${MISE_VERSION}"', script)
 
     def test_script_checks_config_files(self):
         script = _install_toolchain_script()
