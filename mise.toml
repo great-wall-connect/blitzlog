@@ -1,7 +1,5 @@
 [tools]
 python = "3.12"
-terraform = "1.9"
-node = "20"
 
 [tasks.test]
 description = "Run Python unit tests"

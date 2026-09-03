@@ -1553,54 +1553,14 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_installs_node_24_via_tarball(self):
-        # Direct tarball from nodejs.org — bypasses AL2023 dnf repo gaps that
-        # left the previous dnf install silently failing on some AMIs (set -eu
-        # with `dnf install | tail -5` returned tail's exit code, masking dnf
-        # failures; the bot then ran on the AL2023 default Node v20, which
-        # the upstream Telegram bot rejects with "requires Node.js 22.14+").
+    def test_assisted_installs_node_24_via_dnf(self):
+        # dnf install of nodejs24 is the supported path on AL2023. The
+        # mise.toml `[tools] node = ...` entry would otherwise reinstall
+        # Node v20 via mise shims and mask this install — that's why
+        # `test_mise_toml_does_not_pin_node` exists.
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn(
-            "https://nodejs.org/dist/v24.6.0/node-v24.6.0-linux-arm64.tar.xz",
-            user_data,
-        )
-        self.assertIn("tar -xJ -C /usr/local --strip-components=1", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_guards_node_install_by_major_version(self):
-        # Idempotency: skip the download when the AL2023 base image already
-        # ships a new-enough Node (e.g., future AMIs).
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("NODE_MAJOR=$(node --version", user_data)
-        self.assertIn('if [ "$NODE_MAJOR" -lt 24 ]', user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_dnf_node_install(self):
-        # Regression guard: the previous dnf-based install silently failed on
-        # some AL2023 AMIs (nodejs24 not in default repos + `| tail -5`
-        # masking the exit code). If anyone reverts to dnf, this fires.
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("dnf install -y nodejs24", user_data)
-        self.assertNotIn("dnf install -y nodejs22", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_node_install_exports_path(self):
-        # The tarball install places Node v24 at /usr/local/bin/node, but the
-        # bootstrap script's PATH (cloud-init / systemd context) doesn't
-        # always include /usr/local/bin first — in which case downstream
-        # commands like `node`, `npm`, and the bot launch via `npx` still
-        # resolve to /usr/bin/node (v20). Force it.
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertRegex(
-            user_data,
-            r"export PATH=\"/usr/local/bin:\$PATH\"",
-        )
+        self.assertIn("dnf install -y nodejs24 nodejs24-npm", user_data)
+        self.assertIn("alternatives --set node /usr/bin/node-24", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -1763,6 +1723,29 @@ class TestNodeVersionGuard(unittest.TestCase):
         guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
         failure_block = user_data[guard_pos : guard_pos + 1500]
         self.assertNotIn("/var/log", failure_block)
+
+
+class TestMiseToml(unittest.TestCase):
+    @staticmethod
+    def _read_mise_toml():
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        with open(os.path.join(repo_root, "mise.toml"), "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_mise_toml_does_not_pin_node(self):
+        # blitzlog itself is Python; Node is brought in at runtime by the
+        # user-data's `dnf install nodejs24` plus the bot's `npx`. Pinning
+        # Node in mise.toml reinstalls Node (typically v20) and shims it ahead
+        # of /usr/bin/node, masking dnf's install — that's what made the bot
+        # refuse to start with "requires Node.js 22.14+, 23.6+, or 24+".
+        content = self._read_mise_toml()
+        self.assertNotRegex(content, r"^\s*node\s*=", msg=content)
+
+    def test_mise_toml_does_not_pin_terraform(self):
+        # The bootstrap doesn't invoke the Terraform CLI; pinning it just
+        # adds a needless install on the EC2 instance.
+        content = self._read_mise_toml()
+        self.assertNotRegex(content, r"^\s*terraform\s*=", msg=content)
 
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
