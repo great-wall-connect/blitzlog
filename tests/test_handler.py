@@ -21,6 +21,7 @@ from handler import (
     _decode_api_errors_script,
     _install_toolchain_script,
     _install_whisper_stt_script,
+    _preflight_local_llm_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
     _write_periodic_autosave_plugin_script,
@@ -29,7 +30,9 @@ from handler import (
     build_assisted_user_data,
     build_autonomous_user_data,
     get_az_subnet_map,
+    get_local_llm_config,
     get_spot_prices,
+    parse_telegram_decision,
 )
 
 
@@ -2751,8 +2754,10 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler.get_github_app_token", return_value="ghp_test")
     @patch("handler.verify_github_signature", return_value=True)
     @patch("handler.get_ssm_param", return_value="secret")
+    @patch("handler.get_local_llm_config", return_value=None)
     def test_assisted_calls_acquire_bot_token_with_sender(
         self,
+        mock_local_llm,
         mock_ssm,
         mock_sig,
         mock_gh,
@@ -2843,8 +2848,9 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler.verify_github_signature", return_value=True)
     @patch("handler.get_ssm_param", return_value="secret")
     @patch("handler.list_bot_pool")
+    @patch("handler.get_local_llm_config", return_value=None)
     def test_autonomous_does_not_call_acquire(
-        self, mock_pool, mock_ssm, mock_sig, mock_gh, mock_launch
+        self, mock_local_llm, mock_pool, mock_ssm, mock_sig, mock_gh, mock_launch
     ):
         from handler import lambda_handler
 
@@ -2863,6 +2869,545 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
         result = lambda_handler(event, None)
         self.assertEqual(result["statusCode"], 200)
         mock_pool.assert_not_called()
+
+
+class TestParseTelegramDecision(unittest.TestCase):
+    def test_empty_result_returns_none(self):
+        self.assertIsNone(
+            parse_telegram_decision({"result": []}, {"retry", "cloud", "abort"})
+        )
+
+    def test_missing_result_returns_none(self):
+        self.assertIsNone(parse_telegram_decision({}, {"retry", "cloud", "abort"}))
+
+    def test_callback_retry(self):
+        payload = {"result": [{"callback_query": {"data": "retry"}}]}
+        self.assertEqual(
+            parse_telegram_decision(payload, {"retry", "cloud", "abort"}),
+            "retry",
+        )
+
+    def test_callback_cloud(self):
+        payload = {"result": [{"callback_query": {"data": "cloud"}}]}
+        self.assertEqual(
+            parse_telegram_decision(payload, {"retry", "cloud", "abort"}),
+            "cloud",
+        )
+
+    def test_callback_abort(self):
+        payload = {"result": [{"callback_query": {"data": "abort"}}]}
+        self.assertEqual(
+            parse_telegram_decision(payload, {"retry", "cloud", "abort"}),
+            "abort",
+        )
+
+    def test_callback_filtered_out(self):
+        payload = {"result": [{"callback_query": {"data": "cloud"}}]}
+        self.assertIsNone(parse_telegram_decision(payload, {"retry", "abort"}))
+
+    def test_free_text_message_ignored(self):
+        payload = {"result": [{"message": {"text": "hi"}}]}
+        self.assertIsNone(parse_telegram_decision(payload, {"retry", "cloud", "abort"}))
+
+    def test_multiple_updates_first_matching_wins(self):
+        payload = {
+            "result": [
+                {"message": {"text": "unrelated"}},
+                {"callback_query": {"data": "retry"}},
+                {"callback_query": {"data": "cloud"}},
+            ]
+        }
+        self.assertEqual(
+            parse_telegram_decision(payload, {"retry", "cloud", "abort"}),
+            "retry",
+        )
+
+    def test_empty_data_ignored(self):
+        payload = {"result": [{"callback_query": {"data": ""}}]}
+        self.assertIsNone(parse_telegram_decision(payload, {"retry", "abort"}))
+
+
+def _local_llm_pages(params: dict[str, str], login: str = "octocat") -> list:
+    return [
+        {
+            "Parameters": [
+                {
+                    "Name": f"/blitzlog/users/{login}/local-llm/{key}",
+                    "Value": value,
+                }
+                for key, value in params.items()
+            ]
+        }
+    ]
+
+
+class TestGetLocalLlmConfig(unittest.TestCase):
+    @patch("handler.ssm")
+    def test_returns_none_when_no_params(self, mock_ssm):
+        mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler.ssm")
+    def test_returns_none_when_ssm_path_missing(self, mock_ssm):
+        mock_ssm.get_paginator.return_value.paginate.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound"}}, "GetParametersByPath"
+        )
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler.ssm")
+    def test_returns_none_when_endpoint_missing(self, mock_ssm):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {"model": "qwen2.5-coder:32b"}
+        )
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler.ssm")
+    def test_returns_none_when_model_missing(self, mock_ssm):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {"endpoint": "http://100.64.0.5:11434"}
+        )
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_accepts_tailscale_cgnat_when_opt_in(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "allow-private-cidrs": "true",
+                "fallback": "cloud",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg["endpoint"], "http://100.64.0.5:11434")
+        self.assertEqual(cfg["model"], "qwen2.5-coder:32b")
+        self.assertTrue(cfg["allow_private"])
+        self.assertEqual(cfg["fallback"], "cloud")
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_rejects_tailscale_cgnat_without_opt_in(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_rejects_imds_ip(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://169.254.169.254/latest",
+                "model": "x",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["169.254.169.254"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_rejects_loopback(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://127.0.0.1:11434",
+                "model": "x",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["127.0.0.1"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_rejects_rfc1918_without_opt_in(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://10.0.0.5:11434",
+                "model": "x",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_accepts_rfc1918_with_opt_in(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://10.0.0.5:11434",
+                "model": "x",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertIsNotNone(cfg)
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_hard_rejects_public_ip(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "https://llm.example.com",
+                "model": "x",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["203.0.113.5"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_hard_rejects_public_ip_even_with_opt_in(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "https://api.openai.com",
+                "model": "x",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["104.18.32.47"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_rejects_non_http_scheme(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "ftp://10.0.0.5",
+                "model": "x",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        self.assertIsNone(get_local_llm_config("octocat"))
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_fallback_defaults_to_closed_when_invalid(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://10.0.0.5:11434",
+                "model": "x",
+                "allow-private-cidrs": "true",
+                "fallback": "bogus",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertEqual(cfg["fallback"], "closed")
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_api_key_returned(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://10.0.0.5:11434",
+                "model": "x",
+                "api-key": "secret-key",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertEqual(cfg["api_key"], "secret-key")
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_empty_api_key_handled(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://10.0.0.5:11434",
+                "model": "x",
+                "api-key": "",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["10.0.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertEqual(cfg["api_key"], "")
+
+    @patch("handler.ssm")
+    def test_returns_none_when_sender_login_empty(self, mock_ssm):
+        self.assertIsNone(get_local_llm_config(""))
+
+
+class TestLocalLlmOpencodeConfig(unittest.TestCase):
+    def test_default_renders_cloud_provider(self):
+        script = _write_opencode_config_script()
+        self.assertIn('"minimax-coding-plan":', script)
+        self.assertNotIn('"local":', script)
+
+    def test_local_provider_omits_cloud_block(self):
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+            }
+        )
+        self.assertIn('"local":', script)
+        self.assertNotIn('"minimax-coding-plan":', script)
+
+    def test_local_provider_with_api_key_renders_key(self):
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "secret",
+            }
+        )
+        self.assertIn('"apiKey": "{env:LOCAL_LLM_API_KEY}"', script)
+
+    def test_local_provider_without_api_key_omits_field(self):
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+            }
+        )
+        self.assertNotIn('"apiKey":', script)
+
+    def test_local_provider_renders_baseurl(self):
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+            }
+        )
+        self.assertIn('"baseURL": "{env:LOCAL_LLM_ENDPOINT}"', script)
+
+
+class TestReadSecretsWithLocalLlm(unittest.TestCase):
+    def test_cloud_path_exports_api_key(self):
+        script = _read_secrets_from_ssm_script(42, local_llm=False)
+        self.assertIn("export OPENCODE_API_KEY", script)
+
+    def test_local_path_omits_api_key_export(self):
+        script = _read_secrets_from_ssm_script(42, local_llm=True)
+        self.assertNotIn("export OPENCODE_API_KEY", script)
+        self.assertIn("export _CC_GITHUB_TOKEN", script)
+
+    def test_default_local_llm_false(self):
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn("export OPENCODE_API_KEY", script)
+
+
+class TestPreflightScript(unittest.TestCase):
+    def test_preflight_script_defines_function(self):
+        script = _preflight_local_llm_script("autonomous")
+        self.assertIn("preflight_local_llm()", script)
+
+    def test_preflight_script_probes_health(self):
+        script = _preflight_local_llm_script("autonomous")
+        self.assertIn("/health", script)
+        self.assertIn("/v1/models", script)
+
+    def test_preflight_script_loop_count(self):
+        script = _preflight_local_llm_script("autonomous")
+        self.assertIn("seq 1 10", script)
+
+    def test_autonomous_preflight_exits_no_telegram(self):
+        script = _preflight_local_llm_script("autonomous")
+        self.assertIn("exit 1", script)
+        self.assertIn("Autonomous mode aborting", script)
+        self.assertNotIn("sendMessage", script)
+        self.assertNotIn("getUpdates", script)
+        self.assertNotIn("inline_keyboard", script)
+
+    def test_assisted_preflight_sends_telegram(self):
+        script = _preflight_local_llm_script("assisted")
+        self.assertIn("sendMessage", script)
+        self.assertIn("getUpdates", script)
+        self.assertIn("inline_keyboard", script)
+
+    def test_assisted_preflight_has_retry_button(self):
+        script = _preflight_local_llm_script("assisted")
+        self.assertIn('"callback_data":"retry"', script)
+
+    def test_assisted_preflight_has_abort_button(self):
+        script = _preflight_local_llm_script("assisted")
+        self.assertIn('"callback_data":"abort"', script)
+
+    def test_assisted_preflight_has_cloud_button_when_fallback(self):
+        script_with_cloud = _preflight_local_llm_script("assisted")
+        self.assertIn("LOCAL_LLM_FALLBACK", script_with_cloud)
+        self.assertIn("HAS_CLOUD_KEY", script_with_cloud)
+
+    def test_assisted_preflight_references_switch_function(self):
+        script = _preflight_local_llm_script("assisted")
+        self.assertIn("switch_to_cloud_fallback", script)
+
+
+class TestLocalLlmInUserData(unittest.TestCase):
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_no_local_llm_keeps_cloud_block(self):
+        user_data = build_autonomous_user_data("owner/repo", 42)
+        self.assertIn("minimax-coding-plan", user_data)
+        self.assertIn('OPENCODE_MODEL="test/model"', user_data)
+        self.assertIn("export OPENCODE_API_KEY", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_no_local_llm_keeps_cloud_block_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo", 42, bot_name="b", bot_token="t", telegram_user_id="999"
+        )
+        self.assertIn("minimax-coding-plan", user_data)
+        self.assertIn("OPENCODE_MODEL_PROVIDER=minimax-coding-plan", user_data)
+        self.assertIn("export OPENCODE_API_KEY", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_switches_model(self):
+        user_data = build_autonomous_user_data(
+            "owner/repo",
+            42,
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+            },
+        )
+        self.assertIn('OPENCODE_MODEL="local/qwen2.5-coder:32b"', user_data)
+        self.assertIn("LOCAL_LLM_ENDPOINT=", user_data)
+        self.assertIn("LOCAL_LLM_MODEL=", user_data)
+        self.assertNotIn('"minimax-coding-plan":', user_data)
+        self.assertIn('"local":', user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_assisted_switches_model(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            bot_name="b",
+            bot_token="t",
+            telegram_user_id="999",
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "secret",
+                "allow_private": True,
+                "fallback": "cloud",
+            },
+        )
+        self.assertIn('OPENCODE_MODEL="local/qwen2.5-coder:32b"', user_data)
+        self.assertIn("OPENCODE_MODEL_PROVIDER=local", user_data)
+        self.assertIn("OPENCODE_MODEL_ID=qwen2.5-coder:32b", user_data)
+        self.assertIn('LOCAL_LLM_API_KEY="secret"', user_data)
+        self.assertIn('LOCAL_LLM_FALLBACK="cloud"', user_data)
+        # The agent's startup env must not export OPENCODE_API_KEY. The
+        # switch_to_cloud_fallback function (only called if the user clicks
+        # Use cloud) reads it from SSM just-in-time, so the substring can
+        # legitimately appear inside that function body — but it must NOT
+        # be exported at startup.
+        read_block_start = user_data.index("Reading secrets from SSM")
+        preflight_block_start = user_data.index("preflight_local_llm", read_block_start)
+        startup_block = user_data[read_block_start:preflight_block_start]
+        self.assertNotIn("export OPENCODE_API_KEY", startup_block)
+        # The startup opencode.json must use the local provider only.
+        cfg_start = user_data.index("Writing opencode config")
+        cfg_end = user_data.index("session-archive.js", cfg_start)
+        startup_cfg = user_data[cfg_start:cfg_end]
+        self.assertIn('"local":', startup_cfg)
+        self.assertNotIn('"minimax-coding-plan":', startup_cfg)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_includes_preflight_in_autonomous(self):
+        user_data = build_autonomous_user_data(
+            "owner/repo",
+            42,
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "x",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+            },
+        )
+        self.assertIn("preflight_local_llm()", user_data)
+        self.assertIn("MODE=autonomous", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_includes_preflight_in_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            bot_name="b",
+            bot_token="t",
+            telegram_user_id="999",
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "x",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "cloud",
+            },
+        )
+        self.assertIn("preflight_local_llm()", user_data)
+        self.assertIn("MODE=assisted", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_no_local_llm_no_preflight_in_autonomous(self):
+        user_data = build_autonomous_user_data("owner/repo", 42)
+        self.assertNotIn("preflight_local_llm", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_no_local_llm_no_preflight_in_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo", 42, bot_name="b", bot_token="t", telegram_user_id="999"
+        )
+        self.assertNotIn("preflight_local_llm", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_defensive_unset_always_present_autonomous(self):
+        user_data = build_autonomous_user_data("owner/repo", 42)
+        self.assertIn("unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_defensive_unset_always_present_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo", 42, bot_name="b", bot_token="t", telegram_user_id="999"
+        )
+        self.assertIn("unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_opencode_serve_binds_localhost_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo", 42, bot_name="b", bot_token="t", telegram_user_id="999"
+        )
+        self.assertIn("opencode serve --hostname 127.0.0.1 --port 4096", user_data)
 
 
 if __name__ == "__main__":

@@ -256,6 +256,165 @@ Or, since the resolution is deterministic from `terraform.tfvars`, simply delete
 
 ---
 
+## Local LLMs (route agents to a model you control)
+
+You can configure blitzlog to point this user's agents at a local LLM you run yourself — e.g. Ollama, LM Studio, or llama.cpp on a Mac mini at home — instead of (or, in assisted mode, as a fallback to) the shared cloud provider. Configuration is per-user and lives in the same `infra/user-pool/` module that owns your Telegram bot pool.
+
+> **Endpoints must not be publicly addressable.** blitzlog rejects any endpoint that resolves to a public IP, with no opt-in. All supported transports keep the endpoint on a private network (VPN, mesh, or VPC-internal). The endpoint URL is stored as a `SecureString` SSM parameter because it can reveal home-network topology.
+
+### Configuration
+
+Add the following block to your `infra/user-pool/terraform.tfvars`:
+
+```hcl
+# Endpoint must resolve to a private IP. Allowed private ranges:
+#   RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+#   ULA:      fc00::/7
+#   Tailscale CGNAT: 100.64.0.0/10
+# Anything else (including public IPs and public DNS that resolves to public IPs)
+# is hard-rejected at the Lambda.
+local_llm_endpoint                       = "http://100.x.y.z:11434"
+local_llm_model                          = "qwen2.5-coder:32b"
+local_llm_api_key                        = ""        # empty for no-auth endpoints (Ollama default)
+local_llm_endpoint_allow_private_cidrs   = true      # required for any private-IP endpoint
+local_llm_fallback                       = "closed"  # or "cloud" (assisted mode only — see Resilience)
+```
+
+After `terraform apply`, three new SSM parameters exist under `/blitzlog/users/<owner_login>/local-llm/`: `endpoint`, `model`, `api-key` (all `SecureString`); plus `allow-private-cidrs` and `fallback` (both `String`). The agent's `opencode.json` on the EC2 instance is then written with a single `local` provider block:
+
+```json
+"provider": {
+  "local": {
+    "options": {
+      "baseURL": "http://100.x.y.z:11434",
+      "apiKey": "<your local LLM API key, if any>"
+    }
+  }
+}
+```
+
+The `OPENCODE_MODEL` becomes `local/<your-model-id>` (the `provider/model-id` form opencode expects). The cloud provider block is **omitted** entirely so the agent has no cloud credentials to address even if a prompt-injection attempt tries to redirect it.
+
+### Credential stripping
+
+When local is configured, the bootstrap script:
+
+- **Does not** export `OPENCODE_API_KEY` to the agent's environment. The cloud API key is read on demand only if the user explicitly clicks `[Use cloud fallback]` in assisted mode.
+- **Does not** render the `minimax-coding-plan` provider block in `opencode.json`. There is no cloud provider to address.
+- **Defensively** unsets `OPENCODE_API_KEY`, `HTTPS_PROXY`, and `HTTP_PROXY` at startup. A root-level agent can re-introduce these, but the path of least resistance is closed.
+
+> **Residual risk**: an agent with root on the EC2 instance can rewrite `~/.config/opencode/opencode.json` and re-introduce a cloud provider block. This PR reduces the attack surface but does not eliminate it. A follow-up issue adds an `nftables` egress lockdown to close the remaining network path.
+
+### Transports — keep the tunnel up all the time
+
+The tunnel between your local LLM and the EC2 instance should be **always-on from Ollama startup**, not set up per agent run. The EC2 spot instance is ephemeral and gets a fresh IP on every launch, so per-run tunnels can't target it directly. Set up the tunnel once on the Mac mini (or wherever the LLM runs) and leave it running.
+
+#### Tailscale (recommended default)
+
+Tailscale is purpose-built for "always-on private mesh between your machines." Set up once, runs at Ollama startup, gets a stable `100.x.y.z` Tailnet IP.
+
+```bash
+# Mac mini, one-time
+brew install tailscale
+sudo tailscale up
+# Verify with: tailscale status
+```
+
+Tailscale runs as a system service and starts at boot. The Mac mini shows up in your Tailnet at a stable `100.x.y.z` address. Set:
+
+```hcl
+local_llm_endpoint = "http://100.x.y.z:11434"
+local_llm_endpoint_allow_private_cidrs = true
+```
+
+> **Auth-key setup (important for cleanup).** When you later add per-run EC2 agent enrollment in your Tailnet (a separate follow-up), generate the EC2's auth key at https://login.tailscale.com/admin/settings/keys with **Ephemeral: enabled**, **Expiration: 4 hours**, and **Tags: `tag:blitzlog-agent`**. That way each agent run joins the Tailnet for the duration of its run and auto-removes when the EC2 instance terminates — no device accumulation, no manual cleanup.
+
+#### WireGuard
+
+WireGuard is a peer-to-peer VPN. Set up the tunnel on the Mac mini with a LaunchAgent that runs `wg-quick up` at login.
+
+```bash
+# Mac mini, one-time — generate keys
+wg genkey | tee /tmp/privatekey | wg pubkey > /tmp/publickey
+```
+
+Create `~/wg-llm.conf`:
+
+```ini
+[Interface]
+PrivateKey = <contents of /tmp/privatekey>
+Address = 10.0.0.5/24
+ListenPort = 51820
+
+[Peer]
+PublicKey = <peer public key (e.g. another WireGuard host that bridges to the EC2 network)>
+AllowedIPs = 10.0.0.0/24
+Endpoint = <peer public IP>:51820
+```
+
+Create `~/Library/LaunchAgents/com.blitzlog.wg-llm.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.blitzlog.wg-llm</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/wg-quick</string>
+    <string>up</string>
+    <string>/Users/<you>/wg-llm.conf</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.blitzlog.wg-llm.plist
+```
+
+Set `local_llm_endpoint = "http://10.0.0.5:11434"` and `local_llm_endpoint_allow_private_cidrs = true`.
+
+> The peer endpoint's public IP and UDP port are reachable from the internet, but the WireGuard traffic is encrypted and the LLM API behind it is not — that's the right balance.
+
+#### AWS Client VPN (fully AWS-managed)
+
+If you specifically want no third-party dependency in the tunnel path, AWS Client VPN is the AWS-native option. Provision a Client VPN endpoint in your VPC with mutual-TLS auth (per-user client certs in ACM Private CA); install the AWS VPN client on the Mac mini; the LLM becomes reachable at a VPC-internal `10.100.0.x` IP.
+
+```hcl
+local_llm_endpoint = "http://10.100.0.42:11434"
+local_llm_endpoint_allow_private_cidrs = true
+```
+
+Setup involves ACM Private CA, Client VPN endpoint, target network association, and an authorization rule — meaningfully more Terraform + Mac-side config than Tailscale or WireGuard. Worth it only if "no third-party dep" is a hard requirement. Cost: ~$40–50/month for an always-on endpoint.
+
+### Resilience per mode
+
+When the local LLM is unreachable, blitzlog follows a per-mode policy.
+
+#### Autonomous mode
+
+The bootstrap probes `GET <endpoint>/health` (or `/v1/models` as a fallback) ten times at 30-second intervals (~5 minutes total). On success, the run proceeds. On exhaustion, the run aborts with an `ACTIONABLE` log line and the EC2 instance terminates. **No silent fallback to the cloud** — that would defeat the privacy reason you opted into a local LLM. Re-trigger the run when your local setup is back online.
+
+#### Assisted mode
+
+Same 5-minute probe. On exhaustion, blitzlog sends a Telegram message with an inline keyboard:
+
+- `local_llm_fallback = closed` (default): `[ Retry ] [ Abort ]`
+- `local_llm_fallback = cloud`: `[ Use cloud fallback ] [ Retry ] [ Abort ]` (the cloud button is omitted if no `OPENCODE_API_KEY` is configured in shared SSM)
+
+The user has up to 10 minutes to reply.
+
+- **Retry** runs another 5-minute probe cycle, up to 5 retries total.
+- **Use cloud fallback** reads `OPENCODE_API_KEY` from SSM on demand, re-emits `opencode.json` with the cloud provider, exports the key, and restarts `opencode serve`. A Telegram notification confirms the switch. Inference continues against the cloud model for the rest of the run.
+- **Abort** triggers the existing `assisted-shutdown.sh` flow.
+- No reply within 10 minutes → abort (safer default; preserves the local LLM intent).
+
+---
+
 ## Instance lifecycle
 
 1. **Launch** — Lambda spawns a `t4g.medium` (or `t4g.large` / `t4g.xlarge`) spot instance with user-data.

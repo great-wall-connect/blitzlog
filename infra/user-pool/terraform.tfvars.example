@@ -5,3 +5,24 @@ telegram_bot_tokens = {
   bot1 = "<BOT_TOKEN>"
   bot2 = "<BOT_TOKEN>"
 }
+
+# Optional: route this user's agents to a local LLM reachable from the
+# EC2 spot instance. All fields below are optional; omit the block entirely
+# to use the cloud provider default.
+#
+# Constraints:
+#   - local_llm_endpoint must resolve to a private IP (RFC1918, ULA, or
+#     Tailscale CGNAT 100.64.0.0/10). Public IPs are hard-rejected at the
+#     Lambda. Set local_llm_endpoint_allow_private_cidrs = true when using
+#     any of those ranges.
+#   - local_llm_model is required when local_llm_endpoint is set; it becomes
+#     the suffix of OPENCODE_MODEL=local/<model>.
+#   - local_llm_api_key may be empty for endpoints without auth.
+#   - local_llm_fallback only takes effect in assisted mode. Autonomous runs
+#     always abort when the local LLM is unreachable.
+#
+# local_llm_endpoint                       = "http://100.x.y.z:11434"
+# local_llm_model                          = "qwen2.5-coder:32b"
+# local_llm_api_key                        = ""
+# local_llm_endpoint_allow_private_cidrs   = true
+# local_llm_fallback                       = "closed"

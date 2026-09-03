@@ -210,6 +210,7 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           aws_ssm_parameter.stt_language.arn,
           aws_ssm_parameter.stt_models_bucket.arn,
           "arn:aws:ssm:*:*:parameter/blitzlog/ephemeral/*",
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
         ]
       },
       {
