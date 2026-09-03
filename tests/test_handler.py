@@ -1553,16 +1553,39 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_installs_node_24_via_dnf(self):
+    def test_assisted_installs_node_24_via_tarball(self):
+        # Direct tarball from nodejs.org — bypasses AL2023 dnf repo gaps that
+        # left the previous dnf install silently failing on some AMIs (set -eu
+        # with `dnf install | tail -5` returned tail's exit code, masking dnf
+        # failures; the bot then ran on the AL2023 default Node v20, which
+        # the upstream Telegram bot rejects with "requires Node.js 22.14+").
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("dnf install -y nodejs24 nodejs24-npm", user_data)
+        self.assertIn(
+            "https://nodejs.org/dist/v24.6.0/node-v24.6.0-linux-arm64.tar.xz",
+            user_data,
+        )
+        self.assertIn("tar -xJ -C /usr/local --strip-components=1", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_sets_node_alternative_to_24(self):
+    def test_assisted_guards_node_install_by_major_version(self):
+        # Idempotency: skip the download when the AL2023 base image already
+        # ships a new-enough Node (e.g., future AMIs).
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("alternatives --set node /usr/bin/node-24", user_data)
+        self.assertIn("NODE_MAJOR=$(node --version", user_data)
+        self.assertIn('if [ "$NODE_MAJOR" -lt 24 ]', user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_dnf_node_install(self):
+        # Regression guard: the previous dnf-based install silently failed on
+        # some AL2023 AMIs (nodejs24 not in default repos + `| tail -5`
+        # masking the exit code). If anyone reverts to dnf, this fires.
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("dnf install -y nodejs24", user_data)
+        self.assertNotIn("dnf install -y nodejs22", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -1570,13 +1593,6 @@ class TestNodeVersionGuard(unittest.TestCase):
     def test_assisted_invokes_bot_via_npx(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertIn("npx -y @grinev/opencode-telegram-bot@latest start", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_tarball_install(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("nodejs.org/dist/v", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
