@@ -1347,13 +1347,9 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Installing system packages..."
 {_install_system_packages_script()}
 
-log "Installing Node.js 24 via tarball (bypasses AL2023 dnf repo gaps)..."
-NODE_MAJOR=$(node --version 2>/dev/null | cut -d. -f1 | tr -d 'v' || echo "0")
-if [ "$NODE_MAJOR" -lt 24 ]; then
-    curl -fsSL https://nodejs.org/dist/v24.6.0/node-v24.6.0-linux-arm64.tar.xz \
-        | tar -xJ -C /usr/local --strip-components=1
-fi
-hash -r
+log "Installing Node.js 24 via dnf..."
+dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
+alternatives --set node /usr/bin/node-24
 node --version
 npm --version
 

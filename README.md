@@ -265,6 +265,11 @@ Or, since the resolution is deterministic from `terraform.tfvars`, simply delete
 5. **Shutdown** — post-exit script calls `ec2:TerminateInstances` via IMDSv2.
 6. **Cleanup** — git credentials are deleted after `git clone`; the GitHub installation token is repo-scoped with up to 8h lifetime (longer than the watchdog, intentionally).
 
+> ⚠️ Don't add `node = "..."` to `[tools]` in `mise.toml`. The bootstrap
+> already installs Node v24 via dnf; a `node = "..."` entry makes
+> `mise install` overwrite it, and the bot (which requires Node.js
+> ≥ 22.14) refuses to start.
+
 ---
 
 ## Manual instance management
