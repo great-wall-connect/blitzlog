@@ -17,6 +17,14 @@ agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket hol
 # ssh_allowed_cidrs         = ["1.2.3.4/32"]                     # CIDRs allowed SSH ingress; empty = no SSH
 # alert_email               = "dev-team@example.com"             # CloudWatch alarm email; empty = no email subscription
 # opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the OpenCode CLI on EC2
+# stt_api_url               = "http://127.0.0.1:7878/v1"        # Whisper-compatible endpoint for the Telegram bot
+# stt_api_key               = "any-non-empty-string"            # Forwarded to the STT provider; localhost shim ignores it (default: "placeholder-not-used-by-localhost-shim")
+# stt_model                 = "base.en"                          # Whisper model name; must match a file uploaded to blitzlog-stt-models
+# stt_language              = "en"                               # Whisper language hint; "" = auto-detect
+# upload_stt_model          = false                              # Auto-upload whisper model from HuggingFace on `terraform apply`
+# stt_model_source_url      = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# stt_models_bucket_name    = "blitzlog-stt-models"              # S3 bucket for whisper.cpp models; must be globally unique across AWS
+# aws_profile               = "terraform"                        # Pin the AWS profile used by the upload provisioner (empty = inherit AWS_PROFILE env var)
 
 # Per-user Telegram bot pools (assisted mode)
 # ------------------------------------------------------------------------------

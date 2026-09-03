@@ -1,0 +1,21 @@
+[Unit]
+Description=Blitzlog whisper.cpp STT shim
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/whisper-stt
+Environment=HOST=127.0.0.1
+Environment=PORT=7878
+Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli
+Environment=WHISPER_MODEL=/opt/whisper-stt/models/ggml-base.en.bin
+Environment=WHISPER_LANGUAGE=en
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/whisper-stt-shim.log
+StandardError=append:/var/log/whisper-stt-shim.log
+
+[Install]
+WantedBy=multi-user.target

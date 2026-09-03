@@ -18,6 +18,35 @@ logger.setLevel(logging.INFO)
 
 SSM_PATH = "/blitzlog"
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_WHISPER_STT_SHIM_CANDIDATES = (
+    os.path.join(_HERE, "packages", "whisper-stt-shim", "server.js"),
+    os.path.join(_HERE, "..", "packages", "whisper-stt-shim", "server.js"),
+)
+WHISPER_STT_SHIM_SOURCE = ""
+for _candidate in _WHISPER_STT_SHIM_CANDIDATES:
+    try:
+        with open(_candidate, "r", encoding="utf-8") as _f:
+            WHISPER_STT_SHIM_SOURCE = _f.read()
+            break
+    except OSError:
+        continue
+
+_WHISPER_STT_SHIM_PACKAGE_JSON = """{
+  "name": "@blitzlog/whisper-stt-shim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Whisper-compatible HTTP shim wrapping whisper.cpp on the blitzlog EC2 agent instance.",
+  "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "ffmpeg-static": "^5.2.0"
+  }
+}
+"""
+
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")
 ssm = boto3.client("ssm")
@@ -431,6 +460,17 @@ export _CC_GITHUB_TOKEN
 
 OPENCODE_API_KEY=$(aws ssm get-parameter --name "/blitzlog/opencode/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export OPENCODE_API_KEY
+
+STT_API_URL=$(aws ssm get-parameter --name "/blitzlog/stt/api-url" --query Parameter.Value --output text --region "$REGION")
+export STT_API_URL
+STT_API_KEY=$(aws ssm get-parameter --name "/blitzlog/stt/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
+export STT_API_KEY
+STT_MODEL=$(aws ssm get-parameter --name "/blitzlog/stt/model" --query Parameter.Value --output text --region "$REGION")
+export STT_MODEL
+STT_LANGUAGE=$(aws ssm get-parameter --name "/blitzlog/stt/language" --query Parameter.Value --output text --region "$REGION")
+export STT_LANGUAGE
+STT_MODELS_BUCKET=$(aws ssm get-parameter --name "/blitzlog/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
+export STT_MODELS_BUCKET
 """
 
 
@@ -491,6 +531,130 @@ curl -fsSL https://opencode.ai/install | bash
 export PATH=/root/.opencode/bin:$PATH
 hash -r
 opencode --version
+"""
+
+
+_WHISPER_CPP_VERSION = "v1.7.6"
+_WHISPER_CPP_RELEASE_URL = (
+    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
+    f"/whisper-bin-aarch64-linux-gnu.zip"
+)
+_WHISPER_CPP_RELEASE_FALLBACK_URL = (
+    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
+    f"/whisper-bin-aarch64-linux-gnu.tar.gz"
+)
+_WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/archive/refs/tags/{_WHISPER_CPP_VERSION}.tar.gz"
+
+
+def _install_whisper_stt_script() -> str:
+    shim_source = WHISPER_STT_SHIM_SOURCE.replace("'", "'\\''")
+    package_json = _WHISPER_STT_SHIM_PACKAGE_JSON.replace("'", "'\\''")
+    systemd_unit = (
+        "[Unit]\n"
+        "Description=Blitzlog whisper.cpp STT shim\n"
+        "After=network.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        "User=root\n"
+        "WorkingDirectory=/opt/whisper-stt\n"
+        "Environment=HOST=127.0.0.1\n"
+        "Environment=PORT=7878\n"
+        "Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli\n"
+        "EnvironmentFile=-/etc/blitzlog/whisper-stt.env\n"
+        "ExecStart=/usr/bin/node server.js\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "StandardOutput=append:/var/log/whisper-stt-shim.log\n"
+        "StandardError=append:/var/log/whisper-stt-shim.log\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    ).replace("'", "'\\''")
+    return f"""
+log "Installing whisper.cpp STT backend..."
+
+mkdir -p /opt/whisper-stt/bin /opt/whisper-stt/models /opt/whisper-stt/runtime
+cd /opt/whisper-stt
+
+# 1. Acquire whisper.cpp CLI binary.
+#    Prefer prebuilt release; fall back to building from source if the
+#    prebuilt asset is unavailable for the current release tag.
+WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli
+if [ ! -x "$WHISPER_CLI" ]; then
+    log "Downloading whisper.cpp {_WHISPER_CPP_VERSION} prebuilt (aarch64-linux-gnu)..."
+    if curl -fsSL "{_WHISPER_CPP_RELEASE_URL}" -o /tmp/whisper-prebuilt.zip; then
+        dnf install -y unzip || true
+        unzip -q -o /tmp/whisper-prebuilt.zip -d /tmp/whisper-prebuilt
+        find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
+        chmod +x "$WHISPER_CLI"
+    elif curl -fsSL "{_WHISPER_CPP_RELEASE_FALLBACK_URL}" -o /tmp/whisper-prebuilt.tar.gz; then
+        tar -xzf /tmp/whisper-prebuilt.tar.gz -C /tmp/whisper-prebuilt
+        find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
+        chmod +x "$WHISPER_CLI"
+    else
+        log "Prebuilt download failed; building whisper.cpp from source (this takes a few minutes)..."
+        dnf install -y cmake gcc gcc-c++ make
+        curl -fsSL "{_WHISPER_CPP_SOURCE_TARBALL_URL}" -o /tmp/whisper-src.tar.gz
+        tar -xzf /tmp/whisper-src.tar.gz -C /opt
+        cmake -S /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')} -B /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build -DCMAKE_BUILD_TYPE=Release
+        cmake --build /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build --config Release -j$(nproc)
+        cp /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build/bin/whisper-cli "$WHISPER_CLI"
+    fi
+fi
+"$WHISPER_CLI" --help > /dev/null && log "whisper-cli ready: $("$WHISPER_CLI" --help 2>&1 | head -1)"
+
+# 2. Download the configured model from the blitzlog-stt-models S3 bucket.
+MODEL_FILE="ggml-${{STT_MODEL}}.bin"
+MODEL_DEST="/opt/whisper-stt/models/${{MODEL_FILE}}"
+if [ ! -f "$MODEL_DEST" ]; then
+    log "Downloading whisper model ${{MODEL_FILE}} from s3://${{STT_MODELS_BUCKET}}/models/..."
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/${{MODEL_FILE}}" "$MODEL_DEST" --region "${{AWS_DEFAULT_REGION}}"
+fi
+test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_DEST" | cut -f1))"
+
+# 3. Write shim source and package.json, install npm deps.
+log "Writing whisper-stt-shim source and installing dependencies..."
+cat > /opt/whisper-stt/server.js <<'__WHISPER_SHIM_JS__'
+'{shim_source}'
+__WHISPER_SHIM_JS__
+
+cat > /opt/whisper-stt/package.json <<'__WHISPER_SHIM_PKG__'
+'{package_json}'
+__WHISPER_SHIM_PKG__
+
+cd /opt/whisper-stt
+npm install --omit=dev --no-audit --no-fund --silent 2>&1 | tail -3
+
+# 4. Write systemd unit and start the shim.
+cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
+'{systemd_unit}'
+__WHISPER_SHIM_UNIT__
+
+mkdir -p /etc/blitzlog
+cat > /etc/blitzlog/whisper-stt.env <<ENVEOF
+WHISPER_MODEL=/opt/whisper-stt/models/${{MODEL_FILE}}
+WHISPER_LANGUAGE=${{STT_LANGUAGE}}
+REQUEST_TIMEOUT_MS=60000
+ENVEOF
+
+systemctl daemon-reload
+systemctl enable whisper-stt-shim.service
+systemctl restart whisper-stt-shim.service
+
+# 5. Health-check the shim before the bot starts.
+for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:7878/healthz > /dev/null 2>&1; then
+        log "whisper-stt-shim is healthy on http://127.0.0.1:7878"
+        break
+    fi
+    if ! systemctl is-active --quiet whisper-stt-shim.service; then
+        log "WARNING: whisper-stt-shim service is not active; bot will start without STT"
+        break
+    fi
+    log "Waiting for whisper-stt-shim... ($i/30)"
+    sleep 2
+done
 """
 
 
@@ -1267,6 +1431,11 @@ OPENCODE_MODEL_PROVIDER=minimax-coding-plan
 OPENCODE_MODEL_ID={opencode_model_id}
 BOT_LOCALE=en
 TELEGRAM_FORCE_IPV4=true
+STT_API_URL=${{STT_API_URL}}
+STT_API_KEY=${{STT_API_KEY}}
+STT_MODEL=${{STT_MODEL}}
+STT_LANGUAGE=${{STT_LANGUAGE}}
+STT_REQUEST_FORMAT=multipart
 TELEGRAMCFG
 
 log "Auto-selecting project and session in bot settings..."
@@ -1307,6 +1476,7 @@ else
 fi
 
 log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
+{_install_whisper_stt_script()}
 npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
 PRE_WARM_EXIT=$?
 if [ "$PRE_WARM_EXIT" -ne 0 ]; then

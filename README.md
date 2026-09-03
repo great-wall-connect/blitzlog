@@ -51,7 +51,9 @@ Two modes:
 | `infra/lambda.tf` | Lambda function, CloudWatch logs, DLQ |
 | `infra/apigateway.tf` | API Gateway HTTP API as webhook endpoint |
 | `infra/alerting.tf` | SNS topic, SQS DLQ, CloudWatch alarm |
+| `infra/storage.tf` | S3 buckets: agent logs + whisper-stt-models |
 | `infra/user-pool/` | Per-user Terraform module (local state) that provisions that user's Telegram bot pool into SSM Parameter Store |
+| `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
 
@@ -90,6 +92,15 @@ opencode_model      = "<provider>/<model>"       # default: minimax-coding-plan/
 opencode_api_key    = "<your-provider-api-key>"
 
 # ssh_allowed_cidrs = ["1.2.3.4/32"]            # optional; empty = no SSH ingress
+
+# Voice note (STT) — populated when you want assisted agents to accept
+# Telegram voice notes. Defaults assume the self-hosted whisper.cpp shim
+# that runs alongside the agent on the same EC2 instance.
+# stt_api_url      = "http://127.0.0.1:7878/v1"  # Whisper-compatible endpoint
+# stt_api_key      = "any-non-empty-string"       # Forwarded to the STT provider; localhost shim ignores it. Default placeholder works for the self-hosted shim.
+# stt_models_bucket_name = "blitzlog-stt-models"    # Must be globally unique across AWS — open-source users must override this.
+# stt_model        = "base.en"                    # Whisper model name; must match a file uploaded to blitzlog-stt-models
+# stt_language     = "en"                         # Whisper language hint; "" = auto-detect
 ```
 
 The state backend (`backend "s3"`) in `infra/main.tf` is generic — the `bucket` field is intentionally empty. Supply it via a `-backend.hcl` file:
@@ -365,6 +376,27 @@ List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recu
 
 **Fix:** Switch `aws_region` in `infra/terraform.tfvars` to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
 
+### Voice notes not transcribing
+
+**Symptom:** Voice notes are silently ignored by the bot, or the bot replies "couldn't transcribe audio, please type your message."
+
+**Diagnose:** On the EC2 instance:
+
+```bash
+sudo systemctl status whisper-stt-shim.service
+curl -sf http://127.0.0.1:7878/healthz
+sudo tail -50 /var/log/whisper-stt-shim.log
+ls -lh /opt/whisper-stt/models/
+ls -lh /opt/whisper-stt/bin/
+```
+
+The model file must exist at `/opt/whisper-stt/models/ggml-<stt_model>.bin` and match the `stt_model` tfvar. The bucket name must also match `stt_models_bucket` SSM parameter; re-apply Terraform if you changed it.
+
+**Fix:**
+- **Model missing**: `aws s3 cp s3://$(terraform output -raw stt_models_bucket)/models/ggml-<name>.bin /opt/whisper-stt/models/` (after uploading to S3).
+- **Service won't start**: check `journalctl -u whisper-stt-shim.service` and `/var/log/whisper-stt-shim.log`. Common cause: `whisper-cli` binary failed to download or compile (build-from-source fallback usually takes 2-3 minutes on `t4g.medium`).
+- **Wrong model name**: `stt_model` in `terraform.tfvars` must match the S3 key suffix (`ggml-<name>.bin`).
+
 ### OpenCode provider 401 / 1008 / 429
 
 **Symptom:** The EC2 agent starts but the LLM call fails; no useful PR.
@@ -415,6 +447,65 @@ aws sqs receive-message \
 | SQS / SNS | negligible |
 
 A 30-minute autonomous run costs roughly the same as a large coffee.
+
+---
+
+## Voice note prompts (STT)
+
+Assisted-mode agents can accept Telegram voice notes, transcribe them with a self-hosted `whisper.cpp` instance on the same EC2 box, and forward the transcript to the agent as a normal prompt. The upstream Telegram bot already speaks the OpenAI Whisper HTTP format natively — blitzlog just provides a tiny Node.js shim (`packages/whisper-stt-shim/`) that wraps `whisper-cli` and an S3-hosted model file.
+
+### How it works
+
+1. User sends a voice note to the bot.
+2. Bot downloads the OGG Opus file from Telegram and POSTs it to `STT_API_URL/v1/audio/transcriptions` (a Whisper-compatible endpoint).
+3. The blitzlog shim converts the audio to 16 kHz mono WAV via `ffmpeg-static`, invokes `whisper-cli -m <model> -f <wav> --output-json`, parses the JSON, and returns `{"text": "..."}`.
+4. Bot shows the transcript in chat, then forwards the text to OpenCode as a normal prompt.
+
+### Setup
+
+Two ways to populate the model in `s3://blitzlog-stt-models/models/`:
+
+1. **Manual upload** (default). One-time, after `terraform apply`:
+
+   ```bash
+   curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin \
+     -o /tmp/ggml-base.en.bin
+   aws s3 cp /tmp/ggml-base.en.bin \
+     "s3://$(terraform output -raw stt_models_bucket)/models/ggml-base.en.bin"
+   ```
+
+   For multilingual support, download `ggml-base.bin`, `ggml-small.bin`, `ggml-large-v3.bin`, etc. from the same HuggingFace mirror and upload under the same `models/` prefix. Update `stt_model` in `infra/terraform.tfvars` to match (`base`, `small`, `large-v3`, etc.).
+
+2. **Auto-upload via Terraform** (opt-in). Set `upload_stt_model = true` in `infra/terraform.tfvars` and re-apply. The `terraform_data.stt_model_upload` provisioner runs on the Terraform host (CI or dev machine), downloads `ggml-${stt_model}.bin` from `stt_model_source_url`, and uploads it to S3. Skipped automatically if the object already exists. Requires:
+   - Outbound HTTPS from the Terraform host to the source URL.
+   - `s3:PutObject` on `arn:aws:s3:::blitzlog-stt-models/models/*` from the Terraform host's credentials (the EC2 instance role only has `s3:GetObject` — the Terraform host needs its own write perm).
+
+3. Configure the STT vars in `infra/terraform.tfvars` (defaults work out of the box for `base.en` + English). Re-run `terraform apply`.
+
+4. The EC2 instance picks everything up automatically on the next assisted-mode launch — no per-user config required. Per-user STT preferences (model, voice) live in the bot's own `/settings` menu, not in blitzlog.
+
+### Latency
+
+| Step | Time on `t4g.medium` |
+|---|---|
+| Bot downloads voice note from Telegram | ~200 ms for a 10 s OGG |
+| Shim ffmpeg → WAV conversion | ~50 ms |
+| `whisper-cli` inference, `base.en`, 5 s clip | ~2–3 s |
+| Total round-trip for a 5 s voice note | ~2.5–3.5 s |
+
+For longer clips, transcription scales roughly linearly. If latency becomes a problem, drop to `tiny.en` (~75 MB, ~2× faster, lower accuracy).
+
+### Failure handling
+
+Per the upstream bot's behavior: if the STT endpoint errors or times out, the bot sends a one-line "couldn't transcribe audio, please type your message" notice and the agent loop continues with a text prompt. The blitzlog shim logs to `/var/log/whisper-stt-shim.log` on the EC2 instance.
+
+If the shim service is down, the bot also falls back gracefully (it simply ignores voice notes). Check service status on the instance:
+
+```bash
+ssh ec2-user@<instance>
+sudo systemctl status whisper-stt-shim.service
+sudo tail -50 /var/log/whisper-stt-shim.log
+```
 
 ---
 

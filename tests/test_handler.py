@@ -19,6 +19,7 @@ from handler import (
     _configure_git_script,
     _decode_api_errors_script,
     _install_toolchain_script,
+    _install_whisper_stt_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
     _write_periodic_autosave_plugin_script,
@@ -174,6 +175,28 @@ class TestNoSecretsInUserData(unittest.TestCase):
         self.assertIn('user.email "12345+octocat@users.noreply.github.com"', script)
         self.assertIn("escobar", script)
 
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_assisted_no_embedded_stt_api_key(self):
+        # STT_API_KEY is a SecureString; the user-data must reference the
+        # runtime-fetched shell variable rather than bake a literal value.
+        script = build_assisted_user_data(
+            "org/repo",
+            42,
+            "octocat",
+            "12345",
+            bot_name="escobar",
+            bot_token="123456:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_KEY=${STT_API_KEY}", script)
+        self.assertIn("export STT_API_KEY", script)
+        # The bot .env heredoc assigns from the runtime shell variable only;
+        # no literal value should be embedded.
+        self.assertNotRegex(script, r"STT_API_KEY=[^$\n][^\n]*")
+
     def test_no_identity_without_sender(self):
         script = build_autonomous_user_data("org/repo", 42)
         self.assertNotIn("user.name", script)
@@ -208,6 +231,131 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("github-token-13", script13)
         self.assertIn("github-token-99", script99)
         self.assertNotIn("github-token-99", script13)
+
+    def test_fetches_stt_params(self):
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn("/blitzlog/stt/api-url", script)
+        self.assertIn("/blitzlog/stt/api-key", script)
+        self.assertIn("/blitzlog/stt/model", script)
+        self.assertIn("/blitzlog/stt/language", script)
+        self.assertIn("/blitzlog/stt/models-bucket", script)
+        self.assertIn("export STT_API_URL", script)
+        self.assertIn("export STT_API_KEY", script)
+        self.assertIn("export STT_MODEL", script)
+        self.assertIn("export STT_LANGUAGE", script)
+        self.assertIn("export STT_MODELS_BUCKET", script)
+
+    def test_stt_api_key_uses_with_decryption(self):
+        script = _read_secrets_from_ssm_script(42)
+        stt_key_idx = script.find("/blitzlog/stt/api-key")
+        self.assertNotEqual(stt_key_idx, -1)
+        self.assertIn("--with-decryption", script[stt_key_idx : stt_key_idx + 200])
+
+
+class TestSTTInBotConfig(unittest.TestCase):
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_api_url(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_URL=${STT_API_URL}", user_data)
+
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_api_key(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_KEY=${STT_API_KEY}", user_data)
+
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_model_and_language(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_MODEL=${STT_MODEL}", user_data)
+        self.assertIn("STT_LANGUAGE=${STT_LANGUAGE}", user_data)
+        self.assertIn("STT_REQUEST_FORMAT=multipart", user_data)
+
+    def test_whisper_install_script_downloads_from_github_release(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("github.com/ggml-org/whisper.cpp/releases/download", script)
+        self.assertIn("whisper-bin-aarch64-linux-gnu", script)
+
+    def test_whisper_install_script_falls_back_to_source_build(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("building whisper.cpp from source", script)
+        self.assertIn("cmake -S", script)
+
+    def test_whisper_install_script_downloads_model_from_s3(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("aws s3 cp", script)
+        self.assertIn("s3://${STT_MODELS_BUCKET}/models/", script)
+        self.assertIn("ggml-${STT_MODEL}.bin", script)
+
+    def test_whisper_install_script_writes_shim_source(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/opt/whisper-stt/server.js", script)
+        self.assertIn('require("busboy")', script)
+        self.assertIn("ffmpeg-static", script)
+
+    def test_whisper_install_script_writes_package_json(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/opt/whisper-stt/package.json", script)
+        self.assertIn('"busboy"', script)
+        self.assertIn('"ffmpeg-static"', script)
+        self.assertIn("npm install", script)
+
+    def test_whisper_install_script_installs_systemd_unit(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/etc/systemd/system/whisper-stt-shim.service", script)
+        self.assertIn("systemctl enable whisper-stt-shim.service", script)
+        self.assertIn("systemctl restart whisper-stt-shim.service", script)
+
+    def test_whisper_install_script_health_checks_before_bot(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("http://127.0.0.1:7878/healthz", script)
+        self.assertIn("curl -sf", script)
+
+    def test_whisper_install_script_embeds_loaded_shim_source(self):
+        script = _install_whisper_stt_script()
+        # The embedded source must contain recognizable shim identifiers so we
+        # catch accidental overwrites / empty reads during refactors.
+        self.assertIn('require("busboy")', script)
+        self.assertIn('require("ffmpeg-static")', script)
+        self.assertIn("whisper-stt-shim listening", script)
 
 
 class TestOpencodeProviderConfig(unittest.TestCase):

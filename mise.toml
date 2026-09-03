@@ -17,6 +17,8 @@ run = """
 rm -rf infra/build infra/.build-venv
 mkdir -p infra/build
 cp lambda/handler.py infra/build/
+mkdir -p infra/build/packages/whisper-stt-shim
+cp packages/whisper-stt-shim/server.js infra/build/packages/whisper-stt-shim/
 python3 -m venv infra/.build-venv
 infra/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t infra/build/
 rm -rf infra/.build-venv
