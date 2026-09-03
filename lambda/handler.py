@@ -18,6 +18,15 @@ logger.setLevel(logging.INFO)
 
 SSM_PATH = "/blitzlog"
 
+# Pinned to the most recent mise release confirmed working on AL2023 glibc 2.34.
+# The official installer (https://mise.run) defaults to its latest release, which
+# as of v2026.7.0 ships an arm64 glibc-linked binary requiring GLIBC_2.38/2.39.
+# AL2023 ships glibc 2.34, so the latest installer fails with
+# "/lib64/libc.so.6: version `GLIBC_2.39' not found".
+# Last release confirmed working on this host: v2026.6.14.
+# To bump: verify the candidate on a representative AL2023 arm64 instance first.
+MISE_VERSION = "v2026.6.14"
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WHISPER_STT_SHIM_CANDIDATES = (
     os.path.join(_HERE, "packages", "whisper-stt-shim", "server.js"),
@@ -1065,11 +1074,11 @@ PLUGIN_EOF
 
 
 def _install_toolchain_script() -> str:
-    return r"""
+    return f"""
 log "Checking for mise.toml or .tool-versions..."
 if [ -f /workspace/repo/mise.toml ] || [ -f /workspace/repo/.tool-versions ]; then
-    log "Installing mise..."
-    curl -fsSL https://mise.run | sh
+    log "Installing mise {MISE_VERSION}..."
+    curl -fsSL https://mise.run | MISE_VERSION="{MISE_VERSION}" sh
     export PATH="/root/.local/bin:$PATH"
 
     cd /workspace/repo
@@ -1081,7 +1090,7 @@ if [ -f /workspace/repo/mise.toml ] || [ -f /workspace/repo/.tool-versions ]; th
 
     MISE_SHIMS="/root/.local/share/mise/shims"
     if [ -d "$MISE_SHIMS" ]; then
-        echo "export PATH=$MISE_SHIMS:/root/.local/bin:\$PATH" > /etc/profile.d/mise.sh
+        echo "export PATH=$MISE_SHIMS:/root/.local/bin:\\$PATH" > /etc/profile.d/mise.sh
         export PATH="$MISE_SHIMS:$PATH"
     fi
 

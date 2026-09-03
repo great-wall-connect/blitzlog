@@ -259,7 +259,7 @@ Or, since the resolution is deterministic from `terraform.tfvars`, simply delete
 ## Instance lifecycle
 
 1. **Launch** — Lambda spawns a `t4g.medium` (or `t4g.large` / `t4g.xlarge`) spot instance with user-data.
-2. **Setup** — cloud-init configures git credentials, installs OpenCode, clones the target repo.
+2. **Setup** — cloud-init configures git credentials, installs OpenCode, clones the target repo. If the repo has a `mise.toml` or `.tool-versions`, the bootstrap also installs [ [mise](https://mise.jdx.dev/) ] pinned to a known-good version (see `MISE_VERSION` in `lambda/handler.py`) and runs `mise install` plus any `bootstrap` task. The pin exists because the floating-latest `mise.run` installer shipped a release that requires GLIBC_2.38/2.39, which the AL2023 base image (glibc 2.34) does not provide.
 3. **Agent run** — OpenCode reads the issue, creates a `feat/issue-{N}-{slug}` branch, implements, tests, lints, commits, pushes.
 4. **Watchdog** — `timeout 7200` (2 hours) forces termination if the agent hangs.
 5. **Shutdown** — post-exit script calls `ec2:TerminateInstances` via IMDSv2.
