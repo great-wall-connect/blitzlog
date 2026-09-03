@@ -10,13 +10,15 @@ resource "null_resource" "lambda_build" {
   triggers = {
     handler      = filemd5("${path.module}/../lambda/handler.py")
     requirements = filemd5("${path.module}/../lambda/requirements.txt")
+    shim_source  = filemd5("${path.module}/../packages/whisper-stt-shim/server.js")
   }
 
   provisioner "local-exec" {
     command = <<-EOT
       rm -rf ${path.module}/build ${path.module}/.build-venv
-      mkdir -p ${path.module}/build
+      mkdir -p ${path.module}/build/packages/whisper-stt-shim
       cp ${path.module}/../lambda/handler.py ${path.module}/build/
+      cp ${path.module}/../packages/whisper-stt-shim/server.js ${path.module}/build/packages/whisper-stt-shim/
       python3 -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
       ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../lambda/requirements.txt -t ${path.module}/build/

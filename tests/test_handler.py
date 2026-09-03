@@ -357,6 +357,64 @@ class TestSTTInBotConfig(unittest.TestCase):
         self.assertIn('require("ffmpeg-static")', script)
         self.assertIn("whisper-stt-shim listening", script)
 
+    def test_whisper_install_script_writes_clean_server_heredoc(self):
+        # Heredocs with quoted delimiters take the body literally. The body
+        # must NOT be wrapped in stray single quotes (that bug produces a 3-byte
+        # file and breaks the bot). Regression for issue surfaced on EC2.
+        script = _install_whisper_stt_script()
+        shim_block = script.split("<<'__WHISPER_SHIM_JS__'\n", 1)[1].split(
+            "__WHISPER_SHIM_JS__", 1
+        )[0]
+        self.assertFalse(
+            shim_block.startswith("'"),
+            f"server.js heredoc body must not be wrapped in stray quotes; got: {shim_block[:60]!r}",
+        )
+        self.assertGreater(
+            len(shim_block), 1000, "shim body should be ~5KB; got suspiciously short"
+        )
+        self.assertIn("const http = require(", shim_block)
+        self.assertIn("server.listen(PORT, HOST", shim_block)
+
+    def test_whisper_install_script_writes_clean_package_json_heredoc(self):
+        # The package.json heredoc body must be valid JSON, not wrapped in
+        # quotes. The bug produces invalid JSON like:
+        #   '{\n  "name": "@blitzlog/whisper-stt-shim",\n...
+        # which npm correctly fails to parse with EJSONPARSE.
+        script = _install_whisper_stt_script()
+        pkg_block = script.split("<<'__WHISPER_SHIM_PKG__'\n", 1)[1].split(
+            "__WHISPER_SHIM_PKG__", 1
+        )[0]
+        self.assertFalse(
+            pkg_block.startswith("'"),
+            f"package.json heredoc body must not be wrapped in stray quotes; got: {pkg_block[:60]!r}",
+        )
+        self.assertTrue(pkg_block.lstrip().startswith("{"))
+        self.assertTrue(pkg_block.rstrip().endswith("}"))
+        # Parses as JSON
+        import json as _json
+
+        parsed = _json.loads(pkg_block)
+        self.assertEqual(parsed["name"], "@blitzlog/whisper-stt-shim")
+
+    def test_whisper_install_script_writes_clean_systemd_heredoc(self):
+        script = _install_whisper_stt_script()
+        unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
+            "__WHISPER_SHIM_UNIT__", 1
+        )[0]
+        self.assertFalse(
+            unit_block.startswith("'"),
+            f"systemd unit heredoc body must not be wrapped in stray quotes; got: {unit_block[:60]!r}",
+        )
+        self.assertTrue(unit_block.lstrip().startswith("[Unit]"))
+        self.assertIn("ExecStart=/usr/bin/node server.js", unit_block)
+        self.assertIn("WantedBy=multi-user.target", unit_block)
+
+    def test_whisper_install_script_does_not_use_npm_silent(self):
+        # --silent hides npm errors. Drop it so future failures surface.
+        script = _install_whisper_stt_script()
+        self.assertNotIn("--silent", script)
+        self.assertIn("npm install", script)
+
 
 class TestOpencodeProviderConfig(unittest.TestCase):
     def test_heredoc_uses_minimax_provider(self):

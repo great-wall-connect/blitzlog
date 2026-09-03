@@ -547,8 +547,8 @@ _WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/arch
 
 
 def _install_whisper_stt_script() -> str:
-    shim_source = WHISPER_STT_SHIM_SOURCE.replace("'", "'\\''")
-    package_json = _WHISPER_STT_SHIM_PACKAGE_JSON.replace("'", "'\\''")
+    shim_source = WHISPER_STT_SHIM_SOURCE
+    package_json = _WHISPER_STT_SHIM_PACKAGE_JSON
     systemd_unit = (
         "[Unit]\n"
         "Description=Blitzlog whisper.cpp STT shim\n"
@@ -570,7 +570,7 @@ def _install_whisper_stt_script() -> str:
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
-    ).replace("'", "'\\''")
+    )
     return f"""
 log "Installing whisper.cpp STT backend..."
 
@@ -616,19 +616,19 @@ test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_
 # 3. Write shim source and package.json, install npm deps.
 log "Writing whisper-stt-shim source and installing dependencies..."
 cat > /opt/whisper-stt/server.js <<'__WHISPER_SHIM_JS__'
-'{shim_source}'
+{shim_source}
 __WHISPER_SHIM_JS__
 
 cat > /opt/whisper-stt/package.json <<'__WHISPER_SHIM_PKG__'
-'{package_json}'
+{package_json}
 __WHISPER_SHIM_PKG__
 
 cd /opt/whisper-stt
-npm install --omit=dev --no-audit --no-fund --silent 2>&1 | tail -3
+npm install --omit=dev --no-audit --no-fund 2>&1 | tail -20
 
 # 4. Write systemd unit and start the shim.
 cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
-'{systemd_unit}'
+{systemd_unit}
 __WHISPER_SHIM_UNIT__
 
 mkdir -p /etc/blitzlog
