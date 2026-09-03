@@ -38,6 +38,7 @@ Examples:
 3. **Tests required** — All new code must have tests (unit, integration, or e2e as appropriate)
 4. **No breaking changes** — Unless explicitly requested in the issue
 5. **Preserve coding style** — Match existing code conventions in the target repo
+6. **Missing build tools are project-side, not agent-side** — If a build fails because a toolchain component (C compiler, linker, system headers, etc.) is missing, **stop and report**; do not run `apt install`, `dnf install`, `brew install`, or equivalent. The project owns its build dependencies via the `bootstrap` task convention documented in [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md); if the project lacks a `bootstrap` task, the fix is a new commit to the target repo, not a self-healing install on the worker instance.
 
 ## Testing Commands
 
