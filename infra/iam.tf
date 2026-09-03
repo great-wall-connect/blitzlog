@@ -204,8 +204,20 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         ]
         Resource = [
           aws_ssm_parameter.opencode_api_key.arn,
+          aws_ssm_parameter.stt_api_url.arn,
+          aws_ssm_parameter.stt_api_key.arn,
+          aws_ssm_parameter.stt_model.arn,
+          aws_ssm_parameter.stt_language.arn,
+          aws_ssm_parameter.stt_models_bucket.arn,
           "arn:aws:ssm:*:*:parameter/blitzlog/ephemeral/*",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+        ]
+        Resource = "${aws_s3_bucket.stt_models.arn}/*"
       },
     ]
   })
@@ -254,4 +266,39 @@ resource "aws_ssm_parameter" "opencode_api_key" {
   type        = "SecureString"
   value       = var.opencode_api_key
   description = "OpenCode inference provider API key"
+}
+
+resource "aws_ssm_parameter" "stt_api_url" {
+  name        = "/blitzlog/stt/api-url"
+  type        = "String"
+  value       = var.stt_api_url
+  description = "Whisper-compatible STT endpoint exposed by whisper-stt-shim on the EC2 instance"
+}
+
+resource "aws_ssm_parameter" "stt_api_key" {
+  name        = "/blitzlog/stt/api-key"
+  type        = "SecureString"
+  value       = var.stt_api_key
+  description = "API key passed through to the STT provider (unused by the localhost shim but required by the bot)"
+}
+
+resource "aws_ssm_parameter" "stt_model" {
+  name        = "/blitzlog/stt/model"
+  type        = "String"
+  value       = var.stt_model
+  description = "whisper.cpp model name (e.g. base.en, tiny.en, small.en)"
+}
+
+resource "aws_ssm_parameter" "stt_language" {
+  name        = "/blitzlog/stt/language"
+  type        = "String"
+  value       = var.stt_language
+  description = "Whisper language hint passed to whisper-cli (empty = auto-detect)"
+}
+
+resource "aws_ssm_parameter" "stt_models_bucket" {
+  name        = "/blitzlog/stt/models-bucket"
+  type        = "String"
+  value       = aws_s3_bucket.stt_models.bucket
+  description = "S3 bucket hosting whisper.cpp model files for EC2 boot-time download"
 }

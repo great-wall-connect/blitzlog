@@ -19,6 +19,7 @@ from handler import (
     _configure_git_script,
     _decode_api_errors_script,
     _install_toolchain_script,
+    _install_whisper_stt_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
     _write_periodic_autosave_plugin_script,
@@ -174,6 +175,28 @@ class TestNoSecretsInUserData(unittest.TestCase):
         self.assertIn('user.email "12345+octocat@users.noreply.github.com"', script)
         self.assertIn("escobar", script)
 
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_assisted_no_embedded_stt_api_key(self):
+        # STT_API_KEY is a SecureString; the user-data must reference the
+        # runtime-fetched shell variable rather than bake a literal value.
+        script = build_assisted_user_data(
+            "org/repo",
+            42,
+            "octocat",
+            "12345",
+            bot_name="escobar",
+            bot_token="123456:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_KEY=${STT_API_KEY}", script)
+        self.assertIn("export STT_API_KEY", script)
+        # The bot .env heredoc assigns from the runtime shell variable only;
+        # no literal value should be embedded.
+        self.assertNotRegex(script, r"STT_API_KEY=[^$\n][^\n]*")
+
     def test_no_identity_without_sender(self):
         script = build_autonomous_user_data("org/repo", 42)
         self.assertNotIn("user.name", script)
@@ -208,6 +231,189 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("github-token-13", script13)
         self.assertIn("github-token-99", script99)
         self.assertNotIn("github-token-99", script13)
+
+    def test_fetches_stt_params(self):
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn("/blitzlog/stt/api-url", script)
+        self.assertIn("/blitzlog/stt/api-key", script)
+        self.assertIn("/blitzlog/stt/model", script)
+        self.assertIn("/blitzlog/stt/language", script)
+        self.assertIn("/blitzlog/stt/models-bucket", script)
+        self.assertIn("export STT_API_URL", script)
+        self.assertIn("export STT_API_KEY", script)
+        self.assertIn("export STT_MODEL", script)
+        self.assertIn("export STT_LANGUAGE", script)
+        self.assertIn("export STT_MODELS_BUCKET", script)
+
+    def test_stt_api_key_uses_with_decryption(self):
+        script = _read_secrets_from_ssm_script(42)
+        stt_key_idx = script.find("/blitzlog/stt/api-key")
+        self.assertNotEqual(stt_key_idx, -1)
+        self.assertIn("--with-decryption", script[stt_key_idx : stt_key_idx + 200])
+
+
+class TestSTTInBotConfig(unittest.TestCase):
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_api_url(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_URL=${STT_API_URL}", user_data)
+
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_api_key(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_API_KEY=${STT_API_KEY}", user_data)
+
+    @patch.dict(
+        os.environ,
+        {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        },
+    )
+    def test_bot_env_has_stt_model_and_language(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            sender_login="octocat",
+            bot_name="escobar",
+            bot_token="123:ABC",
+            telegram_user_id="99999",
+        )
+        self.assertIn("STT_MODEL=${STT_MODEL}", user_data)
+        self.assertIn("STT_LANGUAGE=${STT_LANGUAGE}", user_data)
+        self.assertIn("STT_REQUEST_FORMAT=multipart", user_data)
+
+    def test_whisper_install_script_downloads_from_github_release(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("github.com/ggml-org/whisper.cpp/releases/download", script)
+        self.assertIn("whisper-bin-aarch64-linux-gnu", script)
+
+    def test_whisper_install_script_falls_back_to_source_build(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("building whisper.cpp from source", script)
+        self.assertIn("cmake -S", script)
+
+    def test_whisper_install_script_downloads_model_from_s3(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("aws s3 cp", script)
+        self.assertIn("s3://${STT_MODELS_BUCKET}/models/", script)
+        self.assertIn("ggml-${STT_MODEL}.bin", script)
+
+    def test_whisper_install_script_writes_shim_source(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/opt/whisper-stt/server.js", script)
+        self.assertIn('require("busboy")', script)
+        self.assertIn("ffmpeg-static", script)
+
+    def test_whisper_install_script_writes_package_json(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/opt/whisper-stt/package.json", script)
+        self.assertIn('"busboy"', script)
+        self.assertIn('"ffmpeg-static"', script)
+        self.assertIn("npm install", script)
+
+    def test_whisper_install_script_installs_systemd_unit(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("/etc/systemd/system/whisper-stt-shim.service", script)
+        self.assertIn("systemctl enable whisper-stt-shim.service", script)
+        self.assertIn("systemctl restart whisper-stt-shim.service", script)
+
+    def test_whisper_install_script_health_checks_before_bot(self):
+        script = _install_whisper_stt_script()
+        self.assertIn("http://127.0.0.1:7878/healthz", script)
+        self.assertIn("curl -sf", script)
+
+    def test_whisper_install_script_embeds_loaded_shim_source(self):
+        script = _install_whisper_stt_script()
+        # The embedded source must contain recognizable shim identifiers so we
+        # catch accidental overwrites / empty reads during refactors.
+        self.assertIn('require("busboy")', script)
+        self.assertIn('require("ffmpeg-static")', script)
+        self.assertIn("whisper-stt-shim listening", script)
+
+    def test_whisper_install_script_writes_clean_server_heredoc(self):
+        # Heredocs with quoted delimiters take the body literally. The body
+        # must NOT be wrapped in stray single quotes (that bug produces a 3-byte
+        # file and breaks the bot). Regression for issue surfaced on EC2.
+        script = _install_whisper_stt_script()
+        shim_block = script.split("<<'__WHISPER_SHIM_JS__'\n", 1)[1].split(
+            "__WHISPER_SHIM_JS__", 1
+        )[0]
+        self.assertFalse(
+            shim_block.startswith("'"),
+            f"server.js heredoc body must not be wrapped in stray quotes; got: {shim_block[:60]!r}",
+        )
+        self.assertGreater(
+            len(shim_block), 1000, "shim body should be ~5KB; got suspiciously short"
+        )
+        self.assertIn("const http = require(", shim_block)
+        self.assertIn("server.listen(PORT, HOST", shim_block)
+
+    def test_whisper_install_script_writes_clean_package_json_heredoc(self):
+        # The package.json heredoc body must be valid JSON, not wrapped in
+        # quotes. The bug produces invalid JSON like:
+        #   '{\n  "name": "@blitzlog/whisper-stt-shim",\n...
+        # which npm correctly fails to parse with EJSONPARSE.
+        script = _install_whisper_stt_script()
+        pkg_block = script.split("<<'__WHISPER_SHIM_PKG__'\n", 1)[1].split(
+            "__WHISPER_SHIM_PKG__", 1
+        )[0]
+        self.assertFalse(
+            pkg_block.startswith("'"),
+            f"package.json heredoc body must not be wrapped in stray quotes; got: {pkg_block[:60]!r}",
+        )
+        self.assertTrue(pkg_block.lstrip().startswith("{"))
+        self.assertTrue(pkg_block.rstrip().endswith("}"))
+        # Parses as JSON
+        import json as _json
+
+        parsed = _json.loads(pkg_block)
+        self.assertEqual(parsed["name"], "@blitzlog/whisper-stt-shim")
+
+    def test_whisper_install_script_writes_clean_systemd_heredoc(self):
+        script = _install_whisper_stt_script()
+        unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
+            "__WHISPER_SHIM_UNIT__", 1
+        )[0]
+        self.assertFalse(
+            unit_block.startswith("'"),
+            f"systemd unit heredoc body must not be wrapped in stray quotes; got: {unit_block[:60]!r}",
+        )
+        self.assertTrue(unit_block.lstrip().startswith("[Unit]"))
+        self.assertIn("ExecStart=/usr/bin/node server.js", unit_block)
+        self.assertIn("WantedBy=multi-user.target", unit_block)
+
+    def test_whisper_install_script_does_not_use_npm_silent(self):
+        # --silent hides npm errors. Drop it so future failures surface.
+        script = _install_whisper_stt_script()
+        self.assertNotIn("--silent", script)
+        self.assertIn("npm install", script)
 
 
 class TestOpencodeProviderConfig(unittest.TestCase):
@@ -1347,16 +1553,39 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_installs_node_24_via_dnf(self):
+    def test_assisted_installs_node_24_via_tarball(self):
+        # Direct tarball from nodejs.org — bypasses AL2023 dnf repo gaps that
+        # left the previous dnf install silently failing on some AMIs (set -eu
+        # with `dnf install | tail -5` returned tail's exit code, masking dnf
+        # failures; the bot then ran on the AL2023 default Node v20, which
+        # the upstream Telegram bot rejects with "requires Node.js 22.14+").
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("dnf install -y nodejs24 nodejs24-npm", user_data)
+        self.assertIn(
+            "https://nodejs.org/dist/v24.6.0/node-v24.6.0-linux-arm64.tar.xz",
+            user_data,
+        )
+        self.assertIn("tar -xJ -C /usr/local --strip-components=1", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_sets_node_alternative_to_24(self):
+    def test_assisted_guards_node_install_by_major_version(self):
+        # Idempotency: skip the download when the AL2023 base image already
+        # ships a new-enough Node (e.g., future AMIs).
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("alternatives --set node /usr/bin/node-24", user_data)
+        self.assertIn("NODE_MAJOR=$(node --version", user_data)
+        self.assertIn('if [ "$NODE_MAJOR" -lt 24 ]', user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_assisted_no_dnf_node_install(self):
+        # Regression guard: the previous dnf-based install silently failed on
+        # some AL2023 AMIs (nodejs24 not in default repos + `| tail -5`
+        # masking the exit code). If anyone reverts to dnf, this fires.
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertNotIn("dnf install -y nodejs24", user_data)
+        self.assertNotIn("dnf install -y nodejs22", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -1364,13 +1593,6 @@ class TestNodeVersionGuard(unittest.TestCase):
     def test_assisted_invokes_bot_via_npx(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertIn("npx -y @grinev/opencode-telegram-bot@latest start", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_tarball_install(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("nodejs.org/dist/v", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}

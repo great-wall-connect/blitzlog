@@ -27,3 +27,8 @@ output "api_gateway_id" {
   description = "API Gateway HTTP API ID"
   value       = aws_apigatewayv2_api.webhook.id
 }
+
+output "stt_models_bucket" {
+  description = "S3 bucket hosting whisper.cpp model files for the local STT shim. Upload ggml-<model>.bin to models/ before first boot."
+  value       = aws_s3_bucket.stt_models.bucket
+}
