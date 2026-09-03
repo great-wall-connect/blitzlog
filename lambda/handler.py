@@ -1354,6 +1354,7 @@ if [ "$NODE_MAJOR" -lt 24 ]; then
         | tar -xJ -C /usr/local --strip-components=1
 fi
 hash -r
+export PATH="/usr/local/bin:$PATH"
 node --version
 npm --version
 

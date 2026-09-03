@@ -1590,6 +1590,21 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
+    def test_assisted_node_install_exports_path(self):
+        # The tarball install places Node v24 at /usr/local/bin/node, but the
+        # bootstrap script's PATH (cloud-init / systemd context) doesn't
+        # always include /usr/local/bin first — in which case downstream
+        # commands like `node`, `npm`, and the bot launch via `npx` still
+        # resolve to /usr/bin/node (v20). Force it.
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertRegex(
+            user_data,
+            r"export PATH=\"/usr/local/bin:\$PATH\"",
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_assisted_invokes_bot_via_npx(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         self.assertIn("npx -y @grinev/opencode-telegram-bot@latest start", user_data)
