@@ -5,15 +5,19 @@ Exposes an OpenAI Whisper-compatible /v1/audio/transcriptions endpoint
 backed by pywhispercpp (Python bindings for whisper.cpp). The model
 lives at $WHISPER_MODEL on disk; inference is in-memory (no JSON file
 written to disk).
+
+Multipart parsing uses python-multipart (FastAPI's parser) rather
+than the deprecated stdlib `cgi` module — `cgi` is broken on Python
+3.12 for the multipart format the Telegram bot (undici) sends.
 """
 
-import cgi
 import json
 import os
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from multipart.multipart import MultipartParser, parse_options_header
 from pywhispercpp.model import Model
 
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -33,7 +37,21 @@ def get_model():
     return _model
 
 
-def transcribe(wav_path, language):
+def transcribe(wav_path, language, prompt=None):
+    args = [
+        "-m",
+        MODEL_PATH,
+        "-f",
+        wav_path,
+        "--language",
+        language or "auto",
+        "--no-timestamps",
+        "--print-special",
+        "false",
+        "--output-json",
+    ]
+    if prompt:
+        args.extend(["--prompt", prompt])
     result = get_model().transcribe(wav_path, language=language)
     if isinstance(result, dict):
         text = result.get("text") or ""
@@ -53,25 +71,62 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/audio/transcriptions":
             self.send_error(404)
             return
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers)
-        if "file" not in form:
-            # TEMPORARY diagnostic — removed once the Telegram bot's
-            # multipart shape is known. Helps us distinguish "wrong field
-            # name" (keys=['audio']) from "cgi parse failure" (keys=[]).
+
+        content_type = self.headers.get("Content-Type", "")
+        _main_type, options = parse_options_header(content_type)
+        boundary = options.get("boundary", "").encode("ascii")
+        content_length = int(self.headers.get("Content-Length", "0") or 0)
+        parser = MultipartParser(
+            self.rfile,
+            boundary=boundary,
+            content_length=content_length,
+        )
+
+        file_bytes = None
+        prompt = None
+        seen_field_names = []
+        try:
+            for part in parser.parse():
+                seen_field_names.append(part.name)
+                if part.name == "file":
+                    file_bytes = part.file.read()
+                    part.file.close()
+                elif part.name == "prompt":
+                    # python-multipart exposes text fields via .text
+                    # (decoded). Fall back to reading .file bytes if not.
+                    raw = getattr(part, "text", None)
+                    if raw is None and getattr(part, "file", None) is not None:
+                        raw = part.file.read().decode("utf-8", errors="replace")
+                        part.file.close()
+                    prompt = raw
+        except Exception as e:  # noqa: BLE001 — surface multipart parse errors
             sys.stderr.write(
-                f"DEBUG cgi parse: content_type={self.headers.get('Content-Type')!r} "
-                f"content_length={self.headers.get('Content-Length')!r} "
-                f"keys={list(form.keys())}\n"
+                f"DEBUG multipart parse failed: content_type={content_type!r} "
+                f"content_length={content_length} "
+                f"error={e}\n"
+            )
+            sys.stderr.flush()
+            self._send_json(400, {"error": f"multipart parse failed: {e}"})
+            return
+
+        if file_bytes is None:
+            # TEMPORARY diagnostic — kept until end-to-end voice transcribes
+            # successfully. Confirms which fields the bot actually sends.
+            sys.stderr.write(
+                f"DEBUG multipart: content_type={content_type!r} "
+                f"content_length={content_length} "
+                f"seen_fields={seen_field_names} "
+                f"prompt_received={prompt is not None}\n"
             )
             sys.stderr.flush()
             self._send_json(400, {"error": "missing 'file' field"})
             return
-        f = form["file"]
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(f.file.read())
+            tmp.write(file_bytes)
             tmp_path = tmp.name
         try:
-            text = transcribe(tmp_path, LANGUAGE)
+            text = transcribe(tmp_path, LANGUAGE, prompt=prompt)
             self._send_json(200, {"text": text})
         except Exception as e:  # noqa: BLE001 — handler must surface any failure
             self._send_json(500, {"error": f"transcription failed: {e}"})
