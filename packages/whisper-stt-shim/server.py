@@ -32,8 +32,11 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        # ggml-base.en.bin -> "base.en" (pywhispercpp naming)
-        name = os.path.basename(MODEL_PATH).removeprefix("ggml-").removesuffix(".bin")
+        # Pass the full filename (e.g. "ggml-base.en.bin"). pywhispercpp's
+        # resolve_model_path checks <models_dir>/<name> first; with the full
+        # filename the local file matches and is used directly, avoiding a
+        # download attempt that would fail without network/permission.
+        name = os.path.basename(MODEL_PATH)
         _model = Model(name, models_dir=os.path.dirname(MODEL_PATH))
     return _model
 
