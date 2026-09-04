@@ -569,258 +569,251 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         self.assertIn("1008", script)
 
 
-class TestWhisperShimMultipart(unittest.TestCase):
-    """End-to-end tests of the Python shim's multipart parser.
+class TestParseMultipart(unittest.TestCase):
+    """Unit tests for the shim's `parse_multipart` helper.
 
-    These tests instantiate the shim's `Handler` class directly with
-    a mock `rfile`/`headers`/`wfile` so we exercise the actual
-    `cgi.FieldStorage` parsing path the bot's HTTP request will hit.
+    These exercise the real python_multipart callback flow with real
+    multipart bodies — no mocking of the parser itself.
     """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    @staticmethod
+    def _multipart(fields, boundary="----TestBoundary"):
+        """Build a real multipart/form-data body from a list of fields.
+
+        Each field is one of:
+          - (name, value)              — text field, value is str
+          - (name, filename, bytes, ct) — file field
+        Returns (boundary_str, body_bytes).
+        """
+        body = bytearray()
+        for f in fields:
+            name = f[0]
+            if len(f) == 2:
+                value = f[1]
+                body += (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode()
+            else:
+                _filename, content, ctype = f[1], f[2], f[3]
+                body += (
+                    (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{name}"; filename="{_filename}"\r\n'
+                        f"Content-Type: {ctype}\r\n\r\n"
+                    ).encode()
+                    + content
+                    + b"\r\n"
+                )
+        body += f"--{boundary}--\r\n".encode()
+        return boundary, bytes(body)
+
+    def test_parse_multipart_extracts_file_field(self):
+        boundary, body = self._multipart(
+            [
+                ("file", "audio.wav", b"FAKE_WAV_DATA", "audio/wav"),
+            ]
+        )
+        parsed = self.shim_server.parse_multipart(body, boundary.encode("ascii"))
+        self.assertEqual(parsed["file"], b"FAKE_WAV_DATA")
+        self.assertIsNone(parsed["prompt"])
+        self.assertEqual(parsed["fields"], [b"file"])
+
+    def test_parse_multipart_extracts_prompt_field(self):
+        boundary, body = self._multipart(
+            [
+                ("file", "audio.wav", b"DATA", "audio/wav"),
+                ("prompt", "The following text is..."),
+            ]
+        )
+        parsed = self.shim_server.parse_multipart(body, boundary.encode("ascii"))
+        self.assertEqual(parsed["file"], b"DATA")
+        self.assertEqual(parsed["prompt"], b"The following text is...")
+        self.assertEqual(parsed["fields"], [b"file", b"prompt"])
+
+    def test_parse_multipart_empty_body(self):
+        # Empty body — parse_multipart returns an empty result (no parts).
+        result = self.shim_server.parse_multipart(b"", b"----boundary")
+        self.assertIsNone(result.get("file"))
+        self.assertIsNone(result.get("prompt"))
+        self.assertEqual(result.get("fields"), [])
+
+    def test_shim_installs_python_multipart(self):
+        """python-multipart (new name: python_multipart) is the modern,
+        robust multipart parser. cgi is deprecated in 3.11, removed in
+        3.13. The bootstrap installs it as a replacement."""
+        script = _install_whisper_stt_script()
+        self.assertIn("python-multipart", script)
+
+
+class TestShimHttpHandler(unittest.TestCase):
+    """End-to-end HTTP tests: spin up the shim's handler, post a real
+    multipart body, assert the response. Mocks `transcribe` so no model
+    file is needed."""
 
     @staticmethod
     def _multipart_body(fields, boundary="----TestBoundary"):
-        """Build a minimal multipart/form-data body from a dict of
-        field_name -> str|bytes."""
-        parts = []
-        for name, value in fields.items():
-            parts.append(f"--{boundary}\r\n")
-            if isinstance(value, tuple):
-                # (filename, content, content_type)
-                filename, content, content_type = value
-                parts.append(
-                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-                )
-                if content_type:
-                    parts.append(f"Content-Type: {content_type}\r\n")
-                parts.append("\r\n")
-                parts.append(
-                    content if isinstance(content, str) else content.decode("latin-1")
-                )
-                parts.append("\r\n")
+        """Build a minimal multipart/form-data body from a list of fields.
+
+        Each field is one of:
+          - (name, str)              — text field
+          - (name, filename, bytes, content_type) — file field
+        Returns (boundary_str, body_bytes).
+        """
+        body = bytearray()
+        for f in fields:
+            name = f[0]
+            if len(f) == 2:
+                value = f[1]
+                body += (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode()
             else:
-                parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n')
-                parts.append(
-                    value if isinstance(value, str) else value.decode("latin-1")
+                _filename, content, ctype = f[1], f[2], f[3]
+                body += (
+                    (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{name}"; filename="{_filename}"\r\n'
+                        f"Content-Type: {ctype}\r\n\r\n"
+                    ).encode()
+                    + content
+                    + b"\r\n"
                 )
-                parts.append("\r\n")
-        parts.append(f"--{boundary}--\r\n")
-        return boundary, "".join(parts).encode("latin-1")
+        body += f"--{boundary}--\r\n".encode()
+        return boundary, bytes(body)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
 
     @staticmethod
-    def _run_handler(handler, body, content_type):
-        """Drive handler.do_POST with a synthetic request. Returns the
-        captured response body."""
-        from io import BytesIO
+    def _setup_handler(body, content_type):
+        # Imported here so we capture the test class's shim_server at
+        # call time. We can't use cls (the static method has no cls).
+        from io import BytesIO, StringIO
 
+        handler = TestShimHttpHandler.shim_server.Handler.__new__(
+            TestShimHttpHandler.shim_server.Handler
+        )
         handler.rfile = BytesIO(body)
         handler.headers = {
             "Content-Type": content_type,
             "Content-Length": str(len(body)),
         }
-        # Force attribute assignment via __dict__ to bypass any descriptor
-        # magic in BaseHTTPRequestHandler (which might intercept setattr).
+        # Force attribute assignment via __dict__ to bypass any
+        # descriptor magic in BaseHTTPRequestHandler.
         handler.__dict__["rfile"] = handler.rfile
         handler.__dict__["headers"] = handler.headers
         handler.wfile = BytesIO()
         handler.path = "/v1/audio/transcriptions"
         handler.command = "POST"
         handler.request_version = "HTTP/1.1"
-        handler.do_POST()
-        return handler.wfile.getvalue()
+        # send_response() calls log_message() which reads requestline;
+        # bypass BaseHTTPRequestHandler via Handler.__new__.
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
 
-    def test_shim_returns_400_on_missing_file_field(self):
-        """When the multipart has no `file` field, return 400 with a
-        clear error — not 500. Regression for the Telegram bot bug
-        where cgi.FieldStorage returned an empty form."""
-        import sys
-        from io import BytesIO, StringIO
+        # Capture stderr so we can assert diagnostic output.
+        old_stderr = sys.stderr
+        captured = StringIO()
+        sys.stderr = captured
+        return handler, captured, old_stderr
 
-        shim_server = _load_shim_server()
-
-        # Patch MultipartParser to return no parts (mimics the Telegram-bot
-        # scenario where the multipart parsed to nothing). Bypasses real
-        # python-multipart parsing so the test exercises only the shim's
-        # own logic.
-        def fake_multipart_parser(*_args, **_kwargs):
-            class _FakeParser:
-                def parse(self):
-                    return []
-
-            return _FakeParser()
-
-        original_parser = shim_server.MultipartParser
-        shim_server.MultipartParser = fake_multipart_parser
-
+    def test_handler_400_when_no_file_field(self):
+        """Multipart without a `file` field → 400 (not 500)."""
+        boundary, body = self._multipart_body([("prompt", "no file")])
+        handler, _captured, old_stderr = self._setup_handler(
+            body, f"multipart/form-data; boundary={boundary}"
+        )
         try:
-            handler = shim_server.Handler.__new__(shim_server.Handler)
-            handler.rfile = BytesIO(b"--boundary--\r\n")
-            handler.headers = {
-                "Content-Type": "multipart/form-data; boundary=boundary",
-                "Content-Length": "15",
-            }
-            handler.wfile = BytesIO()
-            handler.path = "/v1/audio/transcriptions"
-            handler.command = "POST"
-            handler.request_version = "HTTP/1.1"
-            # send_response() in BaseHTTPRequestHandler calls log_message()
-            # which reads self.requestline. We bypass BaseHTTPRequestHandler
-            # via Handler.__new__, so set the attributes the parent
-            # expects (requestline, client_address, etc.).
-            handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
-            handler.client_address = ("test", 0)
-            handler.server = None
-
-            captured = StringIO()
-            old_stderr = sys.stderr
-            sys.stderr = captured
-            try:
-                handler.do_POST()
-            finally:
-                sys.stderr = old_stderr
-
-            response = handler.wfile.getvalue()
-        finally:
-            shim_server.MultipartParser = original_parser
-
-        self.assertIn(b"400", response[:50], response)
-        self.assertIn(b"missing 'file' field", response, response)
-        # The diagnostic should have logged which fields were seen.
-        debug_log = captured.getvalue()
-        self.assertIn("DEBUG multipart", debug_log, debug_log)
-
-    def test_shim_accepts_file_field(self):
-        """Standard case: multipart with a `file` field. The shim
-        should respond 200 with {"text": ...} after transcription. We
-        mock pywhispercpp so the test doesn't need a real model file."""
-        from io import BytesIO
-
-        shim_server = _load_shim_server()
-
-        # Patch MultipartParser to return a fake part with a 'file' field.
-        # The shim reads part.file.read() for files; we use BytesIO so
-        # file_bytes is real bytes.
-        class FakePart:
-            def __init__(self, name, file_bytes=None, text=None):
-                self.name = name
-                if file_bytes is not None:
-                    self.file = BytesIO(file_bytes)
-                if text is not None:
-                    self.text = text
-
-        class FakeParser:
-            def __init__(self, parts):
-                self._parts = parts
-
-            def parse(self):
-                return list(self._parts)
-
-        def fake_multipart_parser(*_args, **_kwargs):
-            return FakeParser([FakePart(name="file", file_bytes=b"FAKE_AUDIO")])
-
-        original_parser = shim_server.MultipartParser
-        original_transcribe = shim_server.transcribe
-        shim_server.MultipartParser = fake_multipart_parser
-        shim_server.transcribe = lambda _path, _lang, prompt=None: "hello world"
-
-        try:
-            handler = shim_server.Handler.__new__(shim_server.Handler)
-            handler.rfile = BytesIO(b"--boundary--\r\n")
-            handler.headers = {
-                "Content-Type": "multipart/form-data; boundary=boundary",
-                "Content-Length": "15",
-            }
-            handler.wfile = BytesIO()
-            handler.path = "/v1/audio/transcriptions"
-            handler.command = "POST"
-            handler.request_version = "HTTP/1.1"
-            handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
-            handler.client_address = ("test", 0)
-            handler.server = None
-
             handler.do_POST()
             response = handler.wfile.getvalue()
         finally:
-            shim_server.MultipartParser = original_parser
-            shim_server.transcribe = original_transcribe
+            import sys
 
-        # Must be 200 with the transcribed text.
-        self.assertIn(b"200", response[:50], response)
-        self.assertIn(b"hello world", response, response)
+            sys.stderr = old_stderr
 
-    def test_shim_forwards_prompt_field_to_whisper(self):
-        """When the multipart has a `prompt` field, the shim passes it
-        as --prompt to whisper-cli. STT_NOTE_PROMPT flows from the bot
-        to whisper as a homophone-disambiguation hint."""
-        from io import BytesIO
+        self.assertIn(b"400", response[:50])
+        self.assertIn(b"missing 'file' field", response)
+        # Diagnostic should log which fields the bot actually sent.
+        debug = _captured.getvalue()
+        self.assertIn("DEBUG multipart", debug)
+        self.assertIn("prompt", debug)  # saw the prompt field
 
-        shim_server = _load_shim_server()
+    def test_handler_200_with_file_field(self):
+        """Multipart with `file` → 200 + transcription text."""
+        boundary, body = self._multipart_body(
+            [
+                ("file", "audio.wav", b"FAKE_WAV", "audio/wav"),
+            ]
+        )
+        handler, _captured, old_stderr = self._setup_handler(
+            body, f"multipart/form-data; boundary={boundary}"
+        )
 
-        class FakePart:
-            def __init__(self, name, file_bytes=None, text=None):
-                self.name = name
-                if file_bytes is not None:
-                    self.file = BytesIO(file_bytes)
-                if text is not None:
-                    self.text = text
+        captured_transcribe = {"prompt": None}
+        original_transcribe = self.shim_server.transcribe
 
-        class FakeParser:
-            def __init__(self, parts):
-                self._parts = parts
-
-            def parse(self):
-                return list(self._parts)
-
-        def fake_multipart_parser(*_args, **_kwargs):
-            return FakeParser(
-                [
-                    FakePart(name="file", file_bytes=b"FAKE_AUDIO"),
-                    FakePart(name="prompt", text="The following text is..."),
-                ]
-            )
-
-        original_parser = shim_server.MultipartParser
-        captured = {"prompt": None, "language": None}
-        original_transcribe = shim_server.transcribe
-
-        def capture_transcribe(_wav_path, language, prompt=None):
-            captured["prompt"] = prompt
-            captured["language"] = language
+        def mock_transcribe(_path, language, prompt=None):
+            captured_transcribe["prompt"] = prompt
             return "transcribed"
 
-        shim_server.MultipartParser = fake_multipart_parser
-        shim_server.transcribe = capture_transcribe
-
+        self.shim_server.transcribe = mock_transcribe
         try:
-            handler = shim_server.Handler.__new__(shim_server.Handler)
-            handler.rfile = BytesIO(b"--boundary--\r\n")
-            handler.headers = {
-                "Content-Type": "multipart/form-data; boundary=boundary",
-                "Content-Length": "15",
-            }
-            handler.wfile = BytesIO()
-            handler.path = "/v1/audio/transcriptions"
-            handler.command = "POST"
-            handler.request_version = "HTTP/1.1"
-            handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
-            handler.client_address = ("test", 0)
-            handler.server = None
-
             handler.do_POST()
+            response = handler.wfile.getvalue()
         finally:
-            shim_server.MultipartParser = original_parser
-            shim_server.transcribe = original_transcribe
+            self.shim_server.transcribe = original_transcribe
+            import sys
 
-        self.assertEqual(captured["prompt"], "The following text is...")
-        self.assertEqual(captured["language"], "en")
+            sys.stderr = old_stderr
 
-    def test_shim_installs_python_multipart(self):
-        """python-multipart is the modern, robust multipart parser.
-        cgi (deprecated since 3.11, removed 3.13) has known issues on
-        3.12; we install python-multipart in the bootstrap as a
-        proactive dependency for the upcoming cgi -> python-multipart
-        migration."""
-        script = _install_whisper_stt_script()
-        self.assertIn("python-multipart", script)
+        self.assertIn(b"200", response[:50])
+        self.assertIn(b"transcribed", response)
+        # No prompt field in this test → transcribe should have seen None.
+        self.assertIsNone(captured_transcribe["prompt"])
+
+    def test_handler_forwards_prompt_field_to_transcribe(self):
+        """Multipart with `file` + `prompt` → transcribe receives prompt."""
+        boundary, body = self._multipart_body(
+            [
+                ("file", "audio.wav", b"FAKE_WAV", "audio/wav"),
+                ("prompt", "The following text is..."),
+            ]
+        )
+        handler, _captured, old_stderr = self._setup_handler(
+            body, f"multipart/form-data; boundary={boundary}"
+        )
+
+        captured_transcribe = {"prompt": None, "language": None}
+        original_transcribe = self.shim_server.transcribe
+
+        def mock_transcribe(_path, language, prompt=None):
+            captured_transcribe["prompt"] = prompt
+            captured_transcribe["language"] = language
+            return "ok"
+
+        self.shim_server.transcribe = mock_transcribe
+        try:
+            handler.do_POST()
+            response = handler.wfile.getvalue()
+        finally:
+            self.shim_server.transcribe = original_transcribe
+            import sys
+
+            sys.stderr = old_stderr
+
+        self.assertIn(b"200", response[:50])
+        self.assertEqual(captured_transcribe["prompt"], b"The following text is...")
+        self.assertEqual(captured_transcribe["language"], "en")
 
     def test_decodes_unauthorized_401(self):
         script = _decode_api_errors_script()

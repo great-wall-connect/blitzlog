@@ -6,9 +6,9 @@ backed by pywhispercpp (Python bindings for whisper.cpp). The model
 lives at $WHISPER_MODEL on disk; inference is in-memory (no JSON file
 written to disk).
 
-Multipart parsing uses python-multipart (FastAPI's parser) rather
-than the deprecated stdlib `cgi` module — `cgi` is broken on Python
-3.12 for the multipart format the Telegram bot (undici) sends.
+Multipart parsing uses python_multipart (>=0.0.32) and its
+callback API, since the stdlib `cgi` module is deprecated in 3.11 and
+broken on 3.12 for non-stdlib multipart encodings (e.g. undici's).
 """
 
 import json
@@ -16,8 +16,9 @@ import os
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
 
-from multipart.multipart import MultipartParser, parse_options_header
+from python_multipart.multipart import parse_form, parse_options_header
 from pywhispercpp.model import Model
 
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -60,6 +61,38 @@ def transcribe(wav_path, language, prompt=None):
     return text.strip()
 
 
+def parse_multipart(body, boundary):
+    """Parse a multipart body via python_multipart's high-level
+    callback API (`parse_form`).
+
+    Returns a dict with keys:
+      - "file": bytes | None  — the bytes of the "file" field, if any
+      - "prompt": str | None  — the text of the "prompt" field, if any
+      - "fields": list[str]   — the parsed field names in order
+    """
+    out = {"file": None, "prompt": None, "fields": []}
+
+    headers = {
+        "Content-Type": ("multipart/form-data; boundary=" + boundary.decode("latin-1")),
+        "Content-Length": str(len(body)),
+    }
+
+    def on_field(field):
+        out["fields"].append(field.field_name)
+        if field.field_name == b"prompt":
+            out["prompt"] = field.value
+
+    def on_file(file):
+        out["fields"].append(file.field_name)
+        if file.field_name == b"file" and file.file_object is not None:
+            obj = file.file_object
+            obj.seek(0)
+            out["file"] = obj.read()
+
+    parse_form(headers, BytesIO(body), on_field=on_field, on_file=on_file)
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
@@ -73,48 +106,29 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         content_type = self.headers.get("Content-Type", "")
-        _main_type, options = parse_options_header(content_type)
-        boundary = options.get("boundary", "").encode("ascii")
-        content_length = int(self.headers.get("Content-Length", "0") or 0)
-        parser = MultipartParser(
-            self.rfile,
-            boundary=boundary,
-            content_length=content_length,
-        )
-
-        file_bytes = None
-        prompt = None
-        seen_field_names = []
         try:
-            for part in parser.parse():
-                seen_field_names.append(part.name)
-                if part.name == "file":
-                    file_bytes = part.file.read()
-                    part.file.close()
-                elif part.name == "prompt":
-                    # python-multipart exposes text fields via .text
-                    # (decoded). Fall back to reading .file bytes if not.
-                    raw = getattr(part, "text", None)
-                    if raw is None and getattr(part, "file", None) is not None:
-                        raw = part.file.read().decode("utf-8", errors="replace")
-                        part.file.close()
-                    prompt = raw
-        except Exception as e:  # noqa: BLE001 — surface multipart parse errors
+            _main_type, options = parse_options_header(content_type)
+            # parse_options_header returns bytes-keyed options.
+            boundary = options.get(b"boundary", b"")
+            parsed = parse_multipart(self.rfile.read(), boundary)
+        except Exception as e:  # noqa: BLE001 — handler must surface parse errors
             sys.stderr.write(
                 f"DEBUG multipart parse failed: content_type={content_type!r} "
-                f"content_length={content_length} "
                 f"error={e}\n"
             )
             sys.stderr.flush()
             self._send_json(400, {"error": f"multipart parse failed: {e}"})
             return
 
+        file_bytes = parsed["file"]
+        prompt = parsed["prompt"]
+        seen_field_names = parsed["fields"]
+
         if file_bytes is None:
             # TEMPORARY diagnostic — kept until end-to-end voice transcribes
             # successfully. Confirms which fields the bot actually sends.
             sys.stderr.write(
                 f"DEBUG multipart: content_type={content_type!r} "
-                f"content_length={content_length} "
                 f"seen_fields={seen_field_names} "
                 f"prompt_received={prompt is not None}\n"
             )
