@@ -20,8 +20,8 @@ SSM_PATH = "/blitzlog"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WHISPER_STT_SHIM_CANDIDATES = (
-    os.path.join(_HERE, "packages", "whisper-stt-shim", "server.js"),
-    os.path.join(_HERE, "..", "packages", "whisper-stt-shim", "server.js"),
+    os.path.join(_HERE, "packages", "whisper-stt-shim", "server.py"),
+    os.path.join(_HERE, "..", "packages", "whisper-stt-shim", "server.py"),
 )
 WHISPER_STT_SHIM_SOURCE = ""
 for _candidate in _WHISPER_STT_SHIM_CANDIDATES:
@@ -31,21 +31,6 @@ for _candidate in _WHISPER_STT_SHIM_CANDIDATES:
             break
     except OSError:
         continue
-
-_WHISPER_STT_SHIM_PACKAGE_JSON = """{
-  "name": "@blitzlog/whisper-stt-shim",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Whisper-compatible HTTP shim wrapping whisper.cpp on the blitzlog EC2 agent instance.",
-  "main": "server.js",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.js" },
-  "dependencies": {
-    "busboy": "^1.6.0",
-    "ffmpeg-static": "^5.2.0"
-  }
-}
-"""
 
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")
@@ -548,7 +533,6 @@ _WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/arch
 
 def _install_whisper_stt_script() -> str:
     shim_source = WHISPER_STT_SHIM_SOURCE
-    package_json = _WHISPER_STT_SHIM_PACKAGE_JSON
     systemd_unit = (
         "[Unit]\n"
         "Description=Blitzlog whisper.cpp STT shim\n"
@@ -562,7 +546,7 @@ def _install_whisper_stt_script() -> str:
         "Environment=PORT=7878\n"
         "Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli\n"
         "EnvironmentFile=-/etc/blitzlog/whisper-stt.env\n"
-        "ExecStart=/usr/bin/node server.js\n"
+        "ExecStart=/root/.local/share/mise/shims/python3 /opt/whisper-stt/server.py\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "StandardOutput=append:/var/log/whisper-stt-shim.log\n"
@@ -613,18 +597,32 @@ if [ ! -f "$MODEL_DEST" ]; then
 fi
 test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_DEST" | cut -f1))"
 
-# 3. Write shim source and package.json, install npm deps.
-log "Writing whisper-stt-shim source and installing dependencies..."
-cat > /opt/whisper-stt/server.js <<'__WHISPER_SHIM_JS__'
+# 3. Install pywhispercpp and write the Python shim.
+#    Use the Python that mise installed (in `_install_toolchain_script`),
+#    bind the global shim so the systemd service can find it, then
+#    install pywhispercpp into that interpreter. System `python3` on
+#    AL2023 is 3.9; pywhispercpp's PEP 604 syntax requires Python 3.10+.
+log "Binding Python shim globally and installing pywhispercpp..."
+mise use -g python
+PIP_LOG=$(mktemp)
+if ! python3 -m pip install pywhispercpp python-multipart imageio-ffmpeg >"$PIP_LOG" 2>&1; then
+    log "ERROR: pywhispercpp install failed; last 30 lines:"
+    tail -30 "$PIP_LOG"
+    log "See $PIP_LOG for full output"
+    exit 1
+fi
+rm -f "$PIP_LOG"
+
+# Verify the install actually works (catches "installed but broken").
+if ! python3 -c "import pywhispercpp; from pywhispercpp.model import Model" 2>&1; then
+    log "ERROR: pywhispercpp installed but not importable"
+    exit 1
+fi
+
+cat > /opt/whisper-stt/server.py <<'__WHISPER_SHIM_PY__'
 {shim_source}
-__WHISPER_SHIM_JS__
-
-cat > /opt/whisper-stt/package.json <<'__WHISPER_SHIM_PKG__'
-{package_json}
-__WHISPER_SHIM_PKG__
-
-cd /opt/whisper-stt
-npm install --omit=dev --no-audit --no-fund 2>&1 | tail -20
+__WHISPER_SHIM_PY__
+chmod +x /opt/whisper-stt/server.py
 
 # 4. Write systemd unit and start the shim.
 cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
