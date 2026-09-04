@@ -391,27 +391,76 @@ class TestSTTInBotConfig(unittest.TestCase):
         script = _install_whisper_stt_script()
         self.assertRegex(script, r"mise\s+use\s+-g\s+python\b")
 
-    def test_whisper_shim_systemd_uses_mise_python(self):
-        """The systemd unit must ExecStart the mise-installed Python
-        (resolved via the `/root/.local/bin/python3` shim, which `mise
-        use -g python` binds to the project version). System `/usr/bin/python3`
-        is AL2023's 3.9 — pywhispercpp imports fail there."""
+    def test_whisper_shim_systemd_uses_mise_shim_path(self):
+        """The systemd ExecStart must use the actual mise shim path
+        (/root/.local/share/mise/shims/python3 — that `whereis` confirms
+        exists), not /root/.local/bin/python3 (which doesn't exist on
+        AL2023; systemd starts with a clean PATH that doesn't include
+        the mise shim dir)."""
         script = _install_whisper_stt_script()
         unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
             "__WHISPER_SHIM_UNIT__", 1
         )[0]
         self.assertIn(
-            "ExecStart=/root/.local/bin/python3 /opt/whisper-stt/server.py",
+            "ExecStart=/root/.local/share/mise/shims/python3",
             unit_block,
         )
-        self.assertNotIn("ExecStart=/usr/bin/node", unit_block)
         self.assertNotIn("ExecStart=/usr/bin/python3 ", unit_block)
+        self.assertNotIn("ExecStart=/root/.local/bin/python3", unit_block)
+
+    def test_whisper_shim_script_is_executable(self):
+        """Hygiene: the systemd ExecStart runs `python3 <script>` (data
+        not exec), but chmod +x the script for consistency."""
+        script = _install_whisper_stt_script()
+        self.assertIn("chmod +x /opt/whisper-stt/server.py", script)
 
 
 class TestOpencodeProviderConfig(unittest.TestCase):
     def test_heredoc_uses_minimax_provider(self):
         script = _write_opencode_config_script()
         self.assertIn('"minimax-coding-plan":', script)
+
+
+class TestLambdaBuildConfiguration(unittest.TestCase):
+    """Regression tests for infra/lambda.tf build-time configuration.
+
+    A mistake here silently produces a broken Lambda zip at runtime
+    (e.g., 1-byte server.py from a stale cp reference). These tests
+    assert the file content directly so we catch the bug at PR review
+    time, not on the EC2 instance."""
+
+    @staticmethod
+    def _read_lambda_tf():
+        with open("infra/lambda.tf", "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_lambda_build_copies_python_shim(self):
+        """Regression: the Lambda build's cp must reference server.py
+        (the current canonical shim name), not the obsolete server.js.
+        Otherwise the Lambda zip is missing server.py, the bootstrap's
+        heredoc writes a 1-byte stub (server.py comes back empty), and
+        the shim is empty on the EC2 instance."""
+        content = self._read_lambda_tf()
+        self.assertRegex(
+            content,
+            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.py",
+        )
+        self.assertNotRegex(
+            content,
+            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.js",
+        )
+
+    def test_lambda_build_local_exec_uses_set_e(self):
+        """Regression: the local-exec build must `set -e` so a missing
+        file (cp fails) aborts the build instead of silently producing
+        a broken zip. Without this, future renames (like server.js ->
+        server.py) produce a zip that looks fine but is missing the
+        renamed file, and the EC2 instance gets a 1-byte stub."""
+        content = self._read_lambda_tf()
+        self.assertRegex(
+            content,
+            r'provisioner\s+"local-exec"\s*\{\s*command\s*=\s*<<-EOT\s*\n\s*set\s+-e',
+        )
 
     def test_heredoc_provider_block_has_no_legacy_providers(self):
         script = _write_opencode_config_script()

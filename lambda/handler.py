@@ -546,7 +546,7 @@ def _install_whisper_stt_script() -> str:
         "Environment=PORT=7878\n"
         "Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli\n"
         "EnvironmentFile=-/etc/blitzlog/whisper-stt.env\n"
-        "ExecStart=/root/.local/bin/python3 /opt/whisper-stt/server.py\n"
+        "ExecStart=/root/.local/share/mise/shims/python3 /opt/whisper-stt/server.py\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "StandardOutput=append:/var/log/whisper-stt-shim.log\n"
@@ -622,6 +622,7 @@ fi
 cat > /opt/whisper-stt/server.py <<'__WHISPER_SHIM_PY__'
 {shim_source}
 __WHISPER_SHIM_PY__
+chmod +x /opt/whisper-stt/server.py
 
 # 4. Write systemd unit and start the shim.
 cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
