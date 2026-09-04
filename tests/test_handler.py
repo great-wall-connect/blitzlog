@@ -362,18 +362,50 @@ class TestSTTInBotConfig(unittest.TestCase):
         self.assertNotIn("busboy", script)
         self.assertNotIn("ffmpeg-static", script)
 
-    def test_whisper_shim_systemd_uses_python(self):
-        # The systemd unit must exec python3 with the new server.py —
-        # not node / server.js. Otherwise the bot picks up whatever Node
-        # mise installed (v20) and refuses to start.
+    def test_whisper_shim_pip_install_fails_loud(self):
+        """Regression for the silent-pip-fail bug: pip install must NOT
+        be wrapped in `... | tail -3` (which masks exit codes under
+        `set -eu` and silently swallows failures). Use an explicit
+        `if ! ... ; then exit 1; fi` guard instead."""
+        script = _install_whisper_stt_script()
+        self.assertRegex(
+            script, r"if\s+!\s+python3\s+-m\s+pip\s+install\s+pywhispercpp"
+        )
+        # No `| tail -3` masking on pip install.
+        self.assertNotRegex(script, r"pip install[^|]*\|\s*tail")
+
+    def test_whisper_shim_verifies_pywhispercpp_imports(self):
+        """Catches "installed but broken" — pywhispercpp is on disk but
+        unimportable (e.g., ABI mismatch, missing libpython)."""
+        script = _install_whisper_stt_script()
+        self.assertIn(
+            'python3 -c "import pywhispercpp; from pywhispercpp.model import Model"',
+            script,
+        )
+
+    def test_whisper_shim_binds_mise_python_globally(self):
+        """`mise install -y` installs Python 3.12.x but does NOT bind the
+        global shim — until `mise use -g python` runs, `python3 --version`
+        in any clean shell reports "No version is set for shim: python3"
+        (and the systemd ExecStart fails to start)."""
+        script = _install_whisper_stt_script()
+        self.assertRegex(script, r"mise\s+use\s+-g\s+python\b")
+
+    def test_whisper_shim_systemd_uses_mise_python(self):
+        """The systemd unit must ExecStart the mise-installed Python
+        (resolved via the `/root/.local/bin/python3` shim, which `mise
+        use -g python` binds to the project version). System `/usr/bin/python3`
+        is AL2023's 3.9 — pywhispercpp imports fail there."""
         script = _install_whisper_stt_script()
         unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
             "__WHISPER_SHIM_UNIT__", 1
         )[0]
         self.assertIn(
-            "ExecStart=/usr/bin/python3 /opt/whisper-stt/server.py", unit_block
+            "ExecStart=/root/.local/bin/python3 /opt/whisper-stt/server.py",
+            unit_block,
         )
         self.assertNotIn("ExecStart=/usr/bin/node", unit_block)
+        self.assertNotIn("ExecStart=/usr/bin/python3 ", unit_block)
 
 
 class TestOpencodeProviderConfig(unittest.TestCase):

@@ -546,7 +546,7 @@ def _install_whisper_stt_script() -> str:
         "Environment=PORT=7878\n"
         "Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli\n"
         "EnvironmentFile=-/etc/blitzlog/whisper-stt.env\n"
-        "ExecStart=/usr/bin/python3 /opt/whisper-stt/server.py\n"
+        "ExecStart=/root/.local/bin/python3 /opt/whisper-stt/server.py\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "StandardOutput=append:/var/log/whisper-stt-shim.log\n"
@@ -598,9 +598,26 @@ fi
 test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_DEST" | cut -f1))"
 
 # 3. Install pywhispercpp and write the Python shim.
-log "Installing pywhispercpp and writing Python shim source..."
-dnf install -y python3-pip 2>&1 | tail -3 || true
-python3 -m pip install --quiet pywhispercpp 2>&1 | tail -3
+#    Use the Python that mise installed (in `_install_toolchain_script`),
+#    bind the global shim so the systemd service can find it, then
+#    install pywhispercpp into that interpreter. System `python3` on
+#    AL2023 is 3.9; pywhispercpp's PEP 604 syntax requires Python 3.10+.
+log "Binding Python shim globally and installing pywhispercpp..."
+mise use -g python
+PIP_LOG=$(mktemp)
+if ! python3 -m pip install pywhispercpp >"$PIP_LOG" 2>&1; then
+    log "ERROR: pywhispercpp install failed; last 30 lines:"
+    tail -30 "$PIP_LOG"
+    log "See $PIP_LOG for full output"
+    exit 1
+fi
+rm -f "$PIP_LOG"
+
+# Verify the install actually works (catches "installed but broken").
+if ! python3 -c "import pywhispercpp; from pywhispercpp.model import Model" 2>&1; then
+    log "ERROR: pywhispercpp installed but not importable"
+    exit 1
+fi
 
 cat > /opt/whisper-stt/server.py <<'__WHISPER_SHIM_PY__'
 {shim_source}
