@@ -327,16 +327,13 @@ class TestSTTInBotConfig(unittest.TestCase):
 
     def test_whisper_install_script_writes_shim_source(self):
         script = _install_whisper_stt_script()
-        self.assertIn("/opt/whisper-stt/server.js", script)
-        self.assertIn('require("busboy")', script)
-        self.assertIn("ffmpeg-static", script)
+        self.assertIn("/opt/whisper-stt/server.py", script)
+        self.assertNotIn("/opt/whisper-stt/server.js", script)
 
-    def test_whisper_install_script_writes_package_json(self):
+    def test_whisper_install_script_installs_pywhispercpp(self):
         script = _install_whisper_stt_script()
-        self.assertIn("/opt/whisper-stt/package.json", script)
-        self.assertIn('"busboy"', script)
-        self.assertIn('"ffmpeg-static"', script)
-        self.assertIn("npm install", script)
+        self.assertIn("pywhispercpp", script)
+        self.assertIn("pip install", script)
 
     def test_whisper_install_script_installs_systemd_unit(self):
         script = _install_whisper_stt_script()
@@ -351,69 +348,32 @@ class TestSTTInBotConfig(unittest.TestCase):
 
     def test_whisper_install_script_embeds_loaded_shim_source(self):
         script = _install_whisper_stt_script()
-        # The embedded source must contain recognizable shim identifiers so we
-        # catch accidental overwrites / empty reads during refactors.
-        self.assertIn('require("busboy")', script)
-        self.assertIn('require("ffmpeg-static")', script)
+        # The embedded source must contain recognizable Python shim
+        # identifiers so we catch accidental overwrites / empty reads.
+        self.assertIn("pywhispercpp", script)
         self.assertIn("whisper-stt-shim listening", script)
+        self.assertIn("HTTPServer", script)
 
-    def test_whisper_install_script_writes_clean_server_heredoc(self):
-        # Heredocs with quoted delimiters take the body literally. The body
-        # must NOT be wrapped in stray single quotes (that bug produces a 3-byte
-        # file and breaks the bot). Regression for issue surfaced on EC2.
+    def test_whisper_install_script_does_not_install_npm_deps(self):
+        # Regression: the Node.js shim is gone; npm install / busboy /
+        # ffmpeg-static must not reappear.
         script = _install_whisper_stt_script()
-        shim_block = script.split("<<'__WHISPER_SHIM_JS__'\n", 1)[1].split(
-            "__WHISPER_SHIM_JS__", 1
-        )[0]
-        self.assertFalse(
-            shim_block.startswith("'"),
-            f"server.js heredoc body must not be wrapped in stray quotes; got: {shim_block[:60]!r}",
-        )
-        self.assertGreater(
-            len(shim_block), 1000, "shim body should be ~5KB; got suspiciously short"
-        )
-        self.assertIn("const http = require(", shim_block)
-        self.assertIn("server.listen(PORT, HOST", shim_block)
+        self.assertNotIn("npm install", script)
+        self.assertNotIn("busboy", script)
+        self.assertNotIn("ffmpeg-static", script)
 
-    def test_whisper_install_script_writes_clean_package_json_heredoc(self):
-        # The package.json heredoc body must be valid JSON, not wrapped in
-        # quotes. The bug produces invalid JSON like:
-        #   '{\n  "name": "@blitzlog/whisper-stt-shim",\n...
-        # which npm correctly fails to parse with EJSONPARSE.
-        script = _install_whisper_stt_script()
-        pkg_block = script.split("<<'__WHISPER_SHIM_PKG__'\n", 1)[1].split(
-            "__WHISPER_SHIM_PKG__", 1
-        )[0]
-        self.assertFalse(
-            pkg_block.startswith("'"),
-            f"package.json heredoc body must not be wrapped in stray quotes; got: {pkg_block[:60]!r}",
-        )
-        self.assertTrue(pkg_block.lstrip().startswith("{"))
-        self.assertTrue(pkg_block.rstrip().endswith("}"))
-        # Parses as JSON
-        import json as _json
-
-        parsed = _json.loads(pkg_block)
-        self.assertEqual(parsed["name"], "@blitzlog/whisper-stt-shim")
-
-    def test_whisper_install_script_writes_clean_systemd_heredoc(self):
+    def test_whisper_shim_systemd_uses_python(self):
+        # The systemd unit must exec python3 with the new server.py —
+        # not node / server.js. Otherwise the bot picks up whatever Node
+        # mise installed (v20) and refuses to start.
         script = _install_whisper_stt_script()
         unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
             "__WHISPER_SHIM_UNIT__", 1
         )[0]
-        self.assertFalse(
-            unit_block.startswith("'"),
-            f"systemd unit heredoc body must not be wrapped in stray quotes; got: {unit_block[:60]!r}",
+        self.assertIn(
+            "ExecStart=/usr/bin/python3 /opt/whisper-stt/server.py", unit_block
         )
-        self.assertTrue(unit_block.lstrip().startswith("[Unit]"))
-        self.assertIn("ExecStart=/usr/bin/node server.js", unit_block)
-        self.assertIn("WantedBy=multi-user.target", unit_block)
-
-    def test_whisper_install_script_does_not_use_npm_silent(self):
-        # --silent hides npm errors. Drop it so future failures surface.
-        script = _install_whisper_stt_script()
-        self.assertNotIn("--silent", script)
-        self.assertIn("npm install", script)
+        self.assertNotIn("ExecStart=/usr/bin/node", unit_block)
 
 
 class TestOpencodeProviderConfig(unittest.TestCase):
