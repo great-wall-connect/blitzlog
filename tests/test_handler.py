@@ -928,6 +928,78 @@ class TestBrokenPipeHandling(unittest.TestCase):
         return boundary, bytes(body)
 
 
+class TestFirstPostLog(unittest.TestCase):
+    """`_log("first POST received ...")` fires exactly once across the
+    shim's lifetime — useful for diagnosing whether the shim ever saw a
+    request at all (e.g. wrong port, traffic not reaching the shim)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    def setUp(self):
+        # Reset the per-process flag before each test so tests are
+        # independent.
+        self.shim_server._first_post_logged = False
+
+    def _send(self):
+        from io import BytesIO, StringIO
+
+        boundary, body = TestShimHttpHandler._multipart_body(
+            [("file", "audio.wav", b"FAKE_WAV", "audio/wav")],
+        )
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.rfile = BytesIO(body)
+        handler.headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        }
+        handler.__dict__["rfile"] = handler.rfile
+        handler.__dict__["headers"] = handler.headers
+        handler.wfile = BytesIO()
+        handler.path = "/v1/audio/transcriptions"
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
+
+        old_stderr = sys.stderr
+        captured = StringIO()
+        sys.stderr = captured
+        original_transcribe = self.shim_server.transcribe
+        original_ensure = self.shim_server.ensure_wav
+        self.shim_server.ensure_wav = lambda p: p
+
+        def mock_transcribe(_path, language, prompt=None):
+            return "ok"
+
+        self.shim_server.transcribe = mock_transcribe
+        try:
+            handler.do_POST()
+        finally:
+            self.shim_server.ensure_wav = original_ensure
+            self.shim_server.transcribe = original_transcribe
+            sys.stderr = old_stderr
+
+        return captured.getvalue()
+
+    def test_first_post_emits_first_post_log(self):
+        log = self._send()
+        self.assertIn("first POST received at /v1/audio/transcriptions", log)
+
+    def test_subsequent_posts_omit_first_post_log(self):
+        self._send()
+        log2 = self._send()
+        # Second POST must NOT re-emit the first-post marker.
+        self.assertEqual(
+            log2.count("first POST received at /v1/audio/transcriptions"),
+            0,
+            "first-post marker should fire at most once across the "
+            f"shim's lifetime; got: {log2!r}",
+        )
+
+
 class TestShimHttpHandler(unittest.TestCase):
     """End-to-end HTTP tests: spin up the shim's handler, post a real
     multipart body, assert the response. Mocks `transcribe` so no model

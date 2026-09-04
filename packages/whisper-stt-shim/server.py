@@ -28,6 +28,7 @@ PORT = int(os.environ.get("PORT", "7878"))
 MODEL_PATH = os.environ.get("WHISPER_MODEL", "/opt/whisper-stt/models/ggml-base.en.bin")
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
+_first_post_logged = False
 
 
 def _log(event):
@@ -172,6 +173,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/audio/transcriptions":
             self.send_error(404)
             return
+
+        global _first_post_logged
+        if not _first_post_logged:
+            _first_post_logged = True
+            _log("first POST received at /v1/audio/transcriptions")
 
         content_type = self.headers.get("Content-Type", "")
         try:
