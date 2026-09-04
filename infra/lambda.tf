@@ -10,7 +10,7 @@ resource "null_resource" "lambda_build" {
   triggers = {
     handler      = filemd5("${path.module}/../lambda/handler.py")
     requirements = filemd5("${path.module}/../lambda/requirements.txt")
-    shim_source  = filemd5("${path.module}/../packages/whisper-stt-shim/server.js")
+    shim_source  = filemd5("${path.module}/../packages/whisper-stt-shim/server.py")
   }
 
   provisioner "local-exec" {
