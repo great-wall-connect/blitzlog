@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 
+import imageio_ffmpeg
 from python_multipart.multipart import parse_form, parse_options_header
 from pywhispercpp.model import Model
 
@@ -27,8 +28,35 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "7878"))
 MODEL_PATH = os.environ.get("WHISPER_MODEL", "/opt/whisper-stt/models/ggml-base.en.bin")
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
-FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 _first_post_logged = False
+
+
+def _resolve_ffmpeg_bin():
+    """Return the path to the ffmpeg binary.
+
+    Resolution order:
+      1. $FFMPEG_BIN env var (lets ops override in unusual environments).
+      2. imageio_ffmpeg's bundled static binary (default).
+
+    The `imageio-ffmpeg` pip package ships a static ffmpeg from the
+    BtbN/FFmpeg-Builds release — no system install required. This
+    mirrors the Node.js shim's bundled-binary approach (the package
+    ships the binary in the wheel rather than depending on a system
+    package).
+
+    If neither is available, raises RuntimeError with a clear message.
+    """
+    env_override = os.environ.get("FFMPEG_BIN")
+    if env_override:
+        return env_override
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:
+        raise RuntimeError(
+            "ffmpeg not available: set $FFMPEG_BIN or "
+            "`pip install imageio-ffmpeg` to bundle a static binary. "
+            f"Underlying error: {e!r}"
+        ) from e
 
 
 def _log(event):
@@ -78,7 +106,7 @@ def ensure_wav(src_path):
     wav_path = src_path.rsplit(".", 1)[0] + ".wav"
     result = subprocess.run(
         [
-            FFMPEG_BIN,
+            _resolve_ffmpeg_bin(),
             "-y",
             "-loglevel",
             "error",
@@ -184,7 +212,19 @@ class Handler(BaseHTTPRequestHandler):
             _main_type, options = parse_options_header(content_type)
             # parse_options_header returns bytes-keyed options.
             boundary = options.get(b"boundary", b"")
-            parsed = parse_multipart(self.rfile.read(), boundary)
+            # IMPORTANT: read exactly Content-Length bytes from the
+            # request body. self.rfile.read() with no argument reads
+            # until EOF — which on HTTP/1.1 keep-alive waits for the
+            # *next* request or the client to disconnect. The bot
+            # (undici) keeps the connection alive for its 60s
+            # AbortSignal.timeout, so an unbounded read waits the
+            # full 60 s before the bot gives up and the socket
+            # finally EOFs. That's the "60 s of silence" symptom.
+            content_length = int(self.headers.get("Content-Length") or 0)
+            if content_length <= 0:
+                self._send_json(400, {"error": "missing or invalid Content-Length"})
+                return
+            parsed = parse_multipart(self.rfile.read(content_length), boundary)
         except Exception as e:  # noqa: BLE001 — handler must surface parse errors
             sys.stderr.write(
                 f"DEBUG multipart parse failed: content_type={content_type!r} "
@@ -246,6 +286,11 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status, body):
         """Write a JSON response.
 
+        Sends `Connection: close` on every response so we don't keep
+        HTTP/1.1 keep-alive sockets open between requests. Combined
+        with the Content-Length-bounded read in do_POST, this makes
+        the socket lifecycle fully deterministic per request.
+
         Returns True if the response was fully written; False if the
         client disconnected before we could complete the write (in
         which case `BrokenPipeError`/`ConnectionResetError` are
@@ -255,6 +300,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):

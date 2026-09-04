@@ -17,7 +17,7 @@ The shim accepts arbitrary audio formats in the multipart `file` field (e.g. OGG
 | `PORT` | `7878` | Bind port. |
 | `WHISPER_MODEL` | `/opt/whisper-stt/models/ggml-<stt_model>.bin` | Path to the ggml model file. |
 | `WHISPER_LANGUAGE` | `en` | `--language` arg passed to the model; `auto` lets the model detect. |
-| `FFMPEG_BIN` | `/usr/bin/ffmpeg` | Path to the ffmpeg binary used for OGG/Opus → WAV conversion. |
+| `FFMPEG_BIN` | `imageio-ffmpeg` default | Override path to the ffmpeg binary used for OGG/Opus → WAV conversion. Default is the static binary bundled by the `imageio-ffmpeg` pip package — no system install required. |
 | `REQUEST_TIMEOUT_MS` | `60000` | Per-request wall-clock timeout. |
 
 ## Local development

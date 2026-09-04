@@ -55,6 +55,13 @@ def _load_shim_server():
     sys.modules.setdefault("pywhispercpp", pywhispercpp_stub)
     sys.modules.setdefault("pywhispercpp.model", pywhispercpp_model)
 
+    # Same trick for imageio_ffmpeg — the shim imports it eagerly and
+    # calls get_ffmpeg_exe() at module load. Stub a fake one so the
+    # import doesn't require the real package in the test venv.
+    imageio_ffmpeg_stub = types.ModuleType("imageio_ffmpeg")
+    imageio_ffmpeg_stub.get_ffmpeg_exe = lambda: "/usr/bin/ffmpeg"
+    sys.modules.setdefault("imageio_ffmpeg", imageio_ffmpeg_stub)
+
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(here)
     shim_path = os.path.join(repo_root, "packages", "whisper-stt-shim", "server.py")
@@ -719,12 +726,26 @@ class TestAudioConversion(unittest.TestCase):
             if os.path.exists(dst):
                 os.unlink(dst)
 
-    def test_shim_install_script_installs_ffmpeg(self):
-        """The EC2 bootstrap must install ffmpeg — pywhispercpp's
+    def test_shim_install_script_installs_imageio_ffmpeg(self):
+        """The EC2 bootstrap must install `imageio-ffmpeg` — pywhispercpp's
         internal audio decoder only handles WAV, so the shim converts
-        upstream OGG/Opus via ffmpeg."""
+        upstream OGG/Opus via a bundled static ffmpeg provided by the
+        `imageio-ffmpeg` pip package. The Node.js shim did the same with
+        `ffmpeg-static` (npm); this is the Python equivalent."""
         script = _install_whisper_stt_script()
-        self.assertRegex(script, r"dnf\s+install\s+.*\bffmpeg\b")
+        self.assertRegex(script, r"pip\s+install\s+.*\bimageio-ffmpeg\b")
+
+    def test_shim_install_script_does_not_install_ffmpeg_via_dnf(self):
+        """Regression: `ffmpeg` is now bundled via imageio-ffmpeg pip
+        wheel — no system install needed. Ensure `dnf install ffmpeg`
+        does not slip back in."""
+        script = _install_whisper_stt_script()
+        self.assertNotRegex(
+            script,
+            r"dnf\s+install\s+.*\bffmpeg\b",
+            "ffmpeg should be bundled via imageio-ffmpeg pip wheel, "
+            "not installed via dnf",
+        )
 
 
 class TestTranscribeTextExtraction(unittest.TestCase):
@@ -1000,6 +1021,200 @@ class TestFirstPostLog(unittest.TestCase):
         )
 
 
+class TestContentLengthRead(unittest.TestCase):
+    """Regression tests for the `self.rfile.read()` bug — reading until
+    EOF instead of `Content-Length` bytes caused the 60-s symptom when
+    the bot used HTTP/1.1 keep-alive."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    def _handler(self, body_bytes, content_length_value=None, extra_after_body=b""):
+        """Build a handler whose rfile simulates a slow / keep-alive
+        client: it has *body_bytes* followed by *extra_after_body* but
+        will not EOF unless the caller reads past Content-Length."""
+        from io import BytesIO
+
+        boundary, _ = TestShimHttpHandler._multipart_body(
+            [("file", "audio.wav", body_bytes, "audio/wav")],
+        )
+        # Recompose a real multipart body so the parser has work to do.
+        _, real_body = TestShimHttpHandler._multipart_body(
+            [("file", "audio.wav", body_bytes, "audio/wav")],
+        )
+        cl = (
+            content_length_value
+            if content_length_value is not None
+            else str(len(real_body))
+        )
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        # rfile has real_body + extra_after_body. With the bug, read()
+        # would block waiting for the trailing sentinel; with the fix,
+        # only the first content_length bytes are read.
+        handler.rfile = BytesIO(real_body + extra_after_body)
+        handler.headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": cl,
+        }
+        handler.__dict__["rfile"] = handler.rfile
+        handler.__dict__["headers"] = handler.headers
+        handler.wfile = BytesIO()
+        handler.path = "/v1/audio/transcriptions"
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
+        return handler, real_body
+
+    def test_handler_returns_400_when_content_length_missing(self):
+        from io import BytesIO
+
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.rfile = BytesIO(b"--garbage\r\nfoo\r\n")
+        # No Content-Length header at all.
+        handler.headers = {
+            "Content-Type": "multipart/form-data; boundary=----x",
+        }
+        handler.__dict__["rfile"] = handler.rfile
+        handler.__dict__["headers"] = handler.headers
+        handler.wfile = BytesIO()
+        handler.path = "/v1/audio/transcriptions"
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
+
+        old_stderr = sys.stderr
+        from io import StringIO
+
+        sys.stderr = StringIO()
+        try:
+            handler.do_POST()
+            response = handler.wfile.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        self.assertIn(b"400", response[:50])
+        self.assertIn(b"Content-Length", response)
+        # Critically: we did NOT block waiting for the missing-body
+        # sentinel. (The empty BytesIO would EOF immediately, but the
+        # assertion below is that we got a 400 because of the missing
+        # header — not because of a parse failure.)
+
+    def test_handler_reads_exact_content_length_bytes_not_past_it(self):
+        # Sentinel: a byte marker that must NOT appear in rfile's tail
+        # after the handler finishes (which would prove we read past
+        # Content-Length).
+        sentinel = b"SENTINEL_AFTER_BODY"
+        body = (
+            b"--xyz\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+            b"Content-Type: audio/wav\r\n\r\n"
+            b"FAKE_WAV\r\n"
+            b"--xyz--\r\n"
+        )
+        cl = len(body)
+
+        from io import BytesIO
+
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.rfile = BytesIO(body + sentinel)
+        handler.headers = {
+            "Content-Type": "multipart/form-data; boundary=xyz",
+            "Content-Length": str(cl),
+        }
+        handler.__dict__["rfile"] = handler.rfile
+        handler.__dict__["headers"] = handler.headers
+        handler.wfile = BytesIO()
+        handler.path = "/v1/audio/transcriptions"
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
+
+        original_transcribe = self.shim_server.transcribe
+        original_ensure = self.shim_server.ensure_wav
+        self.shim_server.ensure_wav = lambda p: p
+
+        def mock_transcribe(_path, language, prompt=None):
+            return "ok"
+
+        self.shim_server.transcribe = mock_transcribe
+        old_stderr = sys.stderr
+        from io import StringIO
+
+        sys.stderr = StringIO()
+        try:
+            handler.do_POST()
+            response = handler.wfile.getvalue()
+        finally:
+            self.shim_server.ensure_wav = original_ensure
+            self.shim_server.transcribe = original_transcribe
+            sys.stderr = old_stderr
+
+        # The 200 path was reached.
+        self.assertIn(b"200", response[:50])
+        # And the sentinel is STILL in rfile's tail — proving the
+        # handler did not consume past Content-Length.
+        remaining = handler.rfile.read()
+        self.assertEqual(remaining, sentinel)
+
+    def test_handler_does_not_block_60s_on_keep_alive_body(self):
+        """If we regress and start reading to EOF again, this test
+        would hang for 60 s before the runtime harness times it out.
+        We simulate a non-EOF keep-alive stream by writing a buffer
+        and never closing rfile. We can't truly block-forever in
+        BytesIO, but we can prove that Content-Length does in fact
+        bound the read by checking the implementation detail."""
+        # Implementation check: the handler's source must call
+        # rfile.read(<integer>), not rfile.read() with no args.
+        import inspect
+
+        source = inspect.getsource(self.shim_server.Handler.do_POST)
+        # Must read with a length bound — `self.rfile.read(N)` for some
+        # non-zero N derived from Content-Length.
+        self.assertIn(
+            "self.rfile.read(content_length)",
+            source,
+            "do_POST must use a Content-Length-bounded read",
+        )
+
+
+class TestConnectionCloseHeader(unittest.TestCase):
+    """Every response from _send_json must include `Connection: close`
+    so HTTP/1.1 keep-alive sockets don't outlive the request."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    def test_send_json_emits_connection_close(self):
+        from io import BytesIO
+
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.wfile = BytesIO()
+        handler.headers = {}
+        handler.__dict__["wfile"] = handler.wfile
+        handler.__dict__["headers"] = handler.headers
+        handler.__dict__["requestline"] = "POST / HTTP/1.1"
+        handler.__dict__["command"] = "POST"
+        handler.client_address = ("test", 0)
+        handler.server = None
+        handler.request_version = "HTTP/1.1"
+        handler._send_json(200, {"ok": True})
+
+        captured = handler.wfile.getvalue()
+        # The HTTP/1.1 status line must be the first line.
+        first_line = captured.split(b"\r\n", 1)[0]
+        self.assertIn(b" 200 ", first_line)
+        # Connection: close must appear in the header block.
+        self.assertIn(b"Connection: close", captured)
+
+
 class TestShimHttpHandler(unittest.TestCase):
     """End-to-end HTTP tests: spin up the shim's handler, post a real
     multipart body, assert the response. Mocks `transcribe` so no model
@@ -1240,6 +1455,37 @@ class TestShimHttpHandler(unittest.TestCase):
             positions[1],
             positions[2],
             "transcribed audio must come before returned response",
+        )
+        # Regression for the 60s-symptom: with the Content-Length fix,
+        # the wall-clock gap between `first POST received` and
+        # `received file` must be sub-second (the read is bounded by
+        # Content-Length and not by client-side keep-alive EOF).
+        first_ts_match = re.search(
+            r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) ",
+            log_output,
+        )
+        received_file_match = re.search(
+            r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) received file",
+            log_output,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(first_ts_match)
+        self.assertIsNotNone(received_file_match)
+        from datetime import datetime
+
+        # Replacers normalize the "Z" suffix back to "+00:00" for
+        # datetime.fromisoformat's parser.
+        first = datetime.fromisoformat(first_ts_match.group(1).replace("Z", "+00:00"))
+        received = datetime.fromisoformat(
+            received_file_match.group(1).replace("Z", "+00:00")
+        )
+        gap_s = abs((received - first).total_seconds())
+        self.assertLess(
+            gap_s,
+            1.0,
+            f"first POST → received file must be sub-second; "
+            f"got {gap_s}s. The `self.rfile.read()` bug would cause "
+            f"this to be ~60s.",
         )
         # Each line must have an ISO-8601 UTC timestamp prefix.
         iso_pat = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ")
