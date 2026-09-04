@@ -55,6 +55,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         form = cgi.FieldStorage(fp=self.rfile, headers=self.headers)
         if "file" not in form:
+            # TEMPORARY diagnostic — removed once the Telegram bot's
+            # multipart shape is known. Helps us distinguish "wrong field
+            # name" (keys=['audio']) from "cgi parse failure" (keys=[]).
+            sys.stderr.write(
+                f"DEBUG cgi parse: content_type={self.headers.get('Content-Type')!r} "
+                f"content_length={self.headers.get('Content-Length')!r} "
+                f"keys={list(form.keys())}\n"
+            )
+            sys.stderr.flush()
             self._send_json(400, {"error": "missing 'file' field"})
             return
         f = form["file"]

@@ -605,7 +605,7 @@ test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_
 log "Binding Python shim globally and installing pywhispercpp..."
 mise use -g python
 PIP_LOG=$(mktemp)
-if ! python3 -m pip install pywhispercpp >"$PIP_LOG" 2>&1; then
+if ! python3 -m pip install pywhispercpp python-multipart >"$PIP_LOG" 2>&1; then
     log "ERROR: pywhispercpp install failed; last 30 lines:"
     tail -30 "$PIP_LOG"
     log "See $PIP_LOG for full output"
