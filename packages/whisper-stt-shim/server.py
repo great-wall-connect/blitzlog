@@ -32,11 +32,17 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        # Pass the full filename (e.g. "ggml-base.en.bin"). pywhispercpp's
-        # resolve_model_path checks <models_dir>/<name> first; with the full
-        # filename the local file matches and is used directly, avoiding a
-        # download attempt that would fail without network/permission.
-        name = os.path.basename(MODEL_PATH)
+        # If the configured MODEL_PATH points at an existing file, pass
+        # the full path directly — pywhispercpp uses it without trying
+        # to download. Otherwise strip the ggml- prefix and .bin suffix
+        # to get the canonical model name (e.g. "base.en") so pywhispercpp
+        # can download from HuggingFace.
+        if os.path.isfile(MODEL_PATH):
+            name = MODEL_PATH
+        else:
+            name = os.path.basename(MODEL_PATH)
+            name = name.removeprefix("ggml-")
+            name = name.removesuffix(".bin")
         _model = Model(name, models_dir=os.path.dirname(MODEL_PATH))
     return _model
 
