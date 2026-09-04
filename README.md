@@ -5,7 +5,13 @@
 **Pin, blitz, merge.**
 *From issue to PR. With a trail.*
 
-An autonomous coding pipeline for GitHub. Label an issue — Blitzlog spins up an EC2 spot instance, runs an OpenCode agent on your repo, opens a pull request, and shuts itself down.
+[![License: MIT](https://img.shields.io/github/license/great-wall-connect/blitzlog?style=flat&color=f5d90a)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/great-wall-connect/blitzlog?style=social)](https://github.com/great-wall-connect/blitzlog/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/great-wall-connect/blitzlog)](https://github.com/great-wall-connect/blitzlog/issues)
+[![Last commit](https://img.shields.io/github/last-commit/great-wall-connect/blitzlog)](https://github.com/great-wall-connect/blitzlog/commits/main)
+[![Open Source](https://img.shields.io/badge/open_source-✓-f5d90a)](#license)
+
+Blitzlog is an **open-source autonomous coding agent** for **GitHub**: label an issue, and it spins up an **AWS EC2 spot instance**, runs an **OpenCode agent** on your repo, opens a **pull request**, and shuts itself down. Two modes — fully **autonomous** end-to-end, or **assisted** via a Telegram bot — both self-hosted and AWS-native, with no SaaS lock-in.
 
 ![Blitzlog demo — issue to PR end-to-end](assets/blitzlog-demo.gif)
 
