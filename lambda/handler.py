@@ -561,6 +561,13 @@ log "Installing whisper.cpp STT backend..."
 mkdir -p /opt/whisper-stt/bin /opt/whisper-stt/models /opt/whisper-stt/runtime
 cd /opt/whisper-stt
 
+# 0. Install ffmpeg for the Python shim's OGG/Opus -> WAV conversion.
+#    pywhispercpp uses Python stdlib `wave` which only reads RIFF/WAVE,
+#    but Telegram voice notes are OGG/Opus, so the shim shells out to
+#    ffmpeg before invoking the model. ffmpeg is in the AL2023 repos.
+log "Installing ffmpeg (required for OGG/Opus -> WAV conversion)..."
+dnf install -y ffmpeg
+
 # 1. Acquire whisper.cpp CLI binary.
 #    Prefer prebuilt release; fall back to building from source if the
 #    prebuilt asset is unavailable for the current release tag.

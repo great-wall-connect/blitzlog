@@ -13,6 +13,7 @@ broken on 3.12 for non-stdlib multipart encodings (e.g. undici's).
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -25,6 +26,7 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "7878"))
 MODEL_PATH = os.environ.get("WHISPER_MODEL", "/opt/whisper-stt/models/ggml-base.en.bin")
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 
 _model = None
 
@@ -41,10 +43,51 @@ def get_model():
             name = MODEL_PATH
         else:
             name = os.path.basename(MODEL_PATH)
-            name = name.removeprefix("ggml-")
-            name = name.removesuffix(".bin")
         _model = Model(name, models_dir=os.path.dirname(MODEL_PATH))
     return _model
+
+
+def ensure_wav(src_path):
+    """Convert arbitrary audio to 16kHz mono PCM WAV via ffmpeg.
+
+    pywhispercpp.transcribe() uses Python's stdlib `wave` module, which
+    only handles RIFF/WAVE files. Telegram voice notes are OGG/Opus, so
+    we convert upstream of `transcribe()`. If `src_path` is already a
+    WAV file (RIFF/WAVE magic), return it unchanged — no subprocess.
+
+    Returns the path to a 16kHz mono WAV file (either `src_path` itself
+    or a sibling path with a `.wav` suffix).
+    """
+    with open(src_path, "rb") as f:
+        header = f.read(12)
+    if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+        return src_path
+    wav_path = src_path.rsplit(".", 1)[0] + ".wav"
+    result = subprocess.run(
+        [
+            FFMPEG_BIN,
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            src_path,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-f",
+            "wav",
+            wav_path,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg conversion failed ({result.returncode}): "
+            f"{result.stderr.decode(errors='replace')}"
+        )
+    return wav_path
 
 
 def transcribe(wav_path, language, prompt=None):
@@ -145,19 +188,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "missing 'file' field"})
             return
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        # The multipart payload is whatever the bot uploaded (e.g. OGG/Opus
+        # for Telegram voice notes). Use `.ogg` suffix so the format label
+        # matches reality; ensure_wav() will convert via ffmpeg below.
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
+        wav_path = None
         try:
-            text = transcribe(tmp_path, LANGUAGE, prompt=prompt)
+            wav_path = ensure_wav(tmp_path)
+            text = transcribe(wav_path, LANGUAGE, prompt=prompt)
             self._send_json(200, {"text": text})
         except Exception as e:  # noqa: BLE001 — handler must surface any failure
             self._send_json(500, {"error": f"transcription failed: {e}"})
         finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            for p in (tmp_path, wav_path):
+                if p:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
 
     def _send_json(self, status, body):
         data = json.dumps(body).encode()

@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -651,6 +652,81 @@ class TestParseMultipart(unittest.TestCase):
         self.assertIn("python-multipart", script)
 
 
+class TestAudioConversion(unittest.TestCase):
+    """ensure_wav converts non-WAV inputs to 16kHz mono WAV via ffmpeg,
+    and passes through inputs that are already RIFF/WAVE."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    def _write_tmp(self, content):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        return path
+
+    def test_ensure_wav_passthrough_for_wav(self):
+        # RIFF header (4 bytes) + chunk size + WAVE (4 bytes) = first 12 bytes.
+        wav_header = b"RIFF\x00\x00\x00\x00WAVEfmt "
+        src = self._write_tmp(wav_header + b"\x00" * 64)
+        try:
+            with patch("subprocess.run") as mock_run:
+                result = self.shim_server.ensure_wav(src)
+            self.assertEqual(result, src, "Should return WAV input as-is")
+            mock_run.assert_not_called()  # no ffmpeg invocation
+        finally:
+            os.unlink(src)
+
+    def test_ensure_wav_converts_ogg_to_wav(self):
+        # OGG/S stream starts with "OggS" (0x4F 0x67 0x67 0x53).
+        src = self._write_tmp(b"OggS\x00\x02" + b"\x00" * 1024)
+        # expected WAV path: same name without the .ogg suffix.
+        dst = src.rsplit(".", 1)[0] + ".wav"
+        try:
+            fake_completed = MagicMock(returncode=0, stderr=b"")
+            with patch("subprocess.run", return_value=fake_completed) as mock_run:
+                result = self.shim_server.ensure_wav(src)
+            self.assertEqual(result, dst)
+            self.assertTrue(mock_run.called, "ffmpeg must be invoked for non-WAV")
+            called_args = mock_run.call_args[0][0]  # first positional arg of call
+            self.assertIn("-i", called_args)
+            self.assertIn(src, called_args)
+            self.assertIn(dst, called_args)
+            self.assertIn("-ar", called_args)
+            self.assertIn("16000", called_args)
+            self.assertIn("-ac", called_args)
+            self.assertIn("1", called_args)
+        finally:
+            os.unlink(src)
+            if os.path.exists(dst):
+                os.unlink(dst)
+
+    def test_ensure_wav_raises_when_ffmpeg_fails(self):
+        src = self._write_tmp(b"OggS\x00\x02" + b"\x00" * 64)
+        try:
+            fake_completed = MagicMock(returncode=1, stderr=b"some ffmpeg error\n")
+            with patch(
+                "subprocess.run", return_value=fake_completed
+            ), self.assertRaises(RuntimeError) as cm:
+                self.shim_server.ensure_wav(src)
+            # Error message should include stderr so debugging is easy.
+            self.assertIn("ffmpeg", str(cm.exception).lower())
+            self.assertIn("some ffmpeg error", str(cm.exception))
+        finally:
+            os.unlink(src)
+            dst = src.rsplit(".", 1)[0] + ".wav"
+            if os.path.exists(dst):
+                os.unlink(dst)
+
+    def test_shim_install_script_installs_ffmpeg(self):
+        """The EC2 bootstrap must install ffmpeg — pywhispercpp's
+        internal audio decoder only handles WAV, so the shim converts
+        upstream OGG/Opus via ffmpeg."""
+        script = _install_whisper_stt_script()
+        self.assertRegex(script, r"dnf\s+install\s+.*\bffmpeg\b")
+
+
 class TestShimHttpHandler(unittest.TestCase):
     """End-to-end HTTP tests: spin up the shim's handler, post a real
     multipart body, assert the response. Mocks `transcribe` so no model
@@ -761,16 +837,25 @@ class TestShimHttpHandler(unittest.TestCase):
 
         captured_transcribe = {"prompt": None}
         original_transcribe = self.shim_server.transcribe
+        captured_ensure = {"called": False, "path": None}
+        original_ensure = self.shim_server.ensure_wav
+
+        def mock_ensure(path):
+            captured_ensure["called"] = True
+            captured_ensure["path"] = path
+            return path  # passthrough — no ffmpeg in tests
 
         def mock_transcribe(_path, language, prompt=None):
             captured_transcribe["prompt"] = prompt
             return "transcribed"
 
+        self.shim_server.ensure_wav = mock_ensure
         self.shim_server.transcribe = mock_transcribe
         try:
             handler.do_POST()
             response = handler.wfile.getvalue()
         finally:
+            self.shim_server.ensure_wav = original_ensure
             self.shim_server.transcribe = original_transcribe
             import sys
 
@@ -780,6 +865,8 @@ class TestShimHttpHandler(unittest.TestCase):
         self.assertIn(b"transcribed", response)
         # No prompt field in this test → transcribe should have seen None.
         self.assertIsNone(captured_transcribe["prompt"])
+        # ensure_wav was called with the multipart upload.
+        self.assertTrue(captured_ensure["called"])
 
     def test_handler_forwards_prompt_field_to_transcribe(self):
         """Multipart with `file` + `prompt` → transcribe receives prompt."""
@@ -795,17 +882,20 @@ class TestShimHttpHandler(unittest.TestCase):
 
         captured_transcribe = {"prompt": None, "language": None}
         original_transcribe = self.shim_server.transcribe
+        original_ensure = self.shim_server.ensure_wav
 
         def mock_transcribe(_path, language, prompt=None):
             captured_transcribe["prompt"] = prompt
             captured_transcribe["language"] = language
             return "ok"
 
+        self.shim_server.ensure_wav = lambda p: p  # passthrough
         self.shim_server.transcribe = mock_transcribe
         try:
             handler.do_POST()
             response = handler.wfile.getvalue()
         finally:
+            self.shim_server.ensure_wav = original_ensure
             self.shim_server.transcribe = original_transcribe
             import sys
 

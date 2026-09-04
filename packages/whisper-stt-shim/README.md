@@ -1,11 +1,13 @@
 # @blitzlog/whisper-stt-shim
 
-Tiny Node.js HTTP shim that exposes a Whisper-compatible `POST /v1/audio/transcriptions` endpoint and forwards requests to a local `whisper.cpp` CLI binary. Used by the blitzlog EC2 agent instance so that the [`@grinev/opencode-telegram-bot`](https://www.npmjs.com/package/@grinev/opencode-telegram-bot) (which natively supports Whisper-format STT) can transcribe voice notes with no external dependency.
+Tiny Python HTTP shim that exposes a Whisper-compatible `POST /v1/audio/transcriptions` endpoint backed by `pywhispercpp` (Python bindings for whisper.cpp). Used by the blitzlog EC2 agent instance so that the [`@grinev/opencode-telegram-bot`](https://www.npmjs.com/package/@grinev/opencode-telegram-bot) (which natively supports Whisper-format STT) can transcribe voice notes with no external dependency.
+
+The shim accepts arbitrary audio formats in the multipart `file` field (e.g. OGG/Opus for Telegram voice notes) and uses `ffmpeg` to convert them to 16 kHz mono PCM WAV before invoking pywhispercpp. pywhispercpp's internal audio decoder uses Python's stdlib `wave` module, which only handles RIFF/WAVE — so the conversion has to happen upstream of pywhispercpp.
 
 ## Endpoints
 
-- `GET /healthz` → `{"status":"ok"}` once `whisper-cli` and the model are loaded.
-- `POST /v1/audio/transcriptions` — `multipart/form-data` with a `file` field. Optional `model`, `language`, `temperature` form fields. Returns `{"text":"..."}` matching the OpenAI Whisper API.
+- `GET /healthz` → `{"status":"ok"}` once the model is loaded.
+- `POST /v1/audio/transcriptions` — `multipart/form-data` with a `file` field. Optional `model`, `language`, `temperature`, `prompt` form fields. Returns `{"text":"..."}` matching the OpenAI Whisper API.
 
 ## Environment variables
 
@@ -13,9 +15,9 @@ Tiny Node.js HTTP shim that exposes a Whisper-compatible `POST /v1/audio/transcr
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address. Keep on loopback. |
 | `PORT` | `7878` | Bind port. |
-| `WHISPER_CLI` | `/opt/whisper-stt/bin/whisper-cli` | Absolute path to the whisper.cpp CLI binary. |
 | `WHISPER_MODEL` | `/opt/whisper-stt/models/ggml-<stt_model>.bin` | Path to the ggml model file. |
-| `WHISPER_LANGUAGE` | `en` | `--language` arg passed to whisper-cli; `auto` lets the model detect. |
+| `WHISPER_LANGUAGE` | `en` | `--language` arg passed to the model; `auto` lets the model detect. |
+| `FFMPEG_BIN` | `/usr/bin/ffmpeg` | Path to the ffmpeg binary used for OGG/Opus → WAV conversion. |
 | `REQUEST_TIMEOUT_MS` | `60000` | Per-request wall-clock timeout. |
 
 ## Local development
