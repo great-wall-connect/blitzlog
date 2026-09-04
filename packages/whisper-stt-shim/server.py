@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 
@@ -27,6 +28,17 @@ PORT = int(os.environ.get("PORT", "7878"))
 MODEL_PATH = os.environ.get("WHISPER_MODEL", "/opt/whisper-stt/models/ggml-base.en.bin")
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
+
+
+def _log(event):
+    ts = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    sys.stderr.write(f"{ts} {event}\n")
+    sys.stderr.flush()
+
 
 _model = None
 
@@ -175,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
         file_bytes = parsed["file"]
         prompt = parsed["prompt"]
         seen_field_names = parsed["fields"]
+        _log(f"received file: bytes={len(file_bytes) if file_bytes is not None else 0}")
 
         if file_bytes is None:
             # TEMPORARY diagnostic — kept until end-to-end voice transcribes
@@ -198,8 +211,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             wav_path = ensure_wav(tmp_path)
             text = transcribe(wav_path, LANGUAGE, prompt=prompt)
+            preview = text if len(text) <= 80 else text[:77] + "..."
+            _log(f"transcribed audio: text={preview!r}")
             self._send_json(200, {"text": text})
+            _log("returned response: status=200")
         except Exception as e:  # noqa: BLE001 — handler must surface any failure
+            _log(f"transcription failed: error={e!r}")
             self._send_json(500, {"error": f"transcription failed: {e}"})
         finally:
             for p in (tmp_path, wav_path):

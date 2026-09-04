@@ -905,6 +905,75 @@ class TestShimHttpHandler(unittest.TestCase):
         self.assertEqual(captured_transcribe["prompt"], b"The following text is...")
         self.assertEqual(captured_transcribe["language"], "en")
 
+    def test_handler_logs_lifecycle_events(self):
+        """Three timestamped lifecycle events must appear on stderr in
+        order: received file -> transcribed audio -> returned response.
+        """
+        import re
+
+        boundary, body = self._multipart_body(
+            [
+                ("file", "audio.wav", b"FAKE_WAV", "audio/wav"),
+            ]
+        )
+        handler, _captured, old_stderr = self._setup_handler(
+            body, f"multipart/form-data; boundary={boundary}"
+        )
+        original_transcribe = self.shim_server.transcribe
+        original_ensure = self.shim_server.ensure_wav
+        self.shim_server.ensure_wav = lambda p: p  # passthrough
+
+        def mock_transcribe(_path, language, prompt=None):
+            return "hello world"
+
+        self.shim_server.transcribe = mock_transcribe
+        try:
+            handler.do_POST()
+        finally:
+            self.shim_server.ensure_wav = original_ensure
+            self.shim_server.transcribe = original_transcribe
+            import sys
+
+            sys.stderr = old_stderr
+
+        log_output = _captured.getvalue()
+        events = [
+            "received file: bytes=",
+            "transcribed audio: text=",
+            "returned response: status=200",
+        ]
+        positions = [log_output.find(ev) for ev in events]
+        self.assertGreaterEqual(
+            positions[0],
+            0,
+            f"missing 'received file' log; got: {log_output!r}",
+        )
+        self.assertGreaterEqual(
+            positions[1],
+            0,
+            f"missing 'transcribed audio' log; got: {log_output!r}",
+        )
+        self.assertGreaterEqual(
+            positions[2],
+            0,
+            f"missing 'returned response' log; got: {log_output!r}",
+        )
+        self.assertLess(
+            positions[0],
+            positions[1],
+            "received file must come before transcribed audio",
+        )
+        self.assertLess(
+            positions[1],
+            positions[2],
+            "transcribed audio must come before returned response",
+        )
+        # Each line must have an ISO-8601 UTC timestamp prefix.
+        iso_pat = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ")
+        for line in log_output.splitlines():
+            if any(ev in line for ev in events):
+                self.assertRegex(line, iso_pat, f"missing timestamp: {line!r}")
+
     def test_decodes_unauthorized_401(self):
         script = _decode_api_errors_script()
         self.assertIn("Unauthorized", script)
