@@ -103,24 +103,28 @@ def ensure_wav(src_path):
 
 
 def transcribe(wav_path, language, prompt=None):
-    args = [
-        "-m",
-        MODEL_PATH,
-        "-f",
-        wav_path,
-        "--language",
-        language or "auto",
-        "--no-timestamps",
-        "--print-special",
-        "false",
-        "--output-json",
-    ]
-    if prompt:
-        args.extend(["--prompt", prompt])
+    """Run pywhispercpp on `wav_path` and return the concatenated text.
+
+    pywhispercpp's `Model.transcribe()` returns different shapes depending
+    on the `transcribe_with_meta` flag:
+
+      - default:           list[Segment]    — each segment has `.text`
+      - transcribe_with_meta=True: dict     — `{"text": "...", ...}`
+
+    The previous version of this function fell through to `str(result)`
+    for the list case, which produced the Segment's `__repr__`
+    (e.g. `"[t0=0, t1=200, text=Hello world, probability=nan]"`) instead
+    of the actual transcription text.
+    """
     result = get_model().transcribe(wav_path, language=language)
     if isinstance(result, dict):
+        # transcribe_with_meta=True path.
         text = result.get("text") or ""
+    elif isinstance(result, list):
+        # Default path: concatenate `.text` from each segment.
+        text = "".join(getattr(seg, "text", "") for seg in result)
     else:
+        # Unknown shape — best-effort stringify.
         text = str(result)
     return text.strip()
 
@@ -213,8 +217,15 @@ class Handler(BaseHTTPRequestHandler):
             text = transcribe(wav_path, LANGUAGE, prompt=prompt)
             preview = text if len(text) <= 80 else text[:77] + "..."
             _log(f"transcribed audio: text={preview!r}")
-            self._send_json(200, {"text": text})
-            _log("returned response: status=200")
+            if self._send_json(200, {"text": text}):
+                _log("returned response: status=200")
+            else:
+                _log("client disconnected during response write")
+        except (BrokenPipeError, ConnectionResetError) as e:
+            # Client (Telegram bot) aborted the request — typically its
+            # `AbortSignal.timeout(60000)` fired while we were still
+            # transcribing. Nothing to send; just log and exit quietly.
+            _log(f"client disconnected: error={e!r}")
         except Exception as e:  # noqa: BLE001 — handler must surface any failure
             _log(f"transcription failed: error={e!r}")
             self._send_json(500, {"error": f"transcription failed: {e}"})
@@ -227,12 +238,22 @@ class Handler(BaseHTTPRequestHandler):
                         pass
 
     def _send_json(self, status, body):
-        data = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        """Write a JSON response.
+
+        Returns True if the response was fully written; False if the
+        client disconnected before we could complete the write (in
+        which case `BrokenPipeError`/`ConnectionResetError` are
+        swallowed — there is nothing useful to do on a dead socket)."""
+        try:
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        return True
 
     def log_message(self, fmt, *args):
         pass  # suppress access log

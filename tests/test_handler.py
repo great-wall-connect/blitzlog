@@ -727,6 +727,207 @@ class TestAudioConversion(unittest.TestCase):
         self.assertRegex(script, r"dnf\s+install\s+.*\bffmpeg\b")
 
 
+class TestTranscribeTextExtraction(unittest.TestCase):
+    """pywhispercpp's Model.transcribe() returns list[Segment] (default)
+    or dict (when transcribe_with_meta=True). transcribe() must extract
+    the text correctly in both cases — and fall back to str() for
+    unknown shapes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    class _Segment:
+        """Minimal stand-in for pywhispercpp.model.Segment."""
+
+        def __init__(self, text, t0=0, t1=0, probability=0.0):
+            self.text = text
+            self.t0 = t0
+            self.t1 = t1
+            self.probability = probability
+
+    def _make_model(self, transcribe_return):
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = transcribe_return
+        return fake_model
+
+    def test_transcribe_concatenates_segment_text(self):
+        # pywhispercpp default: list of Segment objects.
+        segs = [
+            self._Segment("Hello", t0=0, t1=200, probability=1.0),
+            self._Segment(" world", t0=200, t1=500, probability=1.0),
+        ]
+        with patch.object(
+            self.shim_server, "get_model", return_value=self._make_model(segs)
+        ):
+            result = self.shim_server.transcribe("/tmp/dummy.wav", "en")
+        self.assertEqual(result, "Hello world")
+
+    def test_transcribe_returns_dict_text_when_meta_mode(self):
+        # transcribe_with_meta=True: a dict with a `text` key.
+        fake_result = {"text": "Hello world", "language": "en", "segments": []}
+        with patch.object(
+            self.shim_server, "get_model", return_value=self._make_model(fake_result)
+        ):
+            result = self.shim_server.transcribe("/tmp/dummy.wav", "en")
+        self.assertEqual(result, "Hello world")
+
+    def test_transcribe_does_not_use_str_of_segment_list(self):
+        """Regression: the old code did `str(result)` for non-dict
+        results, producing "[t0=0, t1=200, text=Hello world,
+        probability=nan]" instead of "Hello world"."""
+        segs = [self._Segment("Hello world", t0=0, t1=200, probability=float("nan"))]
+        with patch.object(
+            self.shim_server, "get_model", return_value=self._make_model(segs)
+        ):
+            result = self.shim_server.transcribe("/tmp/dummy.wav", "en")
+        # Must NOT include "t0=" / "t1=" / "probability=" — those are
+        # Segment __repr__ artifacts from the bug.
+        self.assertNotIn("t0=", result)
+        self.assertNotIn("t1=", result)
+        self.assertNotIn("probability=", result)
+
+    def test_transcribe_returns_empty_for_empty_segment_list(self):
+        with patch.object(
+            self.shim_server, "get_model", return_value=self._make_model([])
+        ):
+            result = self.shim_server.transcribe("/tmp/dummy.wav", "en")
+        self.assertEqual(result, "")
+
+    def test_transcribe_handles_unknown_shape(self):
+        # An exotic return type — fall back to str().
+        with patch.object(
+            self.shim_server, "get_model", return_value=self._make_model(42)
+        ):
+            result = self.shim_server.transcribe("/tmp/dummy.wav", "en")
+        self.assertEqual(result, "42")
+
+
+class TestBrokenPipeHandling(unittest.TestCase):
+    """When the client disconnects mid-response, _send_json should
+    silently drop the write instead of raising BrokenPipeError."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shim_server = _load_shim_server()
+
+    def _make_handler(self, write_side_effect):
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = write_side_effect
+        # BaseHTTPRequestHandler.send_response() → log_request() calls
+        # self.log_message('"%s" %s %s', self.requestline, str(code),
+        # str(size)). Even though our shim overrides log_message to a
+        # no-op, Python still evaluates `self.requestline` to build the
+        # args. Set all three attrs to bypass the descriptor access.
+        handler.__dict__["requestline"] = "POST / HTTP/1.1"
+        handler.__dict__["command"] = "POST"
+        handler.client_address = ("test", 0)
+        handler.server = None
+        handler.request_version = "HTTP/1.1"
+        return handler
+
+    def test_send_json_silently_drops_when_client_gone(self):
+        """_send_json must NOT raise BrokenPipeError to its caller
+        when the wire write fails — there's nothing useful to do."""
+        handler = self._make_handler(BrokenPipeError(32, "Broken pipe"))
+        # Must not raise.
+        handler._send_json(200, {"text": "hello"})
+        # And must NOT have produced a 500 traceback either.
+        handler.wfile.write.assert_called_once()
+
+    def test_send_json_silently_drops_on_connection_reset(self):
+        handler = self._make_handler(ConnectionResetError(104, "Connection reset"))
+        handler._send_json(200, {"text": "hello"})
+        handler.wfile.write.assert_called_once()
+
+    def test_handler_logs_client_disconnected_when_transcribe_succeeds_but_pipe_broken(
+        self,
+    ):
+        """Happy-path transcription + broken pipe at response write:
+        we must log `client disconnected` (NOT `transcription failed`
+        and NOT `returned response: status=200`)."""
+        boundary, body = type(self)._multipart_body_static(
+            self.shim_server,
+            [("file", "audio.wav", b"FAKE_WAV", "audio/wav")],
+        )
+
+        # Build a handler whose wfile breaks on every write.
+        from io import BytesIO
+
+        handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
+        handler.rfile = BytesIO(body)
+        handler.headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        }
+        handler.__dict__["rfile"] = handler.rfile
+        handler.__dict__["headers"] = handler.headers
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = BrokenPipeError(32, "Broken pipe")
+        handler.path = "/v1/audio/transcriptions"
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/audio/transcriptions HTTP/1.1"
+        handler.client_address = ("test", 0)
+        handler.server = None
+
+        # Stderr capture.
+        from io import StringIO
+
+        old_stderr = sys.stderr
+        captured = StringIO()
+        sys.stderr = captured
+        original_transcribe = self.shim_server.transcribe
+        original_ensure = self.shim_server.ensure_wav
+        self.shim_server.ensure_wav = lambda p: p
+        self.shim_server.transcribe = lambda *a, **kw: "actual transcription"
+        try:
+            handler.do_POST()
+        finally:
+            self.shim_server.ensure_wav = original_ensure
+            self.shim_server.transcribe = original_transcribe
+            sys.stderr = old_stderr
+
+        log = captured.getvalue()
+        self.assertIn("received file", log)
+        self.assertIn("transcribed audio", log)
+        self.assertIn("client disconnected", log)
+        # The misleading "transcription failed" line must NOT appear,
+        # and neither should "returned response: status=200" (we never
+        # actually returned 200 — the write was broken).
+        self.assertNotIn("transcription failed", log)
+
+    @staticmethod
+    def _multipart_body_static(shim_server, fields, boundary="----TestBoundary"):
+        """Mirror of TestShimHttpHandler._multipart_body, callable as a
+        staticmethod so we don't depend on that class's setUpClass
+        running first."""
+        body = bytearray()
+        for f in fields:
+            name = f[0]
+            if len(f) == 2:
+                value = f[1]
+                body += (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode()
+            else:
+                _filename, content, ctype = f[1], f[2], f[3]
+                body += (
+                    (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{name}"; filename="{_filename}"\r\n'
+                        f"Content-Type: {ctype}\r\n\r\n"
+                    ).encode()
+                    + content
+                    + b"\r\n"
+                )
+        body += f"--{boundary}--\r\n".encode()
+        return boundary, bytes(body)
+
+
 class TestShimHttpHandler(unittest.TestCase):
     """End-to-end HTTP tests: spin up the shim's handler, post a real
     multipart body, assert the response. Mocks `transcribe` so no model
