@@ -45,14 +45,10 @@ Two modes:
 | Component | Description |
 |---|---|
 | `lambda/handler.py` | Python Lambda: webhook verification, GitHub App auth, EC2 spot launch |
-| `infra/main.tf` | Terraform root module with S3 backend |
-| `infra/iam.tf` | IAM roles, policies, SSM parameters |
-| `infra/ec2.tf` | Security group, key pair |
-| `infra/lambda.tf` | Lambda function, CloudWatch logs, DLQ |
-| `infra/apigateway.tf` | API Gateway HTTP API as webhook endpoint |
-| `infra/alerting.tf` | SNS topic, SQS DLQ, CloudWatch alarm |
-| `infra/storage.tf` | S3 buckets: agent logs + whisper-stt-models |
-| `infra/user-pool/` | Per-user Terraform module (local state) that provisions that user's Telegram bot pool into SSM Parameter Store |
+| `infra/modules/core/` | Reusable Terraform module containing all blitzlog resources, parameterized by `var.environment` (prod / dev) |
+| `infra/prod/` | Thin Terraform wrapper that deploys the core module with `environment = "prod"` |
+| `infra/dev/` | Thin Terraform wrapper that deploys the core module with `environment = "dev"` |
+| `infra/modules/core/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool into SSM Parameter Store, env-namespaced |
 | `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
@@ -72,55 +68,34 @@ Two modes:
 
 ## Setup
 
+Blitzlog deploys into a single AWS account but supports multiple **environments** (`prod`, `dev`, ...) so the maintainer can iterate on Terraform changes from unstable branches without touching production. See [Environments (prod / dev)](#environments-prod--dev) for the full overview.
+
 ### 1. Provide the required variables
 
-Create `infra/terraform.tfvars`:
+Copy and edit the production tfvars:
 
-```hcl
-aws_region              = "ap-east-1"             # or any region with spot capacity
-vpc_id                  = "<your-vpc-id>"
-ec2_subnet_id           = "<your-subnet-id>"
-agent_logs_bucket_name  = "<your-agent-logs-bucket>"  # must exist or be created beforehand
-
-github_app_id              = "123456"
-github_app_private_key     = "<base64 encoded PEM>"
-github_app_installation_id = "987654"
-github_webhook_secret      = "your-secret-here"
-
-alert_email         = "dev-team@example.com"     # optional; empty = no email subscription
-opencode_model      = "<provider>/<model>"       # default: minimax-coding-plan/MiniMax-M3
-opencode_api_key    = "<your-provider-api-key>"
-
-# ssh_allowed_cidrs = ["1.2.3.4/32"]            # optional; empty = no SSH ingress
-
-# Voice note (STT) — populated when you want assisted agents to accept
-# Telegram voice notes. Defaults assume the self-hosted whisper.cpp shim
-# that runs alongside the agent on the same EC2 instance.
-# stt_api_url      = "http://127.0.0.1:7878/v1"  # Whisper-compatible endpoint
-# stt_api_key      = "any-non-empty-string"       # Forwarded to the STT provider; localhost shim ignores it. Default placeholder works for the self-hosted shim.
-# stt_models_bucket_name = "blitzlog-stt-models"    # Must be globally unique across AWS — open-source users must override this.
-# stt_model        = "base.en"                    # Whisper model name; must match a file uploaded to blitzlog-stt-models
-# stt_language     = "en"                         # Whisper language hint; "" = auto-detect
+```bash
+cp infra/prod/terraform.tfvars.example infra/prod/terraform.tfvars
 ```
 
-The state backend (`backend "s3"`) in `infra/main.tf` is generic — the `bucket` field is intentionally empty. Supply it via a `-backend.hcl` file:
+Open `infra/prod/terraform.tfvars` (the file is gitignored — never commit it) and fill in the required fields. See the example file for the full list, including the optional STT and alerting knobs.
+
+The state backend (`backend "s3"`) in `infra/prod/main.tf` is generic — the `bucket` and `key` fields are intentionally empty. Supply them via the shipped `-backend.hcl` file:
 
 ```hcl
-# infra/prod-backend.hcl  (gitignored)
+# infra/prod/prod-backend.hcl
 bucket = "<your-tf-state-bucket>"
+key    = "prod/blitzlog.tfstate"
+region = "ap-east-1"
 ```
 
-then run:
+Override the bucket if your state bucket is not `gwc-infra-tf-state`.
+
+### 2. Deploy production
 
 ```bash
+cd infra/prod
 terraform init -backend-config=prod-backend.hcl
-```
-
-### 2. Deploy
-
-```bash
-cd infra
-terraform init
 terraform plan
 terraform apply
 ```
@@ -149,14 +124,131 @@ Label any issue with **`autonomous`** to trigger the autonomous pipeline, or **`
 
 ---
 
+## Environments (prod / dev)
+
+Blitzlog runs in two isolated environments inside the same AWS account:
+
+| Env | Audience | Triggered by | Webhook | Lambda | SSM root | State key |
+|---|---|---|---|---|---|---|
+| `prod` | All real users + repos | Merges to `main` (manual apply) | `terraform output -chdir=infra/prod webhook_url` | `blitzlog-prod-handler` | `/blitzlog/prod` | `s3://<bucket>/prod/blitzlog.tfstate` |
+| `dev` | Maintainer + a sandbox repo | Any unstable branch (manual apply) | `terraform output -chdir=infra/dev webhook_url` | `blitzlog-dev-handler` | `/blitzlog/dev` | `s3://<bucket>/dev/blitzlog.tfstate` |
+
+Each env has:
+
+- its own **state file** (separate `prod/` and `dev/` keys in the same S3 bucket) — concurrent applies don't contend on a DynamoDB lock
+- its own **resource names** (`blitzlog-prod-handler` vs `blitzlog-dev-handler`, `blitzlog-prod-webhook-api` vs `blitzlog-dev-webhook-api`, etc.) — no name collisions
+- its own **SSM namespace** (`/blitzlog/prod/*` vs `/blitzlog/dev/*`) — bot tokens, GitHub App creds, and ephemeral scratch space never leak between envs
+- its own **IAM roles** with policies **scoped to its own SSM prefix** — the prod Lambda role literally cannot read `/blitzlog/dev/*` and the dev Lambda role cannot read `/blitzlog/prod/*`
+- its own **GitHub App** — the prod App is installed on your real repos, the dev App is installed on a throwaway sandbox repo only
+
+### Directory layout
+
+```
+infra/
+├── modules/
+│   └── core/                  # all blitzlog resources, parameterized by var.environment
+│       ├── main.tf
+│       ├── variables.tf       # environment (required, validated)
+│       ├── outputs.tf
+│       ├── lambda.tf
+│       ├── iam.tf
+│       ├── ec2.tf
+│       ├── apigateway.tf
+│       ├── alerting.tf
+│       ├── storage.tf
+│       └── user-pool/         # per-user Telegram bot pool, also takes var.environment
+├── prod/                      # prod wrapper: `module "core" { environment = "prod", ... }`
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── prod-backend.hcl
+│   ├── terraform.tfvars       # gitignored — your real prod values
+│   └── terraform.tfvars.example
+├── dev/                       # dev wrapper: `module "core" { environment = "dev", ... }`
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── dev-backend.hcl
+│   ├── terraform.tfvars       # gitignored — your real dev values
+│   └── terraform.tfvars.example
+└── user-pool/                 # removed in favor of modules/core/user-pool/
+```
+
+### Spinning up a fresh dev environment
+
+1. **Create a dedicated `Blitzlog Dev` GitHub App.** Use a distinct name and identifier from your prod App so the two are visually distinguishable in GitHub. Note its ID, installation ID, private key, and a fresh webhook secret.
+
+2. **Create a sandbox repo** to install the dev App on (e.g. `great-wall-connect/blitzlog-dev-sandbox`). Real production users' repos must not have the dev App installed.
+
+3. **Provision dev tfvars:**
+   ```bash
+   cp infra/dev/terraform.tfvars.example infra/dev/terraform.tfvars
+   # fill in the dev App credentials, sandbox repo installation ID, etc.
+   ```
+
+4. **Apply:**
+   ```bash
+   cd infra/dev
+   terraform init -backend-config=dev-backend.hcl
+   terraform plan
+   terraform apply
+   ```
+
+5. **Wire the sandbox webhook.** After apply:
+   ```bash
+   terraform output webhook_url
+   ```
+   Paste that URL into the sandbox repo's GitHub webhook configuration (Settings → Webhooks) with the dev App's webhook secret.
+
+6. **Open an issue on the sandbox repo** labeled `autonomous`. The dev Lambda handles it end-to-end. The prod Lambda is untouched.
+
+### Day-to-day workflow
+
+| You want to... | You run... |
+|---|---|
+| Ship a fix to prod | `cd infra/prod && terraform apply` |
+| Test an unstable branch | `git checkout my-branch && cd infra/dev && terraform apply` |
+| Verify prod is unchanged after a dev change | `cd infra/prod && terraform plan` (should be empty) |
+| Inspect current state of either env | `terraform output` from `infra/prod` or `infra/dev` |
+| Add/rotate a bot token | `cd infra/modules/core/user-pool && terraform apply` |
+
+### Migrating an existing single-env deployment to the new layout
+
+If you are upgrading from a pre-issue-#50 deploy where everything lived under `infra/` and the state was at `s3://<bucket>/blitzlog.tfstate`:
+
+```bash
+cd infra/prod
+terraform init -migrate-state -backend-config=prod-backend.hcl
+terraform plan    # review — every blitzlog-* resource will be replaced because names are now prefixed
+terraform apply
+```
+
+The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/prod/` should be empty.
+
+### State file layout
+
+Both envs share the same S3 bucket, separated by key prefix:
+
+```
+s3://gwc-infra-tf-state/
+├── prod/blitzlog.tfstate   # infra/prod
+└── dev/blitzlog.tfstate    # infra/dev
+```
+
+The bucket name is configurable in `infra/prod/prod-backend.hcl` and `infra/dev/dev-backend.hcl`. Each env has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+
+---
+
 ## Per-user bot pool setup (assisted mode)
 
-The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
+The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/modules/core/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
+
+> **Picking an environment.** The user-pool module now takes a required `environment` variable (`"prod"` or `"dev"`). Bot tokens for prod users land under `/blitzlog/prod/users/<login>/...`; bot tokens for dev users land under `/blitzlog/dev/users/<login>/...`. The Lambda reads from the env-namespaced path, so set `environment` to match the deployment you want your bots to feed.
 
 ### Prerequisites
 
 - Terraform >= 1.0.
-- AWS credentials for an IAM principal with permissions scoped to **your own** user namespace under `/blitzlog/users/<your-github-login>/`:
+- AWS credentials for an IAM principal with permissions scoped to **your own** user namespace under `/blitzlog/<env>/users/<your-github-login>/`:
   ```json
   {
     "Version": "2012-10-17",
@@ -170,23 +262,25 @@ The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each 
         "ssm:GetParametersByPath",
         "ssm:DescribeParameters"
       ],
-      "Resource": "arn:aws:ssm:*:*:parameter/blitzlog/users/${aws:username}/*"
+      "Resource": "arn:aws:ssm:*:*:parameter/blitzlog/${aws:username}/*"
     }]
   }
   ```
-  The `${aws:username}` placeholder resolves to your IAM user/role session name, which must match (or be mapped to) your GitHub login. If you log in with a different IAM principal name, either rename it or expand the resource pattern. The shared infra owner may also grant broader SSM access under `arn:aws:ssm:*:*:parameter/blitzlog/users/*` if self-service scoping is too restrictive.
+  The `${aws:username}` placeholder resolves to your IAM user/role session name, which must match (or be mapped to) your GitHub login. If you log in with a different IAM principal name, either rename it or expand the resource pattern. The shared infra owner may also grant broader SSM access under `arn:aws:ssm:*:*:parameter/blitzlog/*/users/*` if self-service scoping is too restrictive.
 
 ### Step 1 — Create your tfvars
 
 From the repository root:
 
 ```bash
-cp infra/user-pool/terraform.tfvars.example infra/user-pool/terraform.tfvars
+cp infra/modules/core/user-pool/terraform.tfvars.example \
+   infra/modules/core/user-pool/terraform.tfvars
 ```
 
-Open `infra/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
+Open `infra/modules/core/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
 
 ```hcl
+environment              = "prod"  # or "dev" — must match the Blitzlog deployment this pool feeds
 owner_login              = "your-github-username"   # exactly as it appears in the issue sender
 telegram_allowed_user_id = "12345678"               # your Telegram numeric user ID
 
@@ -196,20 +290,21 @@ telegram_bot_tokens = {
 }
 ```
 
-- `owner_login` must match the `sender.login` field on the issues you'll trigger, because the Lambda routes bots by sender (`list_bot_pool` in `lambda/handler.py:37`).
-- `telegram_allowed_user_id` is the single Telegram user ID permitted to interact with any bot in your pool. The Lambda refuses to acquire a bot if this parameter is missing (see `lambda/handler.py:51`).
-- `telegram_bot_tokens` is a map of friendly bot names to BotFather tokens. Each entry becomes one `SecureString` SSM parameter; the map's keys are the bot names the EC2 user-data script receives (`bot_name` in `lambda/handler.py:1140`).
+- `environment` must be `"prod"` or `"dev"` — it controls where the SSM parameters land. A bot provisioned for `prod` is invisible to the `dev` Lambda, and vice versa.
+- `owner_login` must match the `sender.login` field on the issues you'll trigger, because the Lambda routes bots by sender (`list_bot_pool` in `lambda/handler.py:51`).
+- `telegram_allowed_user_id` is the single Telegram user ID permitted to interact with any bot in your pool. The Lambda refuses to acquire a bot if this parameter is missing (see `lambda/handler.py:65`).
+- `telegram_bot_tokens` is a map of friendly bot names to BotFather tokens. Each entry becomes one `SecureString` SSM parameter; the map's keys are the bot names the EC2 user-data script receives.
 
 ### Step 2 — Apply
 
 ```bash
-cd infra/user-pool
+cd infra/modules/core/user-pool
 terraform init
 terraform plan    # reviews the SSM parameters that will be created
 terraform apply   # type 'yes' to confirm
 ```
 
-What gets created in AWS (all under `/blitzlog/users/<owner_login>/`):
+What gets created in AWS (all under `/blitzlog/<env>/users/<owner_login>/`):
 
 | Parameter name                                | Type        |
 |-----------------------------------------------|-------------|
@@ -220,7 +315,7 @@ What gets created in AWS (all under `/blitzlog/users/<owner_login>/`):
 
 ```bash
 aws ssm get-parameters-by-path \
-  --path "/blitzlog/users/<owner_login>/telegram/" \
+  --path "/blitzlog/<env>/users/<owner_login>/telegram/" \
   --recursive --with-decryption \
   --query "Parameters[].Name"
 ```
@@ -229,7 +324,7 @@ You should see your `allowed-user-id` parameter and one `pool/<bot>` parameter p
 
 ### Rotate, add, or remove bots
 
-1. Edit `infra/user-pool/terraform.tfvars`.
+1. Edit `infra/modules/core/user-pool/terraform.tfvars`.
 2. `terraform plan` — review the diff.
 3. `terraform apply` — adds are created, renames move parameters, deletions remove them.
 
@@ -238,11 +333,11 @@ To add a bot, add a new key/token pair. To remove one, delete the line. To rotat
 ### Tear down
 
 ```bash
-cd infra/user-pool
+cd infra/modules/core/user-pool
 terraform destroy
 ```
 
-Removes all SSM parameters under `/blitzlog/users/<owner_login>/`. The local `terraform.tfstate` is then safe to delete.
+Removes all SSM parameters under `/blitzlog/<env>/users/<owner_login>/`. The local `terraform.tfstate` is then safe to delete.
 
 ### Migrating from a prior S3-backed state
 
@@ -322,15 +417,15 @@ Symptom → diagnostic step → fix for the failure modes operators hit most oft
 # GitHub: repo → Settings → Webhooks → your webhook → Secret
 # SSM:
 aws ssm get-parameter \
-  --name "/blitzlog/github-webhook/secret" \
+  --name "/blitzlog/prod/github-webhook/secret" \
   --with-decryption \
   --query "Parameter.Value" \
   --output text
 ```
 
-In CloudWatch (`/aws/lambda/blitzlog`), look for `Signature present: True` followed by the invalid-signature path.
+In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present: True` followed by the invalid-signature path.
 
-**Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/`, and pasting the new secret into GitHub.
+**Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/prod/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/prod/`, and pasting the new secret into GitHub.
 
 ### Label added but no instance launched
 
@@ -344,18 +439,18 @@ In CloudWatch (`/aws/lambda/blitzlog`), look for `Signature present: True` follo
 
 **Symptom:** Assisted mode fails; Lambda logs `No bot pool configured for user <login>` (and the API body reports the same).
 
-**Diagnose:** `owner_login` in `infra/user-pool/terraform.tfvars` must match the issue `sender.login` exactly. Verify SSM under that login:
+**Diagnose:** `owner_login` in `infra/modules/core/user-pool/terraform.tfvars` must match the issue `sender.login` exactly, and `environment` must match the env the Lambda is running in (`prod` or `dev`). Verify SSM under that login:
 
 ```bash
 aws ssm get-parameters-by-path \
-  --path "/blitzlog/users/<owner_login>/telegram/" \
+  --path "/blitzlog/<env>/users/<owner_login>/telegram/" \
   --recursive --with-decryption \
   --query "Parameters[].Name"
 ```
 
 You should see `.../telegram/allowed-user-id` and at least one `.../telegram/pool/<bot>`.
 
-**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, re-run `terraform apply` in `infra/user-pool/`, and confirm the path above exists.
+**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, `environment` to the env the Lambda runs in, re-run `terraform apply` in `infra/modules/core/user-pool/`, and confirm the path above exists.
 
 ### All bot pool bots locked
 
@@ -379,7 +474,7 @@ List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recu
 
 **Diagnose:** Blitzlog prefers spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (`SPOT_INSTANCE_TYPES` in `lambda/handler.py`). Some regions have little or no spot capacity for `t4g.*`.
 
-**Fix:** Switch `aws_region` in `infra/terraform.tfvars` to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
+**Fix:** Switch `aws_region` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
 
 ### Voice notes not transcribing
 
@@ -414,17 +509,17 @@ The model file must exist at `/opt/whisper-stt/models/ggml-<stt_model>.bin` and 
 | `1008` | Insufficient balance / zero credits |
 | `429` | Rate limit / quota exceeded |
 
-**Fix:** Follow the matching `ACTIONABLE:` lines — rotate `/blitzlog/opencode/api-key` in SSM and re-apply Terraform for `401`; top up the provider plan for `1008`; wait or upgrade for `429`.
+**Fix:** Follow the matching `ACTIONABLE:` lines — rotate `/blitzlog/<env>/opencode/api-key` in SSM and re-apply Terraform for `401`; top up the provider plan for `1008`; wait or upgrade for `429`.
 
 ### Lambda timeouts
 
-**Symptom:** Invocations fail after ~3 minutes; messages appear on the SQS DLQ `blitzlog-lambda-dlq`.
+**Symptom:** Invocations fail after ~3 minutes; messages appear on the SQS DLQ `blitzlog-prod-lambda-dlq` (or `blitzlog-dev-lambda-dlq` for the dev env).
 
-**Diagnose:** Lambda `timeout = 180` in `infra/lambda.tf`. Work that runs longer than that (slow GitHub App auth, SSM, or especially EC2 spot launch retries across AZs) will time out. Check CloudWatch `/aws/lambda/blitzlog` for the truncated request, then inspect DLQ:
+**Diagnose:** Lambda `timeout = 180` in `infra/modules/core/lambda.tf`. Work that runs longer than that (slow GitHub App auth, SSM, or especially EC2 spot launch retries across AZs) will time out. Check CloudWatch `/aws/lambda/blitzlog-prod-handler` (or `blitzlog-dev-handler` for the dev env) for the truncated request, then inspect DLQ:
 
 ```bash
 aws sqs receive-message \
-  --queue-url "$(aws sqs get-queue-url --queue-name blitzlog-lambda-dlq --query QueueUrl --output text)" \
+  --queue-url "$(aws sqs get-queue-url --queue-name blitzlog-prod-lambda-dlq --query QueueUrl --output text)" \
   --max-number-of-messages 5
 ```
 
@@ -435,10 +530,10 @@ aws sqs receive-message \
 ## Monitoring
 
 - Lambda errors trigger a CloudWatch alarm → SNS → email (via `alert_email`).
-- Failed Lambda invocations go to SQS DLQ (`blitzlog-lambda-dlq`).
-- Lambda logs: CloudWatch log group `/aws/lambda/blitzlog` (14-day retention).
-- Agent run logs (per-issue): uploaded to `s3://<agent_logs_bucket>/<repo>/issue/<N>/logs/...`.
-- OpenCode session exports (audit trail): `s3://<agent_logs_bucket>/<repo>/issue/<N>/sessions/...`.
+- Failed Lambda invocations go to SQS DLQ (`blitzlog-prod-lambda-dlq` for prod, `blitzlog-dev-lambda-dlq` for dev).
+- Lambda logs: CloudWatch log group `/aws/lambda/blitzlog-prod-handler` (or `/aws/lambda/blitzlog-dev-handler` for dev) — 14-day retention.
+- Agent run logs (per-issue): uploaded to `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/logs/...` (env prefix keeps prod and dev logs separated).
+- OpenCode session exports (audit trail): `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/sessions/...`.
 
 ---
 
@@ -468,7 +563,7 @@ Assisted-mode agents can accept Telegram voice notes, transcribe them with a sel
 
 ### Setup
 
-Two ways to populate the model in `s3://blitzlog-stt-models/models/`:
+Two ways to populate the model in `s3://blitzlog-<env>-stt-models/models/`:
 
 1. **Manual upload** (default). One-time, after `terraform apply`:
 
@@ -479,13 +574,13 @@ Two ways to populate the model in `s3://blitzlog-stt-models/models/`:
      "s3://$(terraform output -raw stt_models_bucket)/models/ggml-base.en.bin"
    ```
 
-   For multilingual support, download `ggml-base.bin`, `ggml-small.bin`, `ggml-large-v3.bin`, etc. from the same HuggingFace mirror and upload under the same `models/` prefix. Update `stt_model` in `infra/terraform.tfvars` to match (`base`, `small`, `large-v3`, etc.).
+   For multilingual support, download `ggml-base.bin`, `ggml-small.bin`, `ggml-large-v3.bin`, etc. from the same HuggingFace mirror and upload under the same `models/` prefix. Update `stt_model` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to match (`base`, `small`, `large-v3`, etc.).
 
-2. **Auto-upload via Terraform** (opt-in). Set `upload_stt_model = true` in `infra/terraform.tfvars` and re-apply. The `terraform_data.stt_model_upload` provisioner runs on the Terraform host (CI or dev machine), downloads `ggml-${stt_model}.bin` from `stt_model_source_url`, and uploads it to S3. Skipped automatically if the object already exists. Requires:
+2. **Auto-upload via Terraform** (opt-in). Set `upload_stt_model = true` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) and re-apply. The `terraform_data.stt_model_upload` provisioner runs on the Terraform host (CI or dev machine), downloads `ggml-${stt_model}.bin` from `stt_model_source_url`, and uploads it to S3. Skipped automatically if the object already exists. Requires:
    - Outbound HTTPS from the Terraform host to the source URL.
-   - `s3:PutObject` on `arn:aws:s3:::blitzlog-stt-models/models/*` from the Terraform host's credentials (the EC2 instance role only has `s3:GetObject` — the Terraform host needs its own write perm).
+   - `s3:PutObject` on `arn:aws:s3:::blitzlog-<env>-stt-models/models/*` from the Terraform host's credentials (the EC2 instance role only has `s3:GetObject` — the Terraform host needs its own write perm).
 
-3. Configure the STT vars in `infra/terraform.tfvars` (defaults work out of the box for `base.en` + English). Re-run `terraform apply`.
+3. Configure the STT vars in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`). Defaults work out of the box for `base.en` + English. Re-run `terraform apply`.
 
 4. The EC2 instance picks everything up automatically on the next assisted-mode launch — no per-user config required. Per-user STT preferences (model, voice) live in the bot's own `/settings` menu, not in blitzlog.
 

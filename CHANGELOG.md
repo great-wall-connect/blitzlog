@@ -9,6 +9,7 @@ once the project reaches `1.0.0`.
 ## [Unreleased]
 
 ### Added
+- **Dev/prod segregation (closes #50).** Blitzlog now runs in two isolated environments inside the same AWS account. `infra/prod/` and `infra/dev/` are thin Terraform wrappers that call `infra/modules/core/` with `environment = "prod"` or `"dev"`. Each env has its own state file (`prod/blitzlog.tfstate` vs `dev/blitzlog.tfstate`), its own resource names (`blitzlog-prod-handler` vs `blitzlog-dev-handler`, etc.), its own SSM namespace (`/blitzlog/prod/*` vs `/blitzlog/dev/*`), and its own IAM roles scoped to its own prefix — so the prod Lambda role literally cannot read `/blitzlog/dev/*` and vice versa. The user-pool sub-module takes a required `environment` variable and namespaces its SSM parameters accordingly. The Lambda reads `BLITZLOG_ENV` from its env vars (set by Terraform from `var.environment`) and templates all SSM paths under `/blitzlog/<env>/`. The README's new "Environments (prod / dev)" section documents the workflow.
 - Initial public release of Blitzlog — autonomous coding pipeline for GitHub issues.
 - Lambda webhook handler with HMAC-SHA256 signature verification and GitHub App authentication.
 - Terraform infrastructure: Lambda, API Gateway HTTP API, IAM roles, CloudWatch alarms, SQS DLQ, EC2 security group.

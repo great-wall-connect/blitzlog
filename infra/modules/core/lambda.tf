@@ -8,9 +8,9 @@ data "archive_file" "lambda_zip" {
 
 resource "null_resource" "lambda_build" {
   triggers = {
-    handler      = filemd5("${path.module}/../lambda/handler.py")
-    requirements = filemd5("${path.module}/../lambda/requirements.txt")
-    shim_source  = filemd5("${path.module}/../packages/whisper-stt-shim/server.py")
+    handler      = filemd5("${path.module}/../../../lambda/handler.py")
+    requirements = filemd5("${path.module}/../../../lambda/requirements.txt")
+    shim_source  = filemd5("${path.module}/../../../packages/whisper-stt-shim/server.py")
   }
 
   provisioner "local-exec" {
@@ -18,18 +18,18 @@ resource "null_resource" "lambda_build" {
       set -e
       rm -rf ${path.module}/build ${path.module}/.build-venv
       mkdir -p ${path.module}/build/packages/whisper-stt-shim
-      cp ${path.module}/../lambda/handler.py ${path.module}/build/
-      cp ${path.module}/../packages/whisper-stt-shim/server.py ${path.module}/build/packages/whisper-stt-shim/
+      cp ${path.module}/../../../lambda/handler.py ${path.module}/build/
+      cp ${path.module}/../../../packages/whisper-stt-shim/server.py ${path.module}/build/packages/whisper-stt-shim/
       python3 -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
-      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../lambda/requirements.txt -t ${path.module}/build/
+      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../lambda/requirements.txt -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv
     EOT
   }
 }
 
 resource "aws_lambda_function" "handler" {
-  function_name    = "blitzlog-handler"
+  function_name    = "blitzlog-${var.environment}-handler"
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   handler          = "handler.lambda_handler"
@@ -42,6 +42,7 @@ resource "aws_lambda_function" "handler" {
 
   environment {
     variables = {
+      BLITZLOG_ENV              = var.environment
       VPC_ID                    = var.vpc_id
       EC2_SUBNET_ID             = var.ec2_subnet_id
       EC2_SECURITY_GROUP_ID     = aws_security_group.agent_sg.id
@@ -63,6 +64,6 @@ resource "aws_lambda_function" "handler" {
 }
 
 resource "aws_cloudwatch_log_group" "lambda_log_group" {
-  name              = "/aws/lambda/blitzlog-handler"
+  name              = "/aws/lambda/blitzlog-${var.environment}-handler"
   retention_in_days = 14
 }

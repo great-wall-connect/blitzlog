@@ -13,7 +13,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "agent_logs" {
 }
 
 resource "aws_s3_bucket" "stt_models" {
-  bucket        = var.stt_models_bucket_name
+  bucket        = local.stt_models_bucket
   force_destroy = false
 }
 

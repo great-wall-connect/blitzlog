@@ -16,6 +16,7 @@ from handler import (
     _PERIODIC_AUTOSAVE_PLUGIN_JS,
     _SHUTDOWN_TOOL_JS,
     _SPOT_WATCHDOG_PLUGIN_JS,
+    BLITZLOG_ENV,
     _build_s3_downloader_script,
     _configure_git_script,
     _decode_api_errors_script,
@@ -260,9 +261,10 @@ class TestS3Downloader(unittest.TestCase):
 class TestSSMSecretsScript(unittest.TestCase):
     def test_fetches_github_token_from_ephemeral_param(self):
         script = _read_secrets_from_ssm_script(42)
-        self.assertIn("/blitzlog/ephemeral/github-token-42", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/ephemeral/github-token-42", script)
         self.assertIn("export _CC_GITHUB_TOKEN", script)
         self.assertIn("export OPENCODE_API_KEY", script)
+        self.assertIn(f"export BLITZLOG_ENV={BLITZLOG_ENV}", script)
 
     def test_different_issue_numbers(self):
         script13 = _read_secrets_from_ssm_script(13)
@@ -273,11 +275,11 @@ class TestSSMSecretsScript(unittest.TestCase):
 
     def test_fetches_stt_params(self):
         script = _read_secrets_from_ssm_script(42)
-        self.assertIn("/blitzlog/stt/api-url", script)
-        self.assertIn("/blitzlog/stt/api-key", script)
-        self.assertIn("/blitzlog/stt/model", script)
-        self.assertIn("/blitzlog/stt/language", script)
-        self.assertIn("/blitzlog/stt/models-bucket", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/api-url", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/api-key", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/model", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/language", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/models-bucket", script)
         self.assertIn("export STT_API_URL", script)
         self.assertIn("export STT_API_KEY", script)
         self.assertIn("export STT_MODEL", script)
@@ -286,9 +288,16 @@ class TestSSMSecretsScript(unittest.TestCase):
 
     def test_stt_api_key_uses_with_decryption(self):
         script = _read_secrets_from_ssm_script(42)
-        stt_key_idx = script.find("/blitzlog/stt/api-key")
+        stt_key_idx = script.find(f"/blitzlog/{BLITZLOG_ENV}/stt/api-key")
         self.assertNotEqual(stt_key_idx, -1)
         self.assertIn("--with-decryption", script[stt_key_idx : stt_key_idx + 200])
+
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "dev"})
+    def test_paths_use_dev_env_when_blitzlog_env_set(self):
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn("/blitzlog/dev/ephemeral/github-token-42", script)
+        self.assertIn("/blitzlog/dev/opencode/api-key", script)
+        self.assertIn("export BLITZLOG_ENV=dev", script)
 
 
 class TestSTTInBotConfig(unittest.TestCase):
@@ -461,7 +470,7 @@ class TestOpencodeProviderConfig(unittest.TestCase):
 
 
 class TestLambdaBuildConfiguration(unittest.TestCase):
-    """Regression tests for infra/lambda.tf build-time configuration.
+    """Regression tests for infra/modules/core/lambda.tf build-time configuration.
 
     A mistake here silently produces a broken Lambda zip at runtime
     (e.g., 1-byte server.py from a stale cp reference). These tests
@@ -470,7 +479,7 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
 
     @staticmethod
     def _read_lambda_tf():
-        with open("infra/lambda.tf", "r", encoding="utf-8") as f:
+        with open("infra/modules/core/lambda.tf", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_lambda_build_copies_python_shim(self):
@@ -482,11 +491,11 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
         content = self._read_lambda_tf()
         self.assertRegex(
             content,
-            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.py",
+            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.py",
         )
         self.assertNotRegex(
             content,
-            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.js",
+            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.js",
         )
 
     def test_lambda_build_local_exec_uses_set_e(self):
@@ -1580,7 +1589,9 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
 
         mock_ssm.put_parameter.assert_called_once()
         call_args = mock_ssm.put_parameter.call_args
-        self.assertEqual(call_args[1]["Name"], "/blitzlog/ephemeral/github-token-42")
+        self.assertEqual(
+            call_args[1]["Name"], f"/blitzlog/{BLITZLOG_ENV}/ephemeral/github-token-42"
+        )
         self.assertEqual(call_args[1]["Value"], "ghp_testtoken")
         self.assertEqual(call_args[1]["Type"], "SecureString")
 
@@ -2129,7 +2140,7 @@ class TestAcquireBotToken(unittest.TestCase):
             {
                 "Parameters": [
                     {
-                        "Name": f"/blitzlog/users/{self.SENDER}/telegram/pool/{name}",
+                        "Name": f"/blitzlog/{BLITZLOG_ENV}/users/{self.SENDER}/telegram/pool/{name}",
                         "Value": token,
                     }
                     for name, token in names_and_tokens
@@ -2340,7 +2351,7 @@ class TestAcquireBotToken(unittest.TestCase):
         paginator_call = mock_ssm.get_paginator.return_value.paginate.call_args
         self.assertEqual(
             paginator_call[1]["Path"],
-            f"/blitzlog/users/{self.SENDER}/telegram/pool",
+            f"/blitzlog/{BLITZLOG_ENV}/users/{self.SENDER}/telegram/pool",
         )
 
     @patch("handler.s3")
@@ -2362,7 +2373,8 @@ class TestGetTelegramUserId(unittest.TestCase):
         self.assertEqual(get_telegram_user_id("octocat"), "12345")
         call = mock_ssm.get_parameter.call_args
         self.assertEqual(
-            call[1]["Name"], "/blitzlog/users/octocat/telegram/allowed-user-id"
+            call[1]["Name"],
+            f"/blitzlog/{BLITZLOG_ENV}/users/octocat/telegram/allowed-user-id",
         )
 
     @patch("handler.ssm")

@@ -32,3 +32,13 @@ output "stt_models_bucket" {
   description = "S3 bucket hosting whisper.cpp model files for the local STT shim. Upload ggml-<model>.bin to models/ before first boot."
   value       = aws_s3_bucket.stt_models.bucket
 }
+
+output "environment" {
+  description = "Environment name this stack was deployed with."
+  value       = var.environment
+}
+
+output "ssm_root" {
+  description = "Root SSM namespace for this environment (everything per-env lives under this path)."
+  value       = local.ssm_root
+}

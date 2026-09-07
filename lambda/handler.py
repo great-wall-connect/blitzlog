@@ -16,7 +16,23 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-SSM_PATH = "/blitzlog"
+# Environment name passed in by Terraform as a Lambda env var (infra/modules/core/lambda.tf).
+# Used to namespace all SSM parameters under /blitzlog/<env>/... so prod and dev
+# can coexist in the same AWS account without collision.
+# Defaults to "prod" so tests / out-of-Lambda callers continue to work without
+# the BLITZLOG_ENV env var being explicitly set.
+
+
+def _blitzlog_env() -> str:
+    return os.environ.get("BLITZLOG_ENV", "prod")
+
+
+def _ssm_root() -> str:
+    return f"/blitzlog/{_blitzlog_env()}"
+
+
+BLITZLOG_ENV = _blitzlog_env()
+SSM_PATH = _ssm_root()
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WHISPER_STT_SHIM_CANDIDATES = (
@@ -315,7 +331,7 @@ def launch_ec2_spot_instance(
     sender_login: str = "",
     sender_id: str = "",
 ) -> str:
-    ephemeral_param = f"/blitzlog/ephemeral/github-token-{issue_number}"
+    ephemeral_param = f"{SSM_PATH}/ephemeral/github-token-{issue_number}"
     ssm.put_parameter(
         Name=ephemeral_param,
         Value=github_token,
@@ -434,44 +450,48 @@ def launch_ec2_spot_instance(
 
 
 def _read_secrets_from_ssm_script(issue_number: int) -> str:
+    ssm_root = _ssm_root()
+    blitzlog_env = _blitzlog_env()
     return f"""
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
 export AWS_DEFAULT_REGION=$REGION
+export BLITZLOG_ENV={blitzlog_env}
 
-_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "/blitzlog/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
+_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "{ssm_root}/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export _CC_GITHUB_TOKEN
 
-OPENCODE_API_KEY=$(aws ssm get-parameter --name "/blitzlog/opencode/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
+OPENCODE_API_KEY=$(aws ssm get-parameter --name "{ssm_root}/opencode/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export OPENCODE_API_KEY
 
-STT_API_URL=$(aws ssm get-parameter --name "/blitzlog/stt/api-url" --query Parameter.Value --output text --region "$REGION")
+STT_API_URL=$(aws ssm get-parameter --name "{ssm_root}/stt/api-url" --query Parameter.Value --output text --region "$REGION")
 export STT_API_URL
-STT_API_KEY=$(aws ssm get-parameter --name "/blitzlog/stt/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
+STT_API_KEY=$(aws ssm get-parameter --name "{ssm_root}/stt/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export STT_API_KEY
-STT_MODEL=$(aws ssm get-parameter --name "/blitzlog/stt/model" --query Parameter.Value --output text --region "$REGION")
+STT_MODEL=$(aws ssm get-parameter --name "{ssm_root}/stt/model" --query Parameter.Value --output text --region "$REGION")
 export STT_MODEL
-STT_LANGUAGE=$(aws ssm get-parameter --name "/blitzlog/stt/language" --query Parameter.Value --output text --region "$REGION")
+STT_LANGUAGE=$(aws ssm get-parameter --name "{ssm_root}/stt/language" --query Parameter.Value --output text --region "$REGION")
 export STT_LANGUAGE
-STT_MODELS_BUCKET=$(aws ssm get-parameter --name "/blitzlog/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
+STT_MODELS_BUCKET=$(aws ssm get-parameter --name "{ssm_root}/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
 export STT_MODELS_BUCKET
 """
 
 
 def _decode_api_errors_script() -> str:
-    return """
+    ssm_root = _ssm_root()
+    return f"""
 # Decode known LLM-provider API errors into actionable log lines.
 # Run after the opencode process exits and before session export.
 if [ -f "$LOG_FILE" ] && grep -qE "insufficient_balance|insufficient balance|\\(1008\\)" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider returned insufficient balance / HTTP 1008."
-    log "ACTIONABLE: The token-plan account for the configured provider (${OPENCODE_MODEL:-unknown}) has zero credits."
+    log "ACTIONABLE: The token-plan account for the configured provider (${{OPENCODE_MODEL:-unknown}}) has zero credits."
     log "ACTIONABLE: Top up at the provider console (e.g. https://platform.minimax.io) before retrying."
-    log "ACTIONABLE: Verify the API key at SSM parameter /blitzlog/opencode/api-key belongs to a funded account."
+    log "ACTIONABLE: Verify the API key at SSM parameter {ssm_root}/opencode/api-key belongs to a funded account."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "Unauthorized|invalid_api_key|\\(401\\)|Authentication" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider rejected the API key as unauthorized (HTTP 401)."
-    log "ACTIONABLE: Rotate /blitzlog/opencode/api-key in SSM and re-run terraform apply."
+    log "ACTIONABLE: Rotate {ssm_root}/opencode/api-key in SSM and re-run terraform apply."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?requests|\\(429\\)" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider returned a rate-limit / quota error (HTTP 429)."

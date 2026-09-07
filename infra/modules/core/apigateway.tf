@@ -1,5 +1,5 @@
 resource "aws_apigatewayv2_api" "webhook" {
-  name          = "blitzlog-webhook-api"
+  name          = "blitzlog-${var.environment}-webhook-api"
   protocol_type = "HTTP"
 }
 
