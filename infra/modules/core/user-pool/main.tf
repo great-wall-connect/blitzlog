@@ -14,7 +14,7 @@ provider "aws" {
 }
 
 locals {
-  ssm_root = "/blitzlog/${var.environment}"
+  ssm_root  = "/blitzlog/${var.environment}"
   bot_names = nonsensitive(keys(var.telegram_bot_tokens))
 }
 

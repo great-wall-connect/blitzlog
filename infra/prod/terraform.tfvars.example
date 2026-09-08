@@ -8,7 +8,12 @@
 #
 # Resources provisioned: blitzlog-prod-handler Lambda, blitzlog-prod-webhook-api,
 # blitzlog-prod-* IAM roles, blitzlog-prod-agent-sg, s3://<agent_logs_bucket>/prod/...,
-# blitzlog-prod-stt-models S3 bucket, and SSM params under /blitzlog/prod/*.
+# and SSM params under /blitzlog/prod/*.
+#
+# BUCKETS: both agent_logs and stt_models are owned by the infra/bootstrap/
+# stack (one-time setup; see README "Bootstrap"). Both prod and dev reference
+# the SAME bucket names below; per-env logs land under s3://<bucket>/prod/...
+# because the EC2 instance role is IAM-scoped to that prefix.
 #
 # Use a dedicated "Blitzlog Prod" GitHub App here — distinct from the App used
 # in infra/dev/. Each user provisions their own bot pool via the user-pool
@@ -24,7 +29,7 @@ github_app_private_key     = "LS0tLS1CRUdJTi..."                 # base64-encode
 github_app_installation_id = "987654"                            # GitHub App installation ID for the prod repos
 github_webhook_secret      = "replace-with-a-long-random-string" # HMAC secret you also paste into the GitHub webhook config
 opencode_api_key           = "sk-cp-..."                         # API key for the OpenCode inference provider
-agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket holding agent run logs + session archives (must exist beforehand)
+agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # MUST match infra/bootstrap/terraform.tfvars
 
 # Optional variables (uncomment to override defaults):
 # ------------------------------------------------------------------------------
@@ -33,11 +38,11 @@ agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket hol
 # opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the OpenCode CLI on EC2
 # stt_api_url               = "http://127.0.0.1:7878/v1"        # Whisper-compatible endpoint for the Telegram bot
 # stt_api_key               = "any-non-empty-string"            # Forwarded to the STT provider; localhost shim ignores it
-# stt_model                 = "base.en"                          # Whisper model name; must match a file uploaded to blitzlog-prod-stt-models
+# stt_model                 = "base.en"                          # Whisper model name; must match a file uploaded to the shared STT bucket
 # stt_language              = "en"                               # Whisper language hint; "" = auto-detect
-# upload_stt_model          = false                              # Auto-upload whisper model from HuggingFace on `terraform apply`
+# upload_stt_model          = false                              # Auto-upload whisper model from HuggingFace on `terraform apply`. Idempotent — skips if the object already exists in the shared bucket.
 # stt_model_source_url      = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# stt_models_bucket_name    = "blitzlog-prod-stt-models"         # S3 bucket for whisper.cpp models; must be globally unique across AWS
+# stt_models_bucket_name    = "gwc-blitzlog-stt-models"          # MUST match infra/bootstrap/terraform.tfvars (shared with dev)
 # aws_profile               = "terraform"                        # Pin the AWS profile used by the upload provisioner
 
 # Per-user Telegram bot pools (assisted mode)

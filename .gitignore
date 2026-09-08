@@ -2,8 +2,7 @@
 infra/**/.terraform/
 infra/**/*.tfstate
 infra/**/*.tfstate.*
-infra/lambda_function.zip
-infra/build/
+infra/**/lambda_function.zip
 infra/**/build/
 infra/**/*-backend.hcl
 *.tfvars

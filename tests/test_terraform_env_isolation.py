@@ -247,6 +247,67 @@ class TestEnvNamespacing(unittest.TestCase):
             "user-pool variables.tf must declare the environment variable",
         )
 
+    def test_storage_uses_data_sources_not_resources(self):
+        """storage.tf must declare both buckets as data sources, not resources.
+
+        Both buckets are owned by the infra/bootstrap/ stack. Each env (prod,
+        dev, ...) references them by name via `data "aws_s3_bucket"` so a
+        second `terraform apply` does not try to recreate a bucket the first
+        env already owns (BucketAlreadyOwnedByYou).
+        """
+        for bucket in ("agent_logs", "stt_models"):
+            self.assertRegex(
+                self.storage_tf,
+                rf'data\s+"aws_s3_bucket"\s+"{bucket}"',
+                f"storage.tf must reference `{bucket}` bucket via a data source",
+            )
+        # Per-env stacks must NOT own bucket-config resources (encryption,
+        # versioning, lifecycle, public-access-block) — those live in
+        # infra/bootstrap/.
+        for forbidden in (
+            'resource "aws_s3_bucket" "agent_logs"',
+            'resource "aws_s3_bucket" "stt_models"',
+            "aws_s3_bucket_versioning",
+            "aws_s3_bucket_public_access_block",
+            "aws_s3_bucket_lifecycle_configuration",
+        ):
+            self.assertNotIn(
+                forbidden,
+                self.storage_tf,
+                f"storage.tf must not contain {forbidden!r} — bucket config is owned by infra/bootstrap/",
+            )
+
+    def test_bootstrap_stack_exists_and_owns_buckets(self):
+        """The infra/bootstrap/ stack must exist and contain the bucket resources.
+
+        Without it, per-env `terraform apply` fails because the data sources
+        point at non-existent bucket names.
+        """
+        bootstrap_main = (REPO_ROOT / "infra" / "bootstrap" / "main.tf").read_text()
+        self.assertIn(
+            'resource "aws_s3_bucket" "agent_logs"',
+            bootstrap_main,
+            "infra/bootstrap/main.tf must own the agent_logs bucket",
+        )
+        self.assertIn(
+            'resource "aws_s3_bucket" "stt_models"',
+            bootstrap_main,
+            "infra/bootstrap/main.tf must own the stt_models bucket",
+        )
+        # The bootstrap stack must configure the same hardening the old
+        # per-env stack did (encryption, versioning, PAB, lifecycle).
+        for required in (
+            "aws_s3_bucket_server_side_encryption_configuration",
+            "aws_s3_bucket_versioning",
+            "aws_s3_bucket_public_access_block",
+            "aws_s3_bucket_lifecycle_configuration",
+        ):
+            self.assertIn(
+                required,
+                bootstrap_main,
+                f"infra/bootstrap/main.tf must configure {required} on the shared buckets",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

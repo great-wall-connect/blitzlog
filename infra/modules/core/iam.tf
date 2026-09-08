@@ -117,7 +117,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "s3:DeleteObject",
         ]
         Resource = [
-          "${aws_s3_bucket.agent_logs.arn}/bot-pool-locks/*",
+          "${data.aws_s3_bucket.agent_logs.arn}/bot-pool-locks/*",
         ]
       },
       {
@@ -125,7 +125,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Action = [
           "s3:ListBucket",
         ]
-        Resource = aws_s3_bucket.agent_logs.arn
+        Resource = data.aws_s3_bucket.agent_logs.arn
         Condition = {
           StringLike = {
             "s3:prefix" = "bot-pool-locks/*"
@@ -136,7 +136,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Action = [
           "s3:PutObject",
         ]
-        Resource = "${aws_s3_bucket.agent_logs.arn}/user-data/*"
+        Resource = "${data.aws_s3_bucket.agent_logs.arn}/user-data/*"
       },
       {
         Effect = "Allow"
@@ -191,7 +191,7 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           "s3:PutObject",
         ]
         Resource = [
-          "${aws_s3_bucket.agent_logs.arn}/${var.environment}/*",
+          "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*",
         ]
       },
       {
@@ -199,7 +199,7 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         Action = [
           "s3:ListBucket",
         ]
-        Resource = aws_s3_bucket.agent_logs.arn
+        Resource = data.aws_s3_bucket.agent_logs.arn
         Condition = {
           StringLike = {
             "s3:prefix" = "${var.environment}/*"
@@ -227,7 +227,7 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         Action = [
           "s3:GetObject",
         ]
-        Resource = "${aws_s3_bucket.stt_models.arn}/*"
+        Resource = "${data.aws_s3_bucket.stt_models.arn}/*"
       },
     ]
   })
@@ -309,6 +309,6 @@ resource "aws_ssm_parameter" "stt_language" {
 resource "aws_ssm_parameter" "stt_models_bucket" {
   name        = local.ssm_stt_models_bucket_name
   type        = "String"
-  value       = aws_s3_bucket.stt_models.bucket
+  value       = data.aws_s3_bucket.stt_models.bucket
   description = "S3 bucket hosting whisper.cpp model files for EC2 boot-time download (env: ${var.environment})"
 }

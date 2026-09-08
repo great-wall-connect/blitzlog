@@ -48,7 +48,7 @@ resource "aws_lambda_function" "handler" {
       EC2_SECURITY_GROUP_ID     = aws_security_group.agent_sg.id
       EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
       OPENCODE_MODEL            = var.opencode_model
-      S3_LOGS_BUCKET            = aws_s3_bucket.agent_logs.bucket
+      S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
     }
   }
 

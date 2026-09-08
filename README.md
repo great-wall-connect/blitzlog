@@ -70,7 +70,24 @@ Two modes:
 
 Blitzlog deploys into a single AWS account but supports multiple **environments** (`prod`, `dev`, ...) so the maintainer can iterate on Terraform changes from unstable branches without touching production. See [Environments (prod / dev)](#environments-prod--dev) for the full overview.
 
-### 1. Provide the required variables
+### 1. Bootstrap the shared S3 buckets (one-time)
+
+Both `prod` and `dev` reference the same shared S3 buckets (`agent_logs` and `stt_models`) via data sources. Those buckets are owned by a separate one-time stack at `infra/bootstrap/`. Apply it once before any env:
+
+```bash
+cd infra/bootstrap
+cp terraform.tfvars.example terraform.tfvars
+# fill in: aws_region, agent_logs_bucket_name, stt_models_bucket_name
+terraform init -backend-config=bootstrap-backend.hcl
+terraform plan
+terraform apply
+```
+
+This creates the two buckets and configures encryption, versioning, public-access-block, and lifecycle rules on them. Per-env stacks never mutate the buckets — they only read/write keys under them, scoped by IAM to the env-specific key prefix (`s3://<bucket>/prod/...` vs `s3://<bucket>/dev/...`).
+
+After the bootstrap apply, copy the bucket names into both `infra/prod/terraform.tfvars` and `infra/dev/terraform.tfvars` (`agent_logs_bucket_name` and `stt_models_bucket_name` — they MUST match).
+
+### 2. Provide the required variables
 
 Copy and edit the production tfvars:
 
@@ -91,7 +108,7 @@ region = "ap-east-1"
 
 Override the bucket if your state bucket is not `gwc-infra-tf-state`.
 
-### 2. Deploy production
+### 3. Deploy production
 
 ```bash
 cd infra/prod
@@ -102,7 +119,7 @@ terraform apply
 
 GitHub App secrets are pushed into SSM `SecureString` parameters automatically; the Lambda reads them at runtime.
 
-### 3. Register the GitHub webhook
+### 4. Register the GitHub webhook
 
 After deployment, copy the webhook URL from `terraform output`:
 
@@ -118,7 +135,7 @@ Register in your GitHub repo → **Settings → Webhooks**:
 - **Secret**: same value as `github_webhook_secret`
 - **Events**: `Issues`
 
-### 4. Label an issue
+### 5. Label an issue
 
 Label any issue with **`autonomous`** to trigger the autonomous pipeline, or **`assisted`** (with a configured Telegram bot pool) to start an interactive session.
 
@@ -145,6 +162,13 @@ Each env has:
 
 ```
 infra/
+├── bootstrap/                 # ONE-TIME: creates the shared S3 buckets + their config
+│   ├── main.tf                # (agent_logs + stt_models, encryption, versioning, PAB, lifecycle)
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── bootstrap-backend.hcl  # state key: bootstrap/blitzlog-bootstrap.tfstate
+│   ├── terraform.tfvars       # gitignored — your real bootstrap values
+│   └── terraform.tfvars.example
 ├── modules/
 │   └── core/                  # all blitzlog resources, parameterized by var.environment
 │       ├── main.tf
@@ -155,7 +179,8 @@ infra/
 │       ├── ec2.tf
 │       ├── apigateway.tf
 │       ├── alerting.tf
-│       ├── storage.tf
+│       ├── storage.tf         # data "aws_s3_bucket" X 2 — references bootstrap-owned buckets
+│       ├── locals.tf
 │       └── user-pool/         # per-user Telegram bot pool, also takes var.environment
 ├── prod/                      # prod wrapper: `module "core" { environment = "prod", ... }`
 │   ├── main.tf
@@ -225,17 +250,49 @@ terraform apply
 
 The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/prod/` should be empty.
 
+### Migrating S3 buckets out of the prod stack into the bootstrap stack
+
+If the existing prod deployment managed the `agent_logs` and `stt_models` buckets (i.e. they were created by Terraform before the bootstrap stack existed), refactor them out with `terraform state rm` + `terraform import`. Apply the bootstrap stack first so the buckets exist:
+
+```bash
+# 1. Apply the bootstrap stack so the buckets are owned by infra/bootstrap/.
+cd infra/bootstrap
+terraform init -backend-config=bootstrap-backend.hcl
+terraform plan
+terraform apply
+
+# 2. Remove the bucket resources from prod's state.
+cd ../prod
+terraform state rm module.core.aws_s3_bucket.agent_logs
+terraform state rm module.core.aws_s3_bucket_server_side_encryption_configuration.agent_logs
+terraform state rm module.core.aws_s3_bucket.stt_models
+terraform state rm module.core.aws_s3_bucket_versioning.stt_models
+terraform state rm module.core.aws_s3_bucket_public_access_block.stt_models
+terraform state rm module.core.aws_s3_bucket_server_side_encryption_configuration.stt_models
+terraform state rm module.core.aws_s3_bucket_lifecycle_configuration.stt_models
+
+# 3. Import the buckets as data sources in the prod state.
+terraform import module.core.data.aws_s3_bucket.agent_logs gwc-blitzlog-agent-logs
+terraform import module.core.data.aws_s3_bucket.stt_models gwc-blitzlog-stt-models
+
+# 4. Verify.
+terraform plan    # must be empty (no diff)
+```
+
+After this, both buckets are owned by `infra/bootstrap/`. `infra/prod/` and `infra/dev/` reference them by name. Subsequent dev `apply` does not collide on bucket creation.
+
 ### State file layout
 
-Both envs share the same S3 bucket, separated by key prefix:
+All stacks share the same S3 state bucket, separated by key prefix:
 
 ```
 s3://gwc-infra-tf-state/
-├── prod/blitzlog.tfstate   # infra/prod
-└── dev/blitzlog.tfstate    # infra/dev
+├── bootstrap/blitzlog-bootstrap.tfstate   # infra/bootstrap — one-time bucket creation
+├── prod/blitzlog.tfstate                  # infra/prod
+└── dev/blitzlog.tfstate                   # infra/dev
 ```
 
-The bucket name is configurable in `infra/prod/prod-backend.hcl` and `infra/dev/dev-backend.hcl`. Each env has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+The bucket name is configurable in each stack's `-backend.hcl` file. Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
 
 ---
 
@@ -563,7 +620,7 @@ Assisted-mode agents can accept Telegram voice notes, transcribe them with a sel
 
 ### Setup
 
-Two ways to populate the model in `s3://blitzlog-<env>-stt-models/models/`:
+Two ways to populate the model in the shared STT models bucket (`s3://<stt_models_bucket>/models/`, where `<stt_models_bucket>` is the name you set in `infra/bootstrap/terraform.tfvars` — both prod and dev use the same bucket):
 
 1. **Manual upload** (default). One-time, after `terraform apply`:
 

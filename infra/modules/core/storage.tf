@@ -1,74 +1,24 @@
-resource "aws_s3_bucket" "agent_logs" {
+# Both S3 buckets are owned by the infra/bootstrap stack (one-time setup).
+# Each env references them as data sources so prod and dev share the same
+# physical buckets without conflicting on `terraform apply`.
+#
+# The bootstrap stack also configures encryption, versioning, lifecycle,
+# and public-access-block on these buckets. Per-env stacks do not mutate
+# the buckets — they only read/write keys under them.
+
+data "aws_s3_bucket" "agent_logs" {
   bucket = var.agent_logs_bucket_name
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "agent_logs" {
-  bucket = aws_s3_bucket.agent_logs.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket" "stt_models" {
-  bucket        = local.stt_models_bucket
-  force_destroy = false
-}
-
-resource "aws_s3_bucket_versioning" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
-
-  rule {
-    id     = "expire-noncurrent"
-    status = "Enabled"
-    filter {}
-
-    noncurrent_version_expiration {
-      noncurrent_days = 30
-    }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-    expiration {
-      expired_object_delete_marker = true
-    }
-  }
+data "aws_s3_bucket" "stt_models" {
+  bucket = local.stt_models_bucket
 }
 
 resource "terraform_data" "stt_model_upload" {
   count = var.upload_stt_model && var.stt_model != "" ? 1 : 0
 
   input = {
-    bucket      = aws_s3_bucket.stt_models.bucket
+    bucket      = data.aws_s3_bucket.stt_models.bucket
     model       = var.stt_model
     source_base = var.stt_model_source_url
     region      = var.aws_region

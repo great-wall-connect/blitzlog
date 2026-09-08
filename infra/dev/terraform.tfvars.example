@@ -8,7 +8,7 @@
 #
 # Resources provisioned: blitzlog-dev-handler Lambda, blitzlog-dev-webhook-api,
 # blitzlog-dev-* IAM roles, blitzlog-dev-agent-sg, s3://<agent_logs_bucket>/dev/...,
-# blitzlog-dev-stt-models S3 bucket, and SSM params under /blitzlog/dev/*.
+# and SSM params under /blitzlog/dev/*.
 #
 # CRITICAL: Use a dedicated "Blitzlog Dev" GitHub App here — distinct from prod.
 # Install the dev App on a throwaway sandbox repo (e.g. great-wall-connect/blitzlog-dev-sandbox)
@@ -18,6 +18,12 @@
 #
 # The dev Lambda role's IAM policy only allows reads from /blitzlog/dev/*, so a
 # misconfigured dev webhook cannot impersonate the prod GitHub App.
+#
+# BUCKETS: both agent_logs and stt_models are owned by the infra/bootstrap/
+# stack (see README "Bootstrap"). Both prod and dev reference the SAME bucket
+# by name; the names below MUST match what infra/bootstrap/ provisioned.
+# Dev logs land under s3://<bucket>/dev/<repo>/issue/<N>/... — the dev EC2
+# instance role is IAM-scoped to read/write only the dev/ prefix.
 #
 # Required variables (no defaults — Terraform apply will fail without these):
 # ------------------------------------------------------------------------------
@@ -29,7 +35,7 @@ github_app_private_key     = "LS0tLS1CRUdJTi..."                 # base64-encode
 github_app_installation_id = "987654"                            # GitHub App installation ID for the sandbox repo
 github_webhook_secret      = "replace-with-a-long-random-string" # HMAC secret you also paste into the GitHub webhook config
 opencode_api_key           = "sk-cp-..."                         # API key for the OpenCode inference provider used by dev agents
-agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket holding dev agent run logs (usually reused from prod)
+agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket as prod (owned by infra/bootstrap/)
 
 # Optional variables (uncomment to override defaults):
 # ------------------------------------------------------------------------------
@@ -38,11 +44,11 @@ agent_logs_bucket_name     = "your-agent-logs-bucket"            # S3 bucket hol
 # opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the dev OpenCode CLI
 # stt_api_url               = "http://127.0.0.1:7878/v1"
 # stt_api_key               = "any-non-empty-string"
-# stt_model                 = "base.en"                          # Whisper model name; upload ggml-base.en.bin to blitzlog-dev-stt-models first
+# stt_model                 = "base.en"                          # Whisper model name; model already in the shared bucket if you ran `upload_stt_model = true` against prod or dev
 # stt_language              = "en"
-# upload_stt_model          = false                              # Auto-upload whisper model from HuggingFace on `terraform apply`
+# upload_stt_model          = false                              # Auto-upload whisper model from HuggingFace on `terraform apply`. Idempotent — skips if the object already exists.
 # stt_model_source_url      = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# stt_models_bucket_name    = "blitzlog-dev-stt-models"          # S3 bucket for whisper.cpp models
+# stt_models_bucket_name    = "gwc-blitzlog-stt-models"          # SAME bucket as prod by default; override only if you provisioned a separate one via infra/bootstrap/
 # aws_profile               = "terraform"                        # Pin the AWS profile used by the upload provisioner
 
 # Per-user Telegram bot pools (assisted mode)
