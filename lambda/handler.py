@@ -389,7 +389,7 @@ def launch_ec2_spot_instance(
                     {"Key": "Issue", "Value": str(issue_number)},
                     {
                         "Key": "Name",
-                        "Value": f"opencode-agent-{mode}-issue-{issue_number}",
+                        "Value": f"blitzlog-{BLITZLOG_ENV}-opencode-agent-{mode}-issue-{issue_number}",
                     },
                 ],
             },
