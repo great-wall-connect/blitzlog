@@ -201,6 +201,23 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
       {
         Effect = "Allow"
         Action = [
+          "s3:GetObject",
+        ]
+        # user-data/* is the Lambda→EC2 handoff for the bootstrap script.
+        # The Lambda writes one ephemeral script per EC2 launch to
+        # s3://<bucket>/user-data/... (no env prefix — it's shared infra),
+        # and the matching EC2 reads it via the user-data downloader
+        # (_build_s3_downloader_script does `aws s3 cp`). The <env>/*
+        # restriction above is for *run logs*, not user-data. The script
+        # contains no secrets (those come from SSM in the next step), so
+        # widening read access across all EC2 instances is intentional.
+        Resource = [
+          "${data.aws_s3_bucket.agent_logs.arn}/user-data/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "s3:ListBucket",
         ]
         Resource = data.aws_s3_bucket.agent_logs.arn

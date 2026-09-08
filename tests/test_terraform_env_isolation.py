@@ -345,6 +345,43 @@ class TestEnvNamespacing(unittest.TestCase):
                 "the ARN template.",
             )
 
+    def test_ec2_agent_policy_can_read_user_data(self):
+        """The EC2 agent role must allow s3:GetObject on user-data/*.
+
+        The Lambda writes one ephemeral bootstrap script per EC2 launch to
+        s3://<bucket>/user-data/... (no env prefix — shared infra). The
+        matching EC2 instance reads it via the user-data downloader
+        (_build_s3_downloader_script does `aws s3 cp`). The <env>/*
+        restriction elsewhere on the EC2 IAM is for *run logs*, not for
+        user-data. Without this grant, cloud-init fails with
+        `HeadObject 403` and the bootstrap script never runs.
+        """
+        body = _policy_body_for_role("ec2_agent_policy", self.iam_tf)
+        self.assertIn(
+            "${data.aws_s3_bucket.agent_logs.arn}/user-data/*",
+            body,
+            "EC2 agent policy must grant s3:GetObject on "
+            "${data.aws_s3_bucket.agent_logs.arn}/user-data/* — the downloader "
+            "script in _build_s3_downloader_script does an `aws s3 cp` of the "
+            "Lambda-uploaded bootstrap.sh. Without this grant, cloud-init fails "
+            "with `HeadObject 403` and /tmp/bootstrap.sh is never created.",
+        )
+
+    def test_lambda_policy_can_write_user_data(self):
+        """The Lambda policy must allow s3:PutObject on user-data/*.
+
+        The Lambda uploads the bootstrap script to s3://<bucket>/user-data/...
+        (lambda/handler.py:350). Without s3:PutObject on that prefix, the
+        upload fails before the EC2 instance is even launched.
+        """
+        body = _policy_body_for_role("lambda_policy", self.iam_tf)
+        self.assertIn(
+            "/user-data/*",
+            body,
+            "Lambda policy must grant s3:PutObject on user-data/* "
+            "(handler.py:350 uploads the bootstrap script there)",
+        )
+
     def test_storage_uses_data_sources_not_resources(self):
         """storage.tf must declare both buckets as data sources, not resources.
 
