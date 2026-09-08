@@ -12,7 +12,14 @@ locals {
   ssm_stt_language_name            = "${local.ssm_root}/stt/language"
   ssm_stt_models_bucket_name       = "${local.ssm_root}/stt/models-bucket"
 
-  ssm_ephemeral_root = "${local.ssm_root}/ephemeral"
+  # No leading slash — this is interpolated directly into the IAM ARN
+  # template ("arn:aws:ssm:*:*:parameter/${local.ssm_ephemeral_root}/*").
+  # A leading slash here produces a double slash in the rendered policy
+  # (e.g. "parameter//blitzlog/dev/ephemeral/*") which silently fails to
+  # match the actual SSM parameter path the Lambda writes to
+  # ("/blitzlog/dev/ephemeral/github-token-N"). Regression test:
+  # test_iam_policies_have_no_double_slash_resource_arns.
+  ssm_ephemeral_root = "blitzlog/${var.environment}/ephemeral"
 
   # Per-user bot pools and per-user local LLM config live under /blitzlog/users/
   # with NO env infix — both are user-owned data that is shared across envs

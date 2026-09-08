@@ -321,6 +321,30 @@ class TestEnvNamespacing(unittest.TestCase):
                     "SSM paths must be env-independent (literal /blitzlog/users/...)",
                 )
 
+    def test_iam_policies_have_no_double_slash_resource_arns(self):
+        """No IAM policy may contain 'parameter//' in any Resource string.
+
+        A double slash in an SSM Resource ARN pattern is always wrong: SSM
+        parameter names contain at most one '/' separator, and IAM glob
+        matching is literal. This test catches the
+        'parameter//blitzlog/<env>/ephemeral/*' shape that silently breaks
+        ephemeral-token writes without producing a Terraform validation
+        error. The most common cause is interpolating a local with a
+        leading slash into an ARN template that already includes 'parameter/'.
+        """
+        for role in ("lambda_policy", "ec2_agent_policy"):
+            body = _policy_body_for_role(role, self.iam_tf)
+            self.assertNotIn(
+                "parameter//",
+                body,
+                f"{role} policy contains 'parameter//' — a double slash in an "
+                "SSM Resource ARN. This renders a policy that never matches the "
+                "actual parameter path (e.g. 'parameter//blitzlog/dev/ephemeral/*' "
+                "will not match the Lambda's write to '/blitzlog/dev/ephemeral/...'). "
+                "Cause is usually a local with a leading slash interpolated into "
+                "the ARN template.",
+            )
+
     def test_storage_uses_data_sources_not_resources(self):
         """storage.tf must declare both buckets as data sources, not resources.
 
