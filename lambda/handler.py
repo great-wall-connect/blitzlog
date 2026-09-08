@@ -17,7 +17,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Environment name passed in by Terraform as a Lambda env var (infra/modules/core/lambda.tf).
-# Used to namespace all SSM parameters under /blitzlog/<env>/... so prod and dev
+# Used to namespace all per-env SSM parameters under /blitzlog/<env>/... so prod and dev
 # can coexist in the same AWS account without collision.
 # Defaults to "prod" so tests / out-of-Lambda callers continue to work without
 # the BLITZLOG_ENV env var being explicitly set.
@@ -33,6 +33,11 @@ def _ssm_root() -> str:
 
 BLITZLOG_ENV = _blitzlog_env()
 SSM_PATH = _ssm_root()
+
+# Per-user data (bot pools, local LLM config) is env-independent — a user has
+# one Telegram bot pool and one local LLM endpoint, not one per env. Both prod
+# and dev Lambda instances read from this single namespace.
+BOT_POOL_SSM_PATH = "/blitzlog/users"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WHISPER_STT_SHIM_CANDIDATES = (
@@ -67,7 +72,7 @@ def get_ssm_param(name: str, with_decryption: bool = True) -> str:
 def list_bot_pool(sender_login: str) -> dict[str, str]:
     paginator = ssm.get_paginator("get_parameters_by_path")
     pages = paginator.paginate(
-        Path=f"{SSM_PATH}/users/{sender_login}/telegram/pool",
+        Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/pool",
         WithDecryption=True,
     )
     bots: dict[str, str] = {}
@@ -81,7 +86,7 @@ def list_bot_pool(sender_login: str) -> dict[str, str]:
 def get_telegram_user_id(sender_login: str) -> str | None:
     try:
         resp = ssm.get_parameter(
-            Name=f"{SSM_PATH}/users/{sender_login}/telegram/allowed-user-id",
+            Name=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/allowed-user-id",
             WithDecryption=False,
         )
         return resp["Parameter"]["Value"]

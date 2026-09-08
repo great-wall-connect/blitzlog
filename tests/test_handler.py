@@ -2140,7 +2140,7 @@ class TestAcquireBotToken(unittest.TestCase):
             {
                 "Parameters": [
                     {
-                        "Name": f"/blitzlog/{BLITZLOG_ENV}/users/{self.SENDER}/telegram/pool/{name}",
+                        "Name": f"/blitzlog/users/{self.SENDER}/telegram/pool/{name}",
                         "Value": token,
                     }
                     for name, token in names_and_tokens
@@ -2351,7 +2351,7 @@ class TestAcquireBotToken(unittest.TestCase):
         paginator_call = mock_ssm.get_paginator.return_value.paginate.call_args
         self.assertEqual(
             paginator_call[1]["Path"],
-            f"/blitzlog/{BLITZLOG_ENV}/users/{self.SENDER}/telegram/pool",
+            f"/blitzlog/users/{self.SENDER}/telegram/pool",
         )
 
     @patch("handler.s3")
@@ -2374,7 +2374,7 @@ class TestGetTelegramUserId(unittest.TestCase):
         call = mock_ssm.get_parameter.call_args
         self.assertEqual(
             call[1]["Name"],
-            f"/blitzlog/{BLITZLOG_ENV}/users/octocat/telegram/allowed-user-id",
+            "/blitzlog/users/octocat/telegram/allowed-user-id",
         )
 
     @patch("handler.ssm")

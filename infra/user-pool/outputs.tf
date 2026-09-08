@@ -12,8 +12,3 @@ output "owner_login" {
   description = "Owner login this pool belongs to"
   value       = var.owner_login
 }
-
-output "environment" {
-  description = "Environment name this pool belongs to"
-  value       = var.environment
-}

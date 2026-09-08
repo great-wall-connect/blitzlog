@@ -4,16 +4,6 @@ variable "aws_region" {
   default     = "ap-east-1"
 }
 
-variable "environment" {
-  description = "Environment name (prod, dev). SSM parameters are namespaced under /blitzlog/<environment>/users/<owner_login>/..."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.environment))
-    error_message = "environment must be lowercase alphanumeric with optional hyphens, 2-32 chars, and cannot start or end with a hyphen."
-  }
-}
-
 variable "owner_login" {
   description = "GitHub login of the user who owns this bot pool"
   type        = string

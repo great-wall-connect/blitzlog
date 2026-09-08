@@ -4,14 +4,17 @@ These tests do NOT need AWS credentials. They parse the HCL/JSON in
 infra/modules/core/iam.tf and assert that:
 
 - The Lambda role for any single env does not reference the OTHER env's SSM prefix
-- Both env-namespaced SSM prefixes are referenced via `${local.ssm_root}` etc.
 - Resource names embed var.environment so prod and dev stacks never collide
 - ec2:TerminateInstances is gated on the matching Environment tag
-- The user-pool module requires environment and namespaces its SSM paths
+- Per-env ephemeral SSM params are env-scoped; per-user data (bot pool,
+  local LLM config) is env-independent under /blitzlog/users/
+- The user-pool module lives at infra/user-pool/ and creates params under
+  /blitzlog/users/<login>/telegram/ (no env prefix)
 
 If a refactor accidentally grants cross-env SSM access (e.g. by widening
-the resource pattern to /blitzlog/*), these tests catch it at PR review
-time instead of after a bad apply.
+the resource pattern to /blitzlog/*) or accidentally env-namespaces the
+user-pool namespace, these tests catch it at PR review time instead of
+after a bad apply.
 """
 
 import re
@@ -25,8 +28,8 @@ EC2_TF = REPO_ROOT / "infra" / "modules" / "core" / "ec2.tf"
 ALERTING_TF = REPO_ROOT / "infra" / "modules" / "core" / "alerting.tf"
 STORAGE_TF = REPO_ROOT / "infra" / "modules" / "core" / "storage.tf"
 LOCALS_TF = REPO_ROOT / "infra" / "modules" / "core" / "locals.tf"
-USER_POOL_MAIN = REPO_ROOT / "infra" / "modules" / "core" / "user-pool" / "main.tf"
-USER_POOL_VARS = REPO_ROOT / "infra" / "modules" / "core" / "user-pool" / "variables.tf"
+USER_POOL_MAIN = REPO_ROOT / "infra" / "user-pool" / "main.tf"
+USER_POOL_VARS = REPO_ROOT / "infra" / "user-pool" / "variables.tf"
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -235,17 +238,88 @@ class TestEnvNamespacing(unittest.TestCase):
             "TerminateInstances condition must reference var.environment",
         )
 
-    def test_user_pool_namespaced_under_environment(self):
-        """The user-pool module must require environment and prefix SSM paths."""
+    def test_user_pool_lives_under_infra_user_pool(self):
+        """The user-pool module must live at infra/user-pool/ (standalone) and
+        create SSM parameters under the env-independent /blitzlog/users/ namespace."""
         main_tf = USER_POOL_MAIN.read_text()
         vars_tf = USER_POOL_VARS.read_text()
-        self.assertIn("var.environment", main_tf)
-        self.assertIn("/blitzlog/${var.environment}", main_tf)
-        self.assertIn(
+        # No environment variable — user pool is shared across envs.
+        self.assertNotIn(
             'variable "environment"',
             vars_tf,
-            "user-pool variables.tf must declare the environment variable",
+            "user-pool variables.tf must NOT declare an environment variable — "
+            "the user pool is shared across envs (both prod and dev Lambdas read "
+            "the same /blitzlog/users/<login>/telegram/* parameters).",
         )
+        # SSM paths use the literal /blitzlog/users/ root, not an env-prefixed one.
+        self.assertIn(
+            "/blitzlog/users/${var.owner_login}/telegram/pool/",
+            main_tf,
+            "user-pool main.tf must write bot tokens under /blitzlog/users/... "
+            "(no env prefix)",
+        )
+        self.assertIn(
+            "/blitzlog/users/${var.owner_login}/telegram/allowed-user-id",
+            main_tf,
+            "user-pool main.tf must write allowed-user-id under /blitzlog/users/... "
+            "(no env prefix)",
+        )
+        # Defensive: nothing env-scoped should leak in.
+        self.assertNotIn(
+            "var.environment",
+            main_tf,
+            "user-pool main.tf must not reference var.environment",
+        )
+
+    def test_lambda_policy_can_read_user_bots(self):
+        """The Lambda role must have explicit SSM access to /blitzlog/users/...
+
+        Both prod and dev Lambdas need to read the same per-user bot pool and
+        per-user local LLM config — these are env-independent on purpose.
+        """
+        body = _policy_body_for_role("lambda_policy", self.iam_tf)
+        self.assertIn(
+            "arn:aws:ssm:*:*:parameter/blitzlog/users",
+            body,
+            "Lambda policy must allow ssm:GetParameter on /blitzlog/users",
+        )
+        self.assertIn(
+            "arn:aws:ssm:*:*:parameter/blitzlog/users/*",
+            body,
+            "Lambda policy must allow ssm:GetParameter on /blitzlog/users/*",
+        )
+
+    def test_ec2_agent_policy_can_read_user_local_llm(self):
+        """The EC2 agent role must have explicit SSM access to local-llm config
+        under /blitzlog/users/.../local-llm/*."""
+        body = _policy_body_for_role("ec2_agent_policy", self.iam_tf)
+        self.assertIn(
+            "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
+            body,
+            "EC2 agent policy must allow ssm:GetParameter on /blitzlog/users/*/local-llm/*",
+        )
+
+    def test_iam_does_not_env_scope_user_pool_paths(self):
+        """Per-user SSM ARNs in IAM policies must NOT include an env prefix.
+
+        If a future refactor accidentally re-introduces env-namespacing for the
+        user-pool namespace (e.g. ${local.ssm_root}/users/* instead of the
+        literal /blitzlog/users/*), this test catches it.
+        """
+        for role_name in ("lambda_policy", "ec2_agent_policy"):
+            body = _policy_body_for_role(role_name, self.iam_tf)
+            for forbidden in (
+                "${local.ssm_root}/users",
+                "${local.ssm_user_pool_root}",
+                "/blitzlog/prod/users",
+                "/blitzlog/dev/users",
+            ):
+                self.assertNotIn(
+                    forbidden,
+                    body,
+                    f"{role_name} policy references {forbidden!r} — user-pool "
+                    "SSM paths must be env-independent (literal /blitzlog/users/...)",
+                )
 
     def test_storage_uses_data_sources_not_resources(self):
         """storage.tf must declare both buckets as data sources, not resources.

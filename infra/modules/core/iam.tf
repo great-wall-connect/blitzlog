@@ -104,9 +104,13 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "ssm:GetParametersByPath",
           "ssm:GetParameter",
         ]
+        # Per-user bot pools and per-user local LLM config are env-independent.
+        # A user has one set of Telegram bots and one local LLM endpoint, not
+        # one per env. Both prod and dev Lambdas read the same /blitzlog/users/...
+        # namespace so the user only configures their pool once.
         Resource = [
-          "arn:aws:ssm:*:*:parameter/${local.ssm_user_pool_root}",
-          "arn:aws:ssm:*:*:parameter/${local.ssm_user_pool_root}/*",
+          "arn:aws:ssm:*:*:parameter/blitzlog/users",
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*",
         ]
       },
       {
@@ -219,7 +223,9 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           aws_ssm_parameter.stt_language.arn,
           aws_ssm_parameter.stt_models_bucket.arn,
           "arn:aws:ssm:*:*:parameter/${local.ssm_ephemeral_root}/*",
-          "arn:aws:ssm:*:*:parameter/${local.ssm_user_llm_pattern}",
+          # Per-user local LLM config is env-independent — same Mac mini, same
+          # endpoint, used by both prod and dev EC2 instances.
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
         ]
       },
       {

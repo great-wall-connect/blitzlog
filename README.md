@@ -48,7 +48,7 @@ Two modes:
 | `infra/modules/core/` | Reusable Terraform module containing all blitzlog resources, parameterized by `var.environment` (prod / dev) |
 | `infra/prod/` | Thin Terraform wrapper that deploys the core module with `environment = "prod"` |
 | `infra/dev/` | Thin Terraform wrapper that deploys the core module with `environment = "dev"` |
-| `infra/modules/core/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool into SSM Parameter Store, env-namespaced |
+| `infra/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool and per-user local LLM config into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
 | `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
@@ -180,8 +180,7 @@ infra/
 │       ├── apigateway.tf
 │       ├── alerting.tf
 │       ├── storage.tf         # data "aws_s3_bucket" X 2 — references bootstrap-owned buckets
-│       ├── locals.tf
-│       └── user-pool/         # per-user Telegram bot pool, also takes var.environment
+│       └── locals.tf
 ├── prod/                      # prod wrapper: `module "core" { environment = "prod", ... }`
 │   ├── main.tf
 │   ├── variables.tf
@@ -196,7 +195,10 @@ infra/
 │   ├── dev-backend.hcl
 │   ├── terraform.tfvars       # gitignored — your real dev values
 │   └── terraform.tfvars.example
-└── user-pool/                 # removed in favor of modules/core/user-pool/
+└── user-pool/                 # per-user Telegram bot pool + per-user local LLM config.
+                              # Each user runs this LOCALLY (no shared S3 backend).
+                              # Params land under /blitzlog/users/<login>/... — shared
+                              # across envs, no `environment` variable needed.
 ```
 
 ### Spinning up a fresh dev environment
@@ -235,7 +237,7 @@ infra/
 | Test an unstable branch | `git checkout my-branch && cd infra/dev && terraform apply` |
 | Verify prod is unchanged after a dev change | `cd infra/prod && terraform plan` (should be empty) |
 | Inspect current state of either env | `terraform output` from `infra/prod` or `infra/dev` |
-| Add/rotate a bot token | `cd infra/modules/core/user-pool && terraform apply` |
+| Add/rotate a bot token | `cd infra/user-pool && terraform apply` |
 
 ### Migrating an existing single-env deployment to the new layout
 
@@ -298,14 +300,14 @@ The bucket name is configurable in each stack's `-backend.hcl` file. Each stack 
 
 ## Per-user bot pool setup (assisted mode)
 
-The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/modules/core/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
+The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
 
-> **Picking an environment.** The user-pool module now takes a required `environment` variable (`"prod"` or `"dev"`). Bot tokens for prod users land under `/blitzlog/prod/users/<login>/...`; bot tokens for dev users land under `/blitzlog/dev/users/<login>/...`. The Lambda reads from the env-namespaced path, so set `environment` to match the deployment you want your bots to feed.
+> **Shared across envs.** Per-user bot tokens are stored under `/blitzlog/users/<login>/...` with **no env prefix** — both prod and dev Lambdas read from this single namespace. A user configures their bot pool once. The same applies to per-user local LLM config (`/blitzlog/users/<login>/local-llm/...`).
 
 ### Prerequisites
 
 - Terraform >= 1.0.
-- AWS credentials for an IAM principal with permissions scoped to **your own** user namespace under `/blitzlog/<env>/users/<your-github-login>/`:
+- AWS credentials for an IAM principal with permissions scoped to **your own** user namespace under `/blitzlog/users/<your-github-login>/`:
   ```json
   {
     "Version": "2012-10-17",
@@ -319,25 +321,24 @@ The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each 
         "ssm:GetParametersByPath",
         "ssm:DescribeParameters"
       ],
-      "Resource": "arn:aws:ssm:*:*:parameter/blitzlog/${aws:username}/*"
+      "Resource": "arn:aws:ssm:*:*:parameter/blitzlog/users/${aws:username}/*"
     }]
   }
   ```
-  The `${aws:username}` placeholder resolves to your IAM user/role session name, which must match (or be mapped to) your GitHub login. If you log in with a different IAM principal name, either rename it or expand the resource pattern. The shared infra owner may also grant broader SSM access under `arn:aws:ssm:*:*:parameter/blitzlog/*/users/*` if self-service scoping is too restrictive.
+  The `${aws:username}` placeholder resolves to your IAM user/role session name, which must match (or be mapped to) your GitHub login. If you log in with a different IAM principal name, either rename it or expand the resource pattern. The shared infra owner may also grant broader SSM access under `arn:aws:ssm:*:*:parameter/blitzlog/users/*` if self-service scoping is too restrictive.
 
 ### Step 1 — Create your tfvars
 
 From the repository root:
 
 ```bash
-cp infra/modules/core/user-pool/terraform.tfvars.example \
-   infra/modules/core/user-pool/terraform.tfvars
+cp infra/user-pool/terraform.tfvars.example \
+   infra/user-pool/terraform.tfvars
 ```
 
-Open `infra/modules/core/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
+Open `infra/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
 
 ```hcl
-environment              = "prod"  # or "dev" — must match the Blitzlog deployment this pool feeds
 owner_login              = "your-github-username"   # exactly as it appears in the issue sender
 telegram_allowed_user_id = "12345678"               # your Telegram numeric user ID
 
@@ -347,21 +348,20 @@ telegram_bot_tokens = {
 }
 ```
 
-- `environment` must be `"prod"` or `"dev"` — it controls where the SSM parameters land. A bot provisioned for `prod` is invisible to the `dev` Lambda, and vice versa.
 - `owner_login` must match the `sender.login` field on the issues you'll trigger, because the Lambda routes bots by sender (`list_bot_pool` in `lambda/handler.py:51`).
 - `telegram_allowed_user_id` is the single Telegram user ID permitted to interact with any bot in your pool. The Lambda refuses to acquire a bot if this parameter is missing (see `lambda/handler.py:65`).
-- `telegram_bot_tokens` is a map of friendly bot names to BotFather tokens. Each entry becomes one `SecureString` SSM parameter; the map's keys are the bot names the EC2 user-data script receives.
+- `telegram_bot_tokens` is a map of friendly bot names to BotFather tokens. Each entry becomes one `SecureString` SSM parameter under `/blitzlog/users/<owner_login>/telegram/pool/<key>`; the map's keys are the bot names the EC2 user-data script receives.
 
 ### Step 2 — Apply
 
 ```bash
-cd infra/modules/core/user-pool
+cd infra/user-pool
 terraform init
 terraform plan    # reviews the SSM parameters that will be created
 terraform apply   # type 'yes' to confirm
 ```
 
-What gets created in AWS (all under `/blitzlog/<env>/users/<owner_login>/`):
+What gets created in AWS (all under `/blitzlog/users/<owner_login>/` — no env prefix; both prod and dev Lambdas read from here):
 
 | Parameter name                                | Type        |
 |-----------------------------------------------|-------------|
@@ -372,7 +372,7 @@ What gets created in AWS (all under `/blitzlog/<env>/users/<owner_login>/`):
 
 ```bash
 aws ssm get-parameters-by-path \
-  --path "/blitzlog/<env>/users/<owner_login>/telegram/" \
+  --path "/blitzlog/users/<owner_login>/telegram/" \
   --recursive --with-decryption \
   --query "Parameters[].Name"
 ```
@@ -381,7 +381,7 @@ You should see your `allowed-user-id` parameter and one `pool/<bot>` parameter p
 
 ### Rotate, add, or remove bots
 
-1. Edit `infra/modules/core/user-pool/terraform.tfvars`.
+1. Edit `infra/user-pool/terraform.tfvars`.
 2. `terraform plan` — review the diff.
 3. `terraform apply` — adds are created, renames move parameters, deletions remove them.
 
@@ -390,11 +390,11 @@ To add a bot, add a new key/token pair. To remove one, delete the line. To rotat
 ### Tear down
 
 ```bash
-cd infra/modules/core/user-pool
+cd infra/user-pool
 terraform destroy
 ```
 
-Removes all SSM parameters under `/blitzlog/<env>/users/<owner_login>/`. The local `terraform.tfstate` is then safe to delete.
+Removes all SSM parameters under `/blitzlog/users/<owner_login>/`. The local `terraform.tfstate` is then safe to delete.
 
 ### Migrating from a prior S3-backed state
 
@@ -496,18 +496,18 @@ In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present
 
 **Symptom:** Assisted mode fails; Lambda logs `No bot pool configured for user <login>` (and the API body reports the same).
 
-**Diagnose:** `owner_login` in `infra/modules/core/user-pool/terraform.tfvars` must match the issue `sender.login` exactly, and `environment` must match the env the Lambda is running in (`prod` or `dev`). Verify SSM under that login:
+**Diagnose:** `owner_login` in `infra/user-pool/terraform.tfvars` must match the issue `sender.login` exactly. Verify SSM under that login:
 
 ```bash
 aws ssm get-parameters-by-path \
-  --path "/blitzlog/<env>/users/<owner_login>/telegram/" \
+  --path "/blitzlog/users/<owner_login>/telegram/" \
   --recursive --with-decryption \
   --query "Parameters[].Name"
 ```
 
 You should see `.../telegram/allowed-user-id` and at least one `.../telegram/pool/<bot>`.
 
-**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, `environment` to the env the Lambda runs in, re-run `terraform apply` in `infra/modules/core/user-pool/`, and confirm the path above exists.
+**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, re-run `terraform apply` in `infra/user-pool/`, and confirm the path above exists. The bot pool is shared across envs — both prod and dev Lambdas read from this same namespace.
 
 ### All bot pool bots locked
 
