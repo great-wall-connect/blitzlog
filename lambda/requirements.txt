@@ -4,13 +4,13 @@
 #
 #    pip-compile --allow-unsafe --generate-hashes --no-index --output-file=lambda/requirements.txt lambda/requirements.in
 #
-boto3==1.43.82 \
-    --hash=sha256:65319e8bba6e30f74a6e2727a5688725222da2ab71c6069bc484ce5bfd101c73 \
-    --hash=sha256:bc5a7824568c117110bac8fe7ccfac63f0a946f253953d42e73a8c1fb65162e0
+boto3==1.43.88 \
+    --hash=sha256:62efee681fefc9b14244d66ab66ead11dd4a32fec0a54ac9f23106003ef210ca \
+    --hash=sha256:b3d03fba8ace049de27e3a6ed69b25a55d752f49d563394985e805ed5f0a0a74
     # via -r lambda/requirements.in
-botocore==1.43.82 \
-    --hash=sha256:347573c0bab52e29c923e28128764fcc50f469ed98dc5460220026cd3672ac0c \
-    --hash=sha256:97b3e89061decc91e7745d726dae595cbe2053894611c49ea91d6fdcb2ecc36b
+botocore==1.43.89 \
+    --hash=sha256:d7211220c815427fe71225acc6909e4ab5dfab3b03770e72fd16cf9eb86b3d1a \
+    --hash=sha256:f0574942970742657b0e0716cf08c2dfe6bef8e6de5fbb7081c3424e262b4cca
     # via
     #   boto3
     #   s3transfer
