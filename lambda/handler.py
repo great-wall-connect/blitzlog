@@ -1498,6 +1498,10 @@ else
     log "WARNING: Could not auto-select project, user will need /projects"
 fi
 
+log "Fetching issue title..."
+ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq .title 2>/dev/null || echo "unknown")
+RESUME_STATUS=""
+
 log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
 {_install_whisper_stt_script()}
 npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
@@ -1515,8 +1519,6 @@ Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
 fi
 
 log "Sending Telegram notification..."
-ISSUE_TITLE=$(gh issue view $ISSUE_NUMBER --json title --jq .title 2>/dev/null || echo "unknown")
-RESUME_STATUS=""
 if [ "$RESUMED" = "true" ]; then
     RESTORED_TITLE=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
     RESUME_STATUS="

@@ -2763,6 +2763,48 @@ class TestNodeVersionGuard(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
+    def test_gh_issue_view_uses_explicit_repo(self):
+        """`gh issue view` must include --repo so the title fetch doesn't depend
+        on CWD-based repo detection (which fails when the CWD's git remote is
+        broken, detached, or unreachable). Without this, the bootstrap prints
+        "Issue #N: unknown" in the Telegram message instead of the real title.
+        """
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn(
+            'gh issue view "$ISSUE_NUMBER" --repo "${REPO}"',
+            user_data,
+            "gh issue view must use --repo to avoid CWD-detection edge cases",
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_issue_title_fetched_before_pre_warm_message(self):
+        """The gh issue view call must run before both Telegram notifications so
+        the pre-warm failure path also gets the real issue title. Pre-fix, the
+        $ISSUE_TITLE shell variable was unset when the pre-warm failure block
+        ran, so the failure message had an empty title (bash expanded unset
+        to the empty string).
+        """
+        user_data = build_assisted_user_data("owner/repo", 42)
+        gh_pos = user_data.index("gh issue view")
+        pre_warm_msg_pos = user_data.index("Assisted agent cannot be started")
+        success_msg_pos = user_data.index("Assisted agent ready")
+        self.assertLess(
+            gh_pos,
+            pre_warm_msg_pos,
+            "gh issue view must run before the pre-warm failure notification, "
+            "otherwise that path sends a Telegram message with an empty title.",
+        )
+        self.assertLess(
+            gh_pos,
+            success_msg_pos,
+            "gh issue view must run before the success notification too.",
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_assisted_pre_warm_failure_uses_markdown(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
