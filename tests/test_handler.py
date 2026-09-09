@@ -3239,6 +3239,60 @@ class TestGetLocalLlmConfig(unittest.TestCase):
     def test_returns_none_when_sender_login_empty(self, mock_ssm):
         self.assertIsNone(get_local_llm_config(""))
 
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_includes_tailscale_auth_key_when_set(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "allow-private-cidrs": "true",
+                "tailscale-auth-key": "tskey-auth-foobar",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg["tailscale_auth_key"], "tskey-auth-foobar")
+
+    @patch("handler._resolve_endpoint_ips")
+    @patch("handler.ssm")
+    def test_tailscale_auth_key_empty_when_unset(self, mock_ssm, mock_resolve):
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        cfg = get_local_llm_config("octocat")
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg["tailscale_auth_key"], "")
+
+    @patch("handler.ssm")
+    def test_uses_env_independent_ssm_path(self, mock_ssm):
+        """Regression for handler.py:196 — local-llm config is per-user, not per-env.
+
+        The lookup path must be /blitzlog/users/<login>/local-llm (the env-independent
+        namespace the user-pool Terraform writes to), NOT /blitzlog/<env>/users/<login>/local-llm.
+        Using the env-prefixed path caused get_local_llm_config to silently return
+        None on ParameterNotFound, with no warning logged.
+        """
+        mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
+            {
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+            }
+        )
+        get_local_llm_config("daniel-sarosi-gwc")
+        called_path = mock_ssm.get_paginator.return_value.paginate.call_args.kwargs[
+            "Path"
+        ]
+        self.assertEqual(called_path, "/blitzlog/users/daniel-sarosi-gwc/local-llm")
+        self.assertNotIn("/blitzlog/dev/", called_path)
+        self.assertNotIn("/blitzlog/prod/", called_path)
+
 
 class TestLocalLlmOpencodeConfig(unittest.TestCase):
     def test_default_renders_cloud_provider(self):
@@ -3509,6 +3563,91 @@ class TestLocalLlmInUserData(unittest.TestCase):
             "owner/repo", 42, bot_name="b", bot_token="t", telegram_user_id="999"
         )
         self.assertIn("opencode serve --hostname 127.0.0.1 --port 4096", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_includes_tailscale_up_when_key_set_autonomous(self):
+        user_data = build_autonomous_user_data(
+            "owner/repo",
+            42,
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+                "tailscale_auth_key": "tskey-auth-foobar",
+            },
+        )
+        self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
+        self.assertIn("tailscale up", user_data)
+        self.assertIn("--ephemeral", user_data)
+        self.assertIn("blitzlog-agent-${ISSUE_NUMBER}", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_omits_tailscale_when_key_empty_autonomous(self):
+        user_data = build_autonomous_user_data(
+            "owner/repo",
+            42,
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+                "tailscale_auth_key": "",
+            },
+        )
+        self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
+        self.assertNotIn("tailscale up", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_includes_tailscale_up_when_key_set_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            bot_name="b",
+            bot_token="t",
+            telegram_user_id="999",
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+                "tailscale_auth_key": "tskey-auth-foobar",
+            },
+        )
+        self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
+        self.assertIn("tailscale up", user_data)
+        self.assertIn("--ephemeral", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_local_llm_omits_tailscale_when_key_empty_assisted(self):
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            bot_name="b",
+            bot_token="t",
+            telegram_user_id="999",
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+                "tailscale_auth_key": "",
+            },
+        )
+        self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
+        self.assertNotIn("tailscale up", user_data)
 
 
 if __name__ == "__main__":

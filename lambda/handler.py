@@ -193,7 +193,7 @@ def get_local_llm_config(sender_login: str) -> dict | None:
     try:
         paginator = ssm.get_paginator("get_parameters_by_path")
         pages = paginator.paginate(
-            Path=f"{SSM_PATH}/users/{sender_login}/local-llm",
+            Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/local-llm",
             WithDecryption=True,
         )
         params: dict[str, str] = {}
@@ -298,6 +298,7 @@ def get_local_llm_config(sender_login: str) -> dict | None:
         "api_key": params.get("api-key") or "",
         "allow_private": allow_private,
         "fallback": fallback,
+        "tailscale_auth_key": (params.get("tailscale-auth-key") or "").strip(),
     }
 
 
@@ -761,6 +762,47 @@ curl -fsSL https://opencode.ai/install | bash
 export PATH=/root/.opencode/bin:$PATH
 hash -r
 opencode --version
+"""
+
+
+def _install_tailscale_script() -> str:
+    """Install Tailscale and enroll the EC2 instance into the user's Tailnet.
+
+    Runs only when TAILSCALE_AUTH_KEY is set in the bootstrap environment
+    (the Lambda passes it through from the per-user SSM param
+    /blitzlog/users/<login>/local-llm/tailscale-auth-key). The auth key
+    should be generated with Ephemeral: enabled and Tags: tag:blitzlog-agent
+    so the node auto-removes when the EC2 terminates and the ACL can grant
+    scoped access. --accept-routes=false prevents the EC2 from picking up
+    advertised subnet routes from other Tailnet devices — the EC2 only
+    needs peer-to-peer reachability to the LLM endpoint, not full split
+    tunnel routing.
+    """
+    return """
+if [ -n "$TAILSCALE_AUTH_KEY" ]; then
+    log "Installing Tailscale..."
+    dnf install -y yum-utils
+    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazonlinux/2023/tailscale.repo
+    dnf install -y tailscale
+    systemctl enable --now tailscaled
+
+    log "Authenticating EC2 instance to Tailscale Tailnet..."
+    TSC_HOSTNAME="blitzlog-agent-${ISSUE_NUMBER}-$(date +%s)"
+    if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
+                     --hostname="$TSC_HOSTNAME" \
+                     --ephemeral \
+                     --accept-routes=false; then
+        log "WARNING: tailscale up failed; preflight_local_llm will likely time out"
+    fi
+    for i in $(seq 1 30); do
+        STATE=$(tailscale status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('BackendState',''))" 2>/dev/null || echo "")
+        if [ "$STATE" = "Running" ]; then break; fi
+        log "Waiting for tailscaled to be Running... ($i/30)"
+        sleep 2
+    done
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1 || echo "")
+    log "Tailscale connected: hostname=$TSC_HOSTNAME, ip=$TAILSCALE_IP"
+fi
 """
 
 
@@ -1701,14 +1743,30 @@ def build_autonomous_user_data(
     local_llm_exports = ""
     preflight_block = ""
     preflight_definitions = ""
+    tailscale_install_block = ""
     if local_llm:
+        tailscale_key = local_llm.get("tailscale_auth_key") or ""
         local_llm_exports = (
             f"LOCAL_LLM_ENDPOINT=\"{local_llm['endpoint']}\"\n"
             f"LOCAL_LLM_MODEL=\"{local_llm['model']}\"\n"
             f"LOCAL_LLM_API_KEY=\"{local_llm.get('api_key', '')}\"\n"
             f"LOCAL_LLM_FALLBACK=\"{local_llm['fallback']}\"\n"
-            f"export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY LOCAL_LLM_FALLBACK\n"
         )
+        if tailscale_key:
+            local_llm_exports += f'TAILSCALE_AUTH_KEY="{tailscale_key}"\n'
+        local_llm_exports += (
+            "export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY "
+            "LOCAL_LLM_FALLBACK"
+        )
+        if tailscale_key:
+            local_llm_exports += " TAILSCALE_AUTH_KEY"
+        local_llm_exports += "\n"
+        if tailscale_key:
+            tailscale_install_block = (
+                '\nlog "Installing and authenticating Tailscale..."\n'
+                + _install_tailscale_script()
+                + "\n"
+            )
         preflight_definitions = _preflight_local_llm_script("autonomous")
         preflight_block = (
             '\nlog "Probing local LLM before installing system packages..."\n'
@@ -1746,7 +1804,7 @@ log "Repo: $REPO, Issue: $ISSUE_NUMBER"
 
 log "Reading secrets from SSM..."
 {_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
-{preflight_definitions}{preflight_block}
+{tailscale_install_block}{preflight_definitions}{preflight_block}
 
 log "Installing system packages..."
 {_install_system_packages_script()}
@@ -1857,14 +1915,30 @@ def build_assisted_user_data(
     local_llm_exports = ""
     preflight_block = ""
     preflight_definitions = ""
+    tailscale_install_block = ""
     if local_llm:
+        tailscale_key = local_llm.get("tailscale_auth_key") or ""
         local_llm_exports = (
             f"LOCAL_LLM_ENDPOINT=\"{local_llm['endpoint']}\"\n"
             f"LOCAL_LLM_MODEL=\"{local_llm['model']}\"\n"
             f"LOCAL_LLM_API_KEY=\"{local_llm.get('api_key', '')}\"\n"
             f"LOCAL_LLM_FALLBACK=\"{local_llm['fallback']}\"\n"
-            f"export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY LOCAL_LLM_FALLBACK\n"
         )
+        if tailscale_key:
+            local_llm_exports += f'TAILSCALE_AUTH_KEY="{tailscale_key}"\n'
+        local_llm_exports += (
+            "export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY "
+            "LOCAL_LLM_FALLBACK"
+        )
+        if tailscale_key:
+            local_llm_exports += " TAILSCALE_AUTH_KEY"
+        local_llm_exports += "\n"
+        if tailscale_key:
+            tailscale_install_block = (
+                '\nlog "Installing and authenticating Tailscale..."\n'
+                + _install_tailscale_script()
+                + "\n"
+            )
         preflight_definitions = (
             _preflight_local_llm_script("assisted") + _switch_to_cloud_fallback_script()
         )
@@ -1904,7 +1978,7 @@ log "Reading secrets from SSM..."
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
-{preflight_definitions}{preflight_block}
+{tailscale_install_block}{preflight_definitions}{preflight_block}
 
 log "Installing system packages..."
 {_install_system_packages_script()}

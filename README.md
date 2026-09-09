@@ -436,6 +436,12 @@ local_llm_model                          = "qwen2.5-coder:32b"
 local_llm_api_key                        = ""        # empty for no-auth endpoints (Ollama default)
 local_llm_endpoint_allow_private_cidrs   = true      # required for any private-IP endpoint
 local_llm_fallback                       = "closed"  # or "cloud" (assisted mode only — see Resilience)
+
+# Optional: per-run EC2 enrollment in your Tailscale Tailnet (see "Transports"
+# below for the auth-key flags). Required when the EC2 has no static route to
+# your Tailnet (subnet router, AWS Client VPN endpoint, etc.). Leave empty if
+# the LLM is already reachable from the dev VPC via another transport.
+tailscale_auth_key                       = "tskey-auth-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 After `terraform apply`, three new SSM parameters exist under `/blitzlog/users/<owner_login>/local-llm/`: `endpoint`, `model`, `api-key` (all `SecureString`); plus `allow-private-cidrs` and `fallback` (both `String`). The agent's `opencode.json` on the EC2 instance is then written with a single `local` provider block:
@@ -469,23 +475,37 @@ The tunnel between your local LLM and the EC2 instance should be **always-on fro
 
 #### Tailscale (recommended default)
 
-Tailscale is purpose-built for "always-on private mesh between your machines." Set up once, runs at Ollama startup, gets a stable `100.x.y.z` Tailnet IP.
+Tailscale is purpose-built for "always-on private mesh between your machines." Set up once on the LLM host and it stays reachable at a stable `100.x.y.z` Tailnet IP. blitzlog enrolls each EC2 instance into your Tailnet per-run with an ephemeral auth key, so the EC2 can reach the LLM without you standing up a subnet router or VPN endpoint in your VPC.
+
+**One-time LLM host setup** (Mac mini, or whatever runs Ollama):
 
 ```bash
-# Mac mini, one-time
 brew install tailscale
 sudo tailscale up
 # Verify with: tailscale status
 ```
 
-Tailscale runs as a system service and starts at boot. The Mac mini shows up in your Tailnet at a stable `100.x.y.z` address. Set:
+**Per-user Tailscale auth key** (once, in your `infra/user-pool/terraform.tfvars`):
+
+Generate at https://login.tailscale.com/admin/settings/keys with these flags:
+
+- **Ephemeral**: enabled — the EC2 node auto-removes when the spot instance terminates, no manual cleanup
+- **Reusable**: enabled — one key works across many runs; rotate by editing `terraform.tfvars` and re-running `terraform apply`
+- **Tags**: `tag:blitzlog-agent` — your Tailnet ACL grants this tag scoped access to the LLM endpoint
+- **Expiration**: none
+
+Then in `infra/user-pool/terraform.tfvars`:
 
 ```hcl
-local_llm_endpoint = "http://100.x.y.z:11434"
-local_llm_endpoint_allow_private_cidrs = true
+local_llm_endpoint                       = "http://100.x.y.z:11434"   # your Mac mini's Tailnet IP
+local_llm_model                          = "qwen2.5-coder:32b"
+local_llm_endpoint_allow_private_cidrs   = true
+tailscale_auth_key                       = "tskey-auth-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-> **Auth-key setup (important for cleanup).** When you later add per-run EC2 agent enrollment in your Tailnet (a separate follow-up), generate the EC2's auth key at https://login.tailscale.com/admin/settings/keys with **Ephemeral: enabled**, **Expiration: 4 hours**, and **Tags: `tag:blitzlog-agent`**. That way each agent run joins the Tailnet for the duration of its run and auto-removes when the EC2 instance terminates — no device accumulation, no manual cleanup.
+Your Tailnet ACL must grant `tag:blitzlog-agent` access to the LLM endpoint's IP (`100.x.y.z`). Without that ACL rule the per-run EC2 nodes can authenticate but cannot reach `http://100.x.y.z:11434` and the `preflight_local_llm()` probe will fail. blitzlog does not auto-apply ACL changes — that decision is yours to make.
+
+If you'd rather not enroll the EC2 per run, see the [WireGuard](#wireguard) or [AWS Client VPN](#aws-client-vpn-fully-aws-managed) alternatives below — both keep the tunnel out of blitzlog entirely.
 
 #### WireGuard
 

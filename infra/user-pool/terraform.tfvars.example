@@ -20,9 +20,20 @@ telegram_bot_tokens = {
 #   - local_llm_api_key may be empty for endpoints without auth.
 #   - local_llm_fallback only takes effect in assisted mode. Autonomous runs
 #     always abort when the local LLM is unreachable.
+#   - tailscale_auth_key, when set, makes the EC2 spot instance enroll in
+#     your Tailscale Tailnet on every run (ephemeral, auto-removed when
+#     the instance terminates). Generate at
+#     https://login.tailscale.com/admin/settings/keys with
+#       Ephemeral: enabled
+#       Reusable: enabled
+#       Tags: tag:blitzlog-agent
+#     Your Tailnet ACL must grant tag:blitzlog-agent access to the LLM
+#     endpoint's Tailnet IP. Skip this variable when using a static subnet
+#     router, exit node, or AWS Client VPN instead.
 #
 # local_llm_endpoint                       = "http://100.x.y.z:11434"
 # local_llm_model                          = "qwen2.5-coder:32b"
 # local_llm_api_key                        = ""
 # local_llm_endpoint_allow_private_cidrs   = true
 # local_llm_fallback                       = "closed"
+# tailscale_auth_key                       = "tskey-auth-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

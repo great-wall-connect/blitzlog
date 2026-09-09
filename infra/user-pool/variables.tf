@@ -55,3 +55,10 @@ variable "local_llm_fallback" {
     error_message = "Must be 'closed' or 'cloud'."
   }
 }
+
+variable "tailscale_auth_key" {
+  description = "Auth key for per-run EC2 enrollment in the user's Tailscale Tailnet. Generate at https://login.tailscale.com/admin/settings/keys with Ephemeral: enabled and Tags: tag:blitzlog-agent. The same key can be reused across many runs; rotate by re-running terraform apply. Leave empty to skip per-run enrollment (e.g. when using a static subnet router or AWS Client VPN)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
