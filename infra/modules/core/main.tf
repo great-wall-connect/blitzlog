@@ -7,12 +7,6 @@ terraform {
       version = "~> 5.0"
     }
   }
-
-  backend "s3" {
-    bucket = ""
-    key    = "blitzlog.tfstate"
-    region = "ap-east-1"
-  }
 }
 
 provider "aws" {

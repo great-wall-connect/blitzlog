@@ -1,5 +1,5 @@
 resource "aws_iam_role" "lambda_role" {
-  name = "blitzlog-lambda-role"
+  name = "blitzlog-${var.environment}-lambda-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -14,7 +14,7 @@ resource "aws_iam_role" "lambda_role" {
 }
 
 resource "aws_iam_role_policy" "lambda_policy" {
-  name = "blitzlog-lambda-policy"
+  name = "blitzlog-${var.environment}-lambda-policy"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
@@ -41,7 +41,8 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "ec2:ResourceTag/Purpose" = "autonomous-agent"
+            "ec2:ResourceTag/Purpose"     = "autonomous-agent"
+            "ec2:ResourceTag/Environment" = var.environment
           }
         }
       },
@@ -103,6 +104,10 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "ssm:GetParametersByPath",
           "ssm:GetParameter",
         ]
+        # Per-user bot pools and per-user local LLM config are env-independent.
+        # A user has one set of Telegram bots and one local LLM endpoint, not
+        # one per env. Both prod and dev Lambdas read the same /blitzlog/users/...
+        # namespace so the user only configures their pool once.
         Resource = [
           "arn:aws:ssm:*:*:parameter/blitzlog/users",
           "arn:aws:ssm:*:*:parameter/blitzlog/users/*",
@@ -116,7 +121,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "s3:DeleteObject",
         ]
         Resource = [
-          "${aws_s3_bucket.agent_logs.arn}/bot-pool-locks/*",
+          "${data.aws_s3_bucket.agent_logs.arn}/bot-pool-locks/*",
         ]
       },
       {
@@ -124,7 +129,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Action = [
           "s3:ListBucket",
         ]
-        Resource = aws_s3_bucket.agent_logs.arn
+        Resource = data.aws_s3_bucket.agent_logs.arn
         Condition = {
           StringLike = {
             "s3:prefix" = "bot-pool-locks/*"
@@ -135,21 +140,21 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Action = [
           "s3:PutObject",
         ]
-        Resource = "${aws_s3_bucket.agent_logs.arn}/user-data/*"
+        Resource = "${data.aws_s3_bucket.agent_logs.arn}/user-data/*"
       },
       {
         Effect = "Allow"
         Action = [
           "ssm:PutParameter",
         ]
-        Resource = "arn:aws:ssm:*:*:parameter/blitzlog/ephemeral/*"
+        Resource = "arn:aws:ssm:*:*:parameter/${local.ssm_ephemeral_root}/*"
       },
     ]
   })
 }
 
 resource "aws_iam_role" "ec2_agent_role" {
-  name = "blitzlog-ec2-agent-role"
+  name = "blitzlog-${var.environment}-ec2-agent-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -164,7 +169,7 @@ resource "aws_iam_role" "ec2_agent_role" {
 }
 
 resource "aws_iam_role_policy" "ec2_agent_policy" {
-  name = "blitzlog-ec2-agent-policy"
+  name = "blitzlog-${var.environment}-ec2-agent-policy"
   role = aws_iam_role.ec2_agent_role.id
 
   policy = jsonencode({
@@ -178,7 +183,8 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "ec2:ResourceTag/Purpose" = "autonomous-agent"
+            "ec2:ResourceTag/Purpose"     = "autonomous-agent"
+            "ec2:ResourceTag/Environment" = var.environment
           }
         }
       },
@@ -188,14 +194,38 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           "s3:GetObject",
           "s3:PutObject",
         ]
-        Resource = "${aws_s3_bucket.agent_logs.arn}/*"
+        Resource = [
+          "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+        ]
+        # user-data/* is the Lambda→EC2 handoff for the bootstrap script.
+        # The Lambda writes one ephemeral script per EC2 launch to
+        # s3://<bucket>/user-data/... (no env prefix — it's shared infra),
+        # and the matching EC2 reads it via the user-data downloader
+        # (_build_s3_downloader_script does `aws s3 cp`). The <env>/*
+        # restriction above is for *run logs*, not user-data. The script
+        # contains no secrets (those come from SSM in the next step), so
+        # widening read access across all EC2 instances is intentional.
+        Resource = [
+          "${data.aws_s3_bucket.agent_logs.arn}/user-data/*",
+        ]
       },
       {
         Effect = "Allow"
         Action = [
           "s3:ListBucket",
         ]
-        Resource = aws_s3_bucket.agent_logs.arn
+        Resource = data.aws_s3_bucket.agent_logs.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "${var.environment}/*"
+          }
+        }
       },
       {
         Effect = "Allow"
@@ -209,7 +239,10 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           aws_ssm_parameter.stt_model.arn,
           aws_ssm_parameter.stt_language.arn,
           aws_ssm_parameter.stt_models_bucket.arn,
-          "arn:aws:ssm:*:*:parameter/blitzlog/ephemeral/*",
+          "arn:aws:ssm:*:*:parameter/${local.ssm_ephemeral_root}/*",
+          # Per-user local LLM config is env-independent — same Mac mini, same
+          # endpoint, used by both prod and dev EC2 instances.
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
         ]
       },
       {
@@ -217,14 +250,14 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         Action = [
           "s3:GetObject",
         ]
-        Resource = "${aws_s3_bucket.stt_models.arn}/*"
+        Resource = "${data.aws_s3_bucket.stt_models.arn}/*"
       },
     ]
   })
 }
 
 resource "aws_iam_instance_profile" "ec2_agent_profile" {
-  name = "blitzlog-ec2-agent-profile"
+  name = "blitzlog-${var.environment}-ec2-agent-profile"
   role = aws_iam_role.ec2_agent_role.name
 }
 
@@ -234,71 +267,71 @@ resource "aws_iam_role_policy_attachment" "ec2_agent_ssm" {
 }
 
 resource "aws_ssm_parameter" "github_app_id" {
-  name        = "/blitzlog/github-app/id"
+  name        = local.ssm_github_app_id_name
   type        = "String"
   value       = var.github_app_id
-  description = "GitHub App ID"
+  description = "GitHub App ID (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "github_app_private_key" {
-  name        = "/blitzlog/github-app/private-key"
+  name        = local.ssm_github_app_private_key_name
   type        = "SecureString"
   value       = var.github_app_private_key
-  description = "GitHub App private key (base64 encoded)"
+  description = "GitHub App private key (base64 encoded, env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "github_app_installation_id" {
-  name        = "/blitzlog/github-app/installation-id"
+  name        = local.ssm_github_app_installation_name
   type        = "String"
   value       = var.github_app_installation_id
-  description = "GitHub App installation ID"
+  description = "GitHub App installation ID (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "github_webhook_secret" {
-  name        = "/blitzlog/github-webhook/secret"
+  name        = local.ssm_github_webhook_secret_name
   type        = "SecureString"
   value       = var.github_webhook_secret
-  description = "GitHub webhook HMAC secret"
+  description = "GitHub webhook HMAC secret (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "opencode_api_key" {
-  name        = "/blitzlog/opencode/api-key"
+  name        = local.ssm_opencode_api_key_name
   type        = "SecureString"
   value       = var.opencode_api_key
-  description = "OpenCode inference provider API key"
+  description = "OpenCode inference provider API key (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "stt_api_url" {
-  name        = "/blitzlog/stt/api-url"
+  name        = local.ssm_stt_api_url_name
   type        = "String"
   value       = var.stt_api_url
-  description = "Whisper-compatible STT endpoint exposed by whisper-stt-shim on the EC2 instance"
+  description = "Whisper-compatible STT endpoint exposed by whisper-stt-shim on the EC2 instance (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "stt_api_key" {
-  name        = "/blitzlog/stt/api-key"
+  name        = local.ssm_stt_api_key_name
   type        = "SecureString"
   value       = var.stt_api_key
-  description = "API key passed through to the STT provider (unused by the localhost shim but required by the bot)"
+  description = "API key passed through to the STT provider (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "stt_model" {
-  name        = "/blitzlog/stt/model"
+  name        = local.ssm_stt_model_name
   type        = "String"
   value       = var.stt_model
-  description = "whisper.cpp model name (e.g. base.en, tiny.en, small.en)"
+  description = "whisper.cpp model name (e.g. base.en, tiny.en, small.en) (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "stt_language" {
-  name        = "/blitzlog/stt/language"
+  name        = local.ssm_stt_language_name
   type        = "String"
   value       = var.stt_language
-  description = "Whisper language hint passed to whisper-cli (empty = auto-detect)"
+  description = "Whisper language hint passed to whisper-cli (empty = auto-detect) (env: ${var.environment})"
 }
 
 resource "aws_ssm_parameter" "stt_models_bucket" {
-  name        = "/blitzlog/stt/models-bucket"
+  name        = local.ssm_stt_models_bucket_name
   type        = "String"
-  value       = aws_s3_bucket.stt_models.bucket
-  description = "S3 bucket hosting whisper.cpp model files for EC2 boot-time download"
+  value       = data.aws_s3_bucket.stt_models.bucket
+  description = "S3 bucket hosting whisper.cpp model files for EC2 boot-time download (env: ${var.environment})"
 }

@@ -1,10 +1,10 @@
 # Terraform
-infra/.terraform/
-infra/*.tfstate
-infra/*.tfstate.*
-infra/lambda_function.zip
-infra/build/
-infra/*-backend.hcl
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/lambda_function.zip
+infra/**/build/
+infra/**/*-backend.hcl
 *.tfvars
 *.private-key.pem
 terraform.tfstate

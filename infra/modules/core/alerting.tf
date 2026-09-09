@@ -1,5 +1,5 @@
 resource "aws_sns_topic" "alerts" {
-  name = "blitzlog-alerts"
+  name = "blitzlog-${var.environment}-alerts"
 }
 
 resource "aws_sns_topic_subscription" "alerts_email" {
@@ -10,12 +10,12 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 }
 
 resource "aws_sqs_queue" "dlq" {
-  name                      = "blitzlog-lambda-dlq"
+  name                      = "blitzlog-${var.environment}-lambda-dlq"
   message_retention_seconds = 1209600
 }
 
 resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
-  alarm_name          = "blitzlog-lambda-errors"
+  alarm_name          = "blitzlog-${var.environment}-lambda-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"

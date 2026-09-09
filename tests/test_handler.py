@@ -16,6 +16,7 @@ from handler import (
     _PERIODIC_AUTOSAVE_PLUGIN_JS,
     _SHUTDOWN_TOOL_JS,
     _SPOT_WATCHDOG_PLUGIN_JS,
+    BLITZLOG_ENV,
     _build_s3_downloader_script,
     _configure_git_script,
     _decode_api_errors_script,
@@ -260,9 +261,10 @@ class TestS3Downloader(unittest.TestCase):
 class TestSSMSecretsScript(unittest.TestCase):
     def test_fetches_github_token_from_ephemeral_param(self):
         script = _read_secrets_from_ssm_script(42)
-        self.assertIn("/blitzlog/ephemeral/github-token-42", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/ephemeral/github-token-42", script)
         self.assertIn("export _CC_GITHUB_TOKEN", script)
         self.assertIn("export OPENCODE_API_KEY", script)
+        self.assertIn(f"export BLITZLOG_ENV={BLITZLOG_ENV}", script)
 
     def test_different_issue_numbers(self):
         script13 = _read_secrets_from_ssm_script(13)
@@ -273,11 +275,11 @@ class TestSSMSecretsScript(unittest.TestCase):
 
     def test_fetches_stt_params(self):
         script = _read_secrets_from_ssm_script(42)
-        self.assertIn("/blitzlog/stt/api-url", script)
-        self.assertIn("/blitzlog/stt/api-key", script)
-        self.assertIn("/blitzlog/stt/model", script)
-        self.assertIn("/blitzlog/stt/language", script)
-        self.assertIn("/blitzlog/stt/models-bucket", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/api-url", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/api-key", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/model", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/language", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/stt/models-bucket", script)
         self.assertIn("export STT_API_URL", script)
         self.assertIn("export STT_API_KEY", script)
         self.assertIn("export STT_MODEL", script)
@@ -286,9 +288,16 @@ class TestSSMSecretsScript(unittest.TestCase):
 
     def test_stt_api_key_uses_with_decryption(self):
         script = _read_secrets_from_ssm_script(42)
-        stt_key_idx = script.find("/blitzlog/stt/api-key")
+        stt_key_idx = script.find(f"/blitzlog/{BLITZLOG_ENV}/stt/api-key")
         self.assertNotEqual(stt_key_idx, -1)
         self.assertIn("--with-decryption", script[stt_key_idx : stt_key_idx + 200])
+
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "dev"})
+    def test_paths_use_dev_env_when_blitzlog_env_set(self):
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn("/blitzlog/dev/ephemeral/github-token-42", script)
+        self.assertIn("/blitzlog/dev/opencode/api-key", script)
+        self.assertIn("export BLITZLOG_ENV=dev", script)
 
 
 class TestSTTInBotConfig(unittest.TestCase):
@@ -461,7 +470,7 @@ class TestOpencodeProviderConfig(unittest.TestCase):
 
 
 class TestLambdaBuildConfiguration(unittest.TestCase):
-    """Regression tests for infra/lambda.tf build-time configuration.
+    """Regression tests for infra/modules/core/lambda.tf build-time configuration.
 
     A mistake here silently produces a broken Lambda zip at runtime
     (e.g., 1-byte server.py from a stale cp reference). These tests
@@ -470,7 +479,7 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
 
     @staticmethod
     def _read_lambda_tf():
-        with open("infra/lambda.tf", "r", encoding="utf-8") as f:
+        with open("infra/modules/core/lambda.tf", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_lambda_build_copies_python_shim(self):
@@ -482,11 +491,11 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
         content = self._read_lambda_tf()
         self.assertRegex(
             content,
-            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.py",
+            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.py",
         )
         self.assertNotRegex(
             content,
-            r"cp\s+\$\{path\.module\}/../packages/whisper-stt-shim/server\.js",
+            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.js",
         )
 
     def test_lambda_build_local_exec_uses_set_e(self):
@@ -1580,9 +1589,58 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
 
         mock_ssm.put_parameter.assert_called_once()
         call_args = mock_ssm.put_parameter.call_args
-        self.assertEqual(call_args[1]["Name"], "/blitzlog/ephemeral/github-token-42")
+        self.assertEqual(
+            call_args[1]["Name"], f"/blitzlog/{BLITZLOG_ENV}/ephemeral/github-token-42"
+        )
         self.assertEqual(call_args[1]["Value"], "ghp_testtoken")
         self.assertEqual(call_args[1]["Type"], "SecureString")
+
+    @patch(
+        "handler.get_instance_profile_arn",
+        return_value="arn:aws:iam::123:instance-profile/test",
+    )
+    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.s3")
+    @patch("handler.ssm")
+    @patch("handler.ec2")
+    @patch.dict(
+        os.environ,
+        {
+            "EC2_SECURITY_GROUP_ID": "sg-123",
+            "EC2_SUBNET_ID": "subnet-123",
+            "VPC_ID": "vpc-123",
+            "S3_LOGS_BUCKET": "test-bucket",
+        },
+    )
+    def test_instance_name_has_env_prefix(
+        self, mock_ec2, mock_ssm, mock_s3, mock_ami, mock_profile
+    ):
+        """EC2 instance Name tag must include the env prefix so prod and dev
+        instances are visually distinguishable in the AWS console and don't
+        collide on a shared Name (which AWS treats as a soft-uniqueness hint).
+        """
+        from handler import launch_ec2_spot_instance
+
+        mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+        mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+
+        launch_ec2_spot_instance(
+            "org/repo",
+            42,
+            "ghp_testtoken",
+            "autonomous",
+            build_autonomous_user_data,
+            sender_login="octocat",
+            sender_id="12345",
+        )
+
+        tags = mock_ec2.run_instances.call_args[1]["TagSpecifications"][0]["Tags"]
+        name_tag = next(t for t in tags if t["Key"] == "Name")
+        self.assertEqual(
+            name_tag["Value"],
+            f"blitzlog-{BLITZLOG_ENV}-opencode-agent-autonomous-issue-42",
+            "EC2 instance Name tag must be `blitzlog-<env>-opencode-agent-<mode>-issue-<N>`",
+        )
 
     @patch(
         "handler.get_instance_profile_arn",
@@ -2362,7 +2420,8 @@ class TestGetTelegramUserId(unittest.TestCase):
         self.assertEqual(get_telegram_user_id("octocat"), "12345")
         call = mock_ssm.get_parameter.call_args
         self.assertEqual(
-            call[1]["Name"], "/blitzlog/users/octocat/telegram/allowed-user-id"
+            call[1]["Name"],
+            "/blitzlog/users/octocat/telegram/allowed-user-id",
         )
 
     @patch("handler.ssm")
@@ -2700,6 +2759,48 @@ class TestNodeVersionGuard(unittest.TestCase):
         guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
         failure_block = user_data[guard_pos : guard_pos + 1500]
         self.assertIn("$RESUME_STATUS", failure_block)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_gh_issue_view_uses_explicit_repo(self):
+        """`gh issue view` must include --repo so the title fetch doesn't depend
+        on CWD-based repo detection (which fails when the CWD's git remote is
+        broken, detached, or unreachable). Without this, the bootstrap prints
+        "Issue #N: unknown" in the Telegram message instead of the real title.
+        """
+        user_data = build_assisted_user_data("owner/repo", 42)
+        self.assertIn(
+            'gh issue view "$ISSUE_NUMBER" --repo "${REPO}"',
+            user_data,
+            "gh issue view must use --repo to avoid CWD-detection edge cases",
+        )
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_issue_title_fetched_before_pre_warm_message(self):
+        """The gh issue view call must run before both Telegram notifications so
+        the pre-warm failure path also gets the real issue title. Pre-fix, the
+        $ISSUE_TITLE shell variable was unset when the pre-warm failure block
+        ran, so the failure message had an empty title (bash expanded unset
+        to the empty string).
+        """
+        user_data = build_assisted_user_data("owner/repo", 42)
+        gh_pos = user_data.index("gh issue view")
+        pre_warm_msg_pos = user_data.index("Assisted agent cannot be started")
+        success_msg_pos = user_data.index("Assisted agent ready")
+        self.assertLess(
+            gh_pos,
+            pre_warm_msg_pos,
+            "gh issue view must run before the pre-warm failure notification, "
+            "otherwise that path sends a Telegram message with an empty title.",
+        )
+        self.assertLess(
+            gh_pos,
+            success_msg_pos,
+            "gh issue view must run before the success notification too.",
+        )
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}

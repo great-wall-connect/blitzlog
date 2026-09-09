@@ -1,6 +1,6 @@
 resource "aws_security_group" "agent_sg" {
-  name        = "blitzlog-agent-sg"
-  description = "Security group for autonomous coding agent EC2 instances"
+  name        = "blitzlog-${var.environment}-agent-sg"
+  description = "Security group for autonomous coding agent EC2 instances (env: ${var.environment})"
   vpc_id      = var.vpc_id
 
   egress = [
@@ -18,7 +18,8 @@ resource "aws_security_group" "agent_sg" {
   ]
 
   tags = {
-    Name = "blitzlog-agent-sg"
+    Name        = "blitzlog-${var.environment}-agent-sg"
+    Environment = var.environment
   }
 }
 

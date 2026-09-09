@@ -13,12 +13,8 @@ provider "aws" {
   region = var.aws_region
 }
 
-locals {
-  bot_names = nonsensitive(keys(var.telegram_bot_tokens))
-}
-
 resource "aws_ssm_parameter" "telegram_bot_pool" {
-  for_each = toset(local.bot_names)
+  for_each = toset(nonsensitive(keys(var.telegram_bot_tokens)))
 
   name        = "/blitzlog/users/${var.owner_login}/telegram/pool/${each.key}"
   type        = "SecureString"
