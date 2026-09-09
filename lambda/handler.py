@@ -773,16 +773,19 @@ def _install_tailscale_script() -> str:
     /blitzlog/users/<login>/local-llm/tailscale-auth-key). The auth key
     should be generated with Ephemeral: enabled and Tags: tag:blitzlog-agent
     so the node auto-removes when the EC2 terminates and the ACL can grant
-    scoped access. --accept-routes=false prevents the EC2 from picking up
-    advertised subnet routes from other Tailnet devices — the EC2 only
-    needs peer-to-peer reachability to the LLM endpoint, not full split
-    tunnel routing.
+    scoped access. Ephemeral-ness is a property of the auth key itself —
+    there is no `--ephemeral` flag on `tailscale up` (see
+    https://tailscale.com/docs/features/ephemeral-nodes, which uses
+    `sudo tailscale up --auth-key=<your ephemeral key>`). --accept-routes=false
+    prevents the EC2 from picking up advertised subnet routes from other
+    Tailnet devices — the EC2 only needs peer-to-peer reachability to the
+    LLM endpoint, not full split-tunnel routing.
     """
     return """
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
     log "Installing Tailscale..."
     dnf install -y yum-utils
-    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazonlinux/2023/tailscale.repo
+    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
     dnf install -y tailscale
     systemctl enable --now tailscaled
 
@@ -790,7 +793,6 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
     TSC_HOSTNAME="blitzlog-agent-${ISSUE_NUMBER}-$(date +%s)"
     if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
                      --hostname="$TSC_HOSTNAME" \
-                     --ephemeral \
                      --accept-routes=false; then
         log "WARNING: tailscale up failed; preflight_local_llm will likely time out"
     fi

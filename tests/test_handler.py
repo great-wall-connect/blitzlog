@@ -3582,8 +3582,16 @@ class TestLocalLlmInUserData(unittest.TestCase):
         )
         self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
         self.assertIn("tailscale up", user_data)
-        self.assertIn("--ephemeral", user_data)
+        self.assertIn("--accept-routes=false", user_data)
         self.assertIn("blitzlog-agent-${ISSUE_NUMBER}", user_data)
+        # Regression: --ephemeral is NOT a tailscale up flag. Ephemeral-ness
+        # is a property of the auth key itself (set when the key is
+        # generated at https://login.tailscale.com/admin/settings/keys).
+        # Passing --ephemeral makes tailscale up exit with
+        # "flag provided but not defined: -ephemeral", leaving the node
+        # unauthenticated and the preflight probe timing out.
+        self.assertNotIn("--ephemeral", user_data)
+        self.assertNotIn(" -ephemeral", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -3625,7 +3633,9 @@ class TestLocalLlmInUserData(unittest.TestCase):
         )
         self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
         self.assertIn("tailscale up", user_data)
-        self.assertIn("--ephemeral", user_data)
+        self.assertIn("--accept-routes=false", user_data)
+        self.assertNotIn("--ephemeral", user_data)
+        self.assertNotIn(" -ephemeral", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
@@ -3648,6 +3658,40 @@ class TestLocalLlmInUserData(unittest.TestCase):
         )
         self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
         self.assertNotIn("tailscale up", user_data)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
+    def test_user_data_does_not_emit_nonexistent_tailscale_flags(self):
+        """Ephemeral-ness is a property of the auth key (set when the key
+        is generated at https://login.tailscale.com/admin/settings/keys),
+        not a runtime flag on `tailscale up`. The flag doesn't exist and
+        is rejected with 'flag provided but not defined: -ephemeral',
+        which silently leaves the node unauthenticated and the preflight
+        probe fails. Covers both autonomous and assisted bootstrap."""
+        for builder, kwargs in [
+            (build_autonomous_user_data, {}),
+            (
+                build_assisted_user_data,
+                {"bot_name": "b", "bot_token": "t", "telegram_user_id": "999"},
+            ),
+        ]:
+            with self.subTest(builder=builder.__name__):
+                user_data = builder(
+                    "owner/repo",
+                    42,
+                    **kwargs,
+                    local_llm={
+                        "endpoint": "http://100.64.0.5:11434",
+                        "model": "x",
+                        "api_key": "",
+                        "allow_private": True,
+                        "fallback": "closed",
+                        "tailscale_auth_key": "tskey-auth-foo",
+                    },
+                )
+                self.assertNotIn("--ephemeral", user_data)
+                self.assertNotIn(" -ephemeral", user_data)
 
 
 if __name__ == "__main__":
