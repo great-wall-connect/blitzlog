@@ -25,7 +25,7 @@ locals {
 
   local_llm_endpoint_set = local.local_llm_endpoint != ""
   local_llm_model_set    = local.local_llm_model != ""
-  tailscale_key_set      = local.tailscale_auth_key != ""
+  tailscale_key_set      = nonsensitive(local.tailscale_auth_key != "")
 
   # Build the list of SSM parameter keys to create. Keys are derived from
   # hardcoded string literals + boolean conditions, so the list itself is
