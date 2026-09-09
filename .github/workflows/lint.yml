@@ -15,7 +15,7 @@ jobs:
     # access repo secrets without an extra Dependabot-secrets entry).
     if: github.actor != 'dependabot[bot]'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: gitleaks detect
@@ -27,7 +27,7 @@ jobs:
     name: Lint + test (Python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mise
         uses: jdx/mise-action@v2
@@ -56,7 +56,7 @@ jobs:
       run:
         working-directory: infra
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3

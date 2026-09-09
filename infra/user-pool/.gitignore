@@ -1,6 +1,7 @@
 # Local state is the default — no shared S3 backend.
 # terraform.tfvars is the working source of truth and must NOT be committed.
 .terraform/
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfvars

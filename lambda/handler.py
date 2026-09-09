@@ -19,7 +19,28 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-SSM_PATH = "/blitzlog"
+# Environment name passed in by Terraform as a Lambda env var (infra/modules/core/lambda.tf).
+# Used to namespace all per-env SSM parameters under /blitzlog/<env>/... so prod and dev
+# can coexist in the same AWS account without collision.
+# Defaults to "prod" so tests / out-of-Lambda callers continue to work without
+# the BLITZLOG_ENV env var being explicitly set.
+
+
+def _blitzlog_env() -> str:
+    return os.environ.get("BLITZLOG_ENV", "prod")
+
+
+def _ssm_root() -> str:
+    return f"/blitzlog/{_blitzlog_env()}"
+
+
+BLITZLOG_ENV = _blitzlog_env()
+SSM_PATH = _ssm_root()
+
+# Per-user data (bot pools, local LLM config) is env-independent — a user has
+# one Telegram bot pool and one local LLM endpoint, not one per env. Both prod
+# and dev Lambda instances read from this single namespace.
+BOT_POOL_SSM_PATH = "/blitzlog/users"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WHISPER_STT_SHIM_CANDIDATES = (
@@ -54,7 +75,7 @@ def get_ssm_param(name: str, with_decryption: bool = True) -> str:
 def list_bot_pool(sender_login: str) -> dict[str, str]:
     paginator = ssm.get_paginator("get_parameters_by_path")
     pages = paginator.paginate(
-        Path=f"{SSM_PATH}/users/{sender_login}/telegram/pool",
+        Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/pool",
         WithDecryption=True,
     )
     bots: dict[str, str] = {}
@@ -68,7 +89,7 @@ def list_bot_pool(sender_login: str) -> dict[str, str]:
 def get_telegram_user_id(sender_login: str) -> str | None:
     try:
         resp = ssm.get_parameter(
-            Name=f"{SSM_PATH}/users/{sender_login}/telegram/allowed-user-id",
+            Name=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/allowed-user-id",
             WithDecryption=False,
         )
         return resp["Parameter"]["Value"]
@@ -520,7 +541,7 @@ def launch_ec2_spot_instance(
     sender_login: str = "",
     sender_id: str = "",
 ) -> str:
-    ephemeral_param = f"/blitzlog/ephemeral/github-token-{issue_number}"
+    ephemeral_param = f"{SSM_PATH}/ephemeral/github-token-{issue_number}"
     ssm.put_parameter(
         Name=ephemeral_param,
         Value=github_token,
@@ -573,7 +594,7 @@ def launch_ec2_spot_instance(
                     {"Key": "Issue", "Value": str(issue_number)},
                     {
                         "Key": "Name",
-                        "Value": f"opencode-agent-{mode}-issue-{issue_number}",
+                        "Value": f"blitzlog-{BLITZLOG_ENV}-opencode-agent-{mode}-issue-{issue_number}",
                     },
                 ],
             },
@@ -646,50 +667,56 @@ def _read_secrets_from_ssm_script(issue_number: int, local_llm: bool = False) ->
     has no cloud credentials in its environment. The cloud-fallback path
     re-reads the SSM param on demand.
     """
+    ssm_root = _ssm_root()
+    blitzlog_env = _blitzlog_env()
+
     api_key_block = ""
     if not local_llm:
         api_key_block = (
             "\n"
-            "OPENCODE_API_KEY=$(aws ssm get-parameter --name "
-            '"/blitzlog/opencode/api-key" --with-decryption --query '
-            'Parameter.Value --output text --region "$REGION")\n'
+            f"OPENCODE_API_KEY=$(aws ssm get-parameter --name "
+            f'"{ssm_root}/opencode/api-key" --with-decryption --query '
+            f'Parameter.Value --output text --region "$REGION")\n'
             "export OPENCODE_API_KEY\n"
         )
+
     return f"""
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
 export AWS_DEFAULT_REGION=$REGION
+export BLITZLOG_ENV={blitzlog_env}
 
-_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "/blitzlog/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
+_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "{ssm_root}/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export _CC_GITHUB_TOKEN{api_key_block}
 
-STT_API_URL=$(aws ssm get-parameter --name "/blitzlog/stt/api-url" --query Parameter.Value --output text --region "$REGION")
+STT_API_URL=$(aws ssm get-parameter --name "{ssm_root}/stt/api-url" --query Parameter.Value --output text --region "$REGION")
 export STT_API_URL
-STT_API_KEY=$(aws ssm get-parameter --name "/blitzlog/stt/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
+STT_API_KEY=$(aws ssm get-parameter --name "{ssm_root}/stt/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export STT_API_KEY
-STT_MODEL=$(aws ssm get-parameter --name "/blitzlog/stt/model" --query Parameter.Value --output text --region "$REGION")
+STT_MODEL=$(aws ssm get-parameter --name "{ssm_root}/stt/model" --query Parameter.Value --output text --region "$REGION")
 export STT_MODEL
-STT_LANGUAGE=$(aws ssm get-parameter --name "/blitzlog/stt/language" --query Parameter.Value --output text --region "$REGION")
+STT_LANGUAGE=$(aws ssm get-parameter --name "{ssm_root}/stt/language" --query Parameter.Value --output text --region "$REGION")
 export STT_LANGUAGE
-STT_MODELS_BUCKET=$(aws ssm get-parameter --name "/blitzlog/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
+STT_MODELS_BUCKET=$(aws ssm get-parameter --name "{ssm_root}/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
 export STT_MODELS_BUCKET
 """
 
 
 def _decode_api_errors_script() -> str:
-    return """
+    ssm_root = _ssm_root()
+    return f"""
 # Decode known LLM-provider API errors into actionable log lines.
 # Run after the opencode process exits and before session export.
 if [ -f "$LOG_FILE" ] && grep -qE "insufficient_balance|insufficient balance|\\(1008\\)" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider returned insufficient balance / HTTP 1008."
-    log "ACTIONABLE: The token-plan account for the configured provider (${OPENCODE_MODEL:-unknown}) has zero credits."
+    log "ACTIONABLE: The token-plan account for the configured provider (${{OPENCODE_MODEL:-unknown}}) has zero credits."
     log "ACTIONABLE: Top up at the provider console (e.g. https://platform.minimax.io) before retrying."
-    log "ACTIONABLE: Verify the API key at SSM parameter /blitzlog/opencode/api-key belongs to a funded account."
+    log "ACTIONABLE: Verify the API key at SSM parameter {ssm_root}/opencode/api-key belongs to a funded account."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "Unauthorized|invalid_api_key|\\(401\\)|Authentication" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider rejected the API key as unauthorized (HTTP 401)."
-    log "ACTIONABLE: Rotate /blitzlog/opencode/api-key in SSM and re-run terraform apply."
+    log "ACTIONABLE: Rotate {ssm_root}/opencode/api-key in SSM and re-run terraform apply."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?requests|\\(429\\)" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider returned a rate-limit / quota error (HTTP 429)."
@@ -954,20 +981,21 @@ def _switch_to_cloud_fallback_script() -> str:
     Only emitted in assisted-mode user-data when local_llm is configured;
     autonomous mode aborts on unreachable local LLM and never needs this.
     """
-    return r"""
-switch_to_cloud_fallback() {
+    ssm_root = _ssm_root()
+    return f"""
+switch_to_cloud_fallback() {{
   log "Switching to cloud fallback..."
 
-  if ! OPENCODE_API_KEY=$(aws ssm get-parameter \
-      --name "/blitzlog/opencode/api-key" \
-      --with-decryption \
-      --query Parameter.Value \
-      --output text \
+  if ! OPENCODE_API_KEY=$(aws ssm get-parameter \\
+      --name "{ssm_root}/opencode/api-key" \\
+      --with-decryption \\
+      --query Parameter.Value \\
+      --output text \\
       --region "$REGION" 2>/dev/null); then
-    log "ERROR: cloud fallback requested but /blitzlog/opencode/api-key is not configured in SSM."
+    log "ERROR: cloud fallback requested but {ssm_root}/opencode/api-key is not configured in SSM."
     log "ERROR: refusing to switch; aborting run instead."
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d chat_id="${TELEGRAM_USER_ID}" \
+    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+      -d chat_id="${{TELEGRAM_USER_ID}}" \\
       -d text="Cloud fallback requested but no cloud API key is configured. Aborting." || true
     /usr/local/bin/assisted-shutdown.sh
     exit 1
@@ -976,47 +1004,47 @@ switch_to_cloud_fallback() {
 
   mkdir -p /root/.config/opencode
   cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
-{
+{{
   "$schema": "https://opencode.ai/config.json",
-  "model": "${OPENCODE_MODEL}",
+  "model": "${{OPENCODE_MODEL}}",
   "default_agent": "build",
-  "compaction": {
+  "compaction": {{
     "auto": false
-  },
-  "agent": {
-    "build": {
+  }},
+  "agent": {{
+    "build": {{
       "steps": 75,
       "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."
-    }
-  },
-  "provider": {
-    "minimax-coding-plan": {
-      "options": {
-        "apiKey": "{env:OPENCODE_API_KEY}"
-      }
-    }
-  }
-}
+    }}
+  }},
+  "provider": {{
+    "minimax-coding-plan": {{
+      "options": {{
+        "apiKey": "{{env:OPENCODE_API_KEY}}"
+      }}
+    }}
+  }}
+}}
 OPENCODECFG
 
-  if [ -n "${OPENCODE_PID:-}" ] && kill -0 "$OPENCODE_PID" 2>/dev/null; then
+  if [ -n "${{OPENCODE_PID:-}}" ] && kill -0 "$OPENCODE_PID" 2>/dev/null; then
     kill "$OPENCODE_PID" 2>/dev/null || true
     wait "$OPENCODE_PID" 2>/dev/null || true
   fi
 
   cd /workspace/repo 2>/dev/null || cd / || true
   OPENCODE_SERVER_USERNAME=agent
-  OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-$(openssl rand -hex 16)}"
+  OPENCODE_SERVER_PASSWORD="${{OPENCODE_SERVER_PASSWORD:-$(openssl rand -hex 16)}}"
   export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
   opencode serve --hostname 127.0.0.1 --port 4096 &
   OPENCODE_PID=$!
 
-  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d chat_id="${TELEGRAM_USER_ID}" \
-    -d text="Switched to cloud fallback (user request). Inference now going to ${OPENCODE_MODEL}." || true
+  curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+    -d chat_id="${{TELEGRAM_USER_ID}}" \\
+    -d text="Switched to cloud fallback (user request). Inference now going to ${{OPENCODE_MODEL}}." || true
 
   log "Cloud fallback active. OPENCODE_PID=$OPENCODE_PID"
-}
+}}
 """
 
 
@@ -2009,6 +2037,10 @@ else
     log "WARNING: Could not auto-select project, user will need /projects"
 fi
 
+log "Fetching issue title..."
+ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq .title 2>/dev/null || echo "unknown")
+RESUME_STATUS=""
+
 log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
 {_install_whisper_stt_script()}
 npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
@@ -2026,8 +2058,6 @@ Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
 fi
 
 log "Sending Telegram notification..."
-ISSUE_TITLE=$(gh issue view $ISSUE_NUMBER --json title --jq .title 2>/dev/null || echo "unknown")
-RESUME_STATUS=""
 if [ "$RESUMED" = "true" ]; then
     RESTORED_TITLE=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
     RESUME_STATUS="

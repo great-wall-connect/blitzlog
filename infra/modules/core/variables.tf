@@ -1,3 +1,13 @@
+variable "environment" {
+  description = "Environment name (e.g. prod, dev). Used to prefix all resource names and the SSM namespace so multiple Blitzlog environments can coexist in the same AWS account without collision."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.environment))
+    error_message = "environment must be lowercase alphanumeric with optional hyphens, 2-32 chars, and cannot start or end with a hyphen."
+  }
+}
+
 variable "aws_region" {
   description = "AWS region for all resources"
   type        = string
@@ -82,7 +92,7 @@ variable "stt_api_key" {
 }
 
 variable "stt_model" {
-  description = "Whisper model name (e.g. base.en, tiny.en, small.en). Model file must be uploaded to the blitzlog-stt-models S3 bucket under models/<name>.bin."
+  description = "Whisper model name (e.g. base.en, tiny.en, small.en). Model file must be uploaded to the blitzlog-<env>-stt-models S3 bucket under models/<name>.bin."
   type        = string
   default     = "base.en"
 }
@@ -94,7 +104,7 @@ variable "stt_language" {
 }
 
 variable "upload_stt_model" {
-  description = "If true, terraform apply downloads the whisper model from stt_model_source_url and uploads it to s3://blitzlog-stt-models/. Requires outbound HTTPS from the Terraform host to the source URL, and s3:PutObject on the bucket from the Terraform host's credentials."
+  description = "If true, terraform apply downloads the whisper model from stt_model_source_url and uploads it to s3://blitzlog-<env>-stt-models/. Requires outbound HTTPS from the Terraform host to the source URL, and s3:PutObject on the bucket from the Terraform host's credentials."
   type        = bool
   default     = false
 }
@@ -106,12 +116,12 @@ variable "stt_model_source_url" {
 }
 
 variable "stt_models_bucket_name" {
-  description = "Name of the S3 bucket hosting whisper.cpp model files. S3 bucket names must be globally unique across AWS, so open-source users need to override this (e.g. \"myorg-blitzlog-stt-models\"). Must be 3-63 chars, lowercase, may contain letters, numbers, hyphens, and dots."
+  description = "Name of the S3 bucket hosting whisper.cpp model files. Defaults to blitzlog-<env>-stt-models. S3 bucket names must be globally unique across AWS, so open-source users need to override this."
   type        = string
-  default     = "blitzlog-stt-models"
+  default     = ""
 
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.stt_models_bucket_name))
+    condition     = var.stt_models_bucket_name == "" || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.stt_models_bucket_name))
     error_message = "S3 bucket names must be 3-63 characters, lowercase, and contain only letters, numbers, hyphens, and dots. Cannot start or end with a hyphen or dot."
   }
 }
