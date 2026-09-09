@@ -3662,6 +3662,48 @@ class TestLocalLlmInUserData(unittest.TestCase):
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
+    def test_assisted_preflight_call_line_bounds_opencode_api_key(self):
+        """Regression for handler.py:1947. When local_llm is configured, the
+        bootstrap does NOT export OPENCODE_API_KEY at startup (intentional —
+        see _read_secrets_from_ssm_script local_llm=True path; the cloud
+        key is read on demand from SSM only inside
+        _switch_to_cloud_fallback_script, via IMDSv2 from the Lambda).
+        The preflight invocation line must therefore use
+        ${OPENCODE_API_KEY:-} (not bare $OPENCODE_API_KEY) to avoid
+        crashing the script under `set -u`.
+        """
+        user_data = build_assisted_user_data(
+            "owner/repo",
+            42,
+            bot_name="b",
+            bot_token="t",
+            telegram_user_id="999",
+            local_llm={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "x",
+                "api_key": "",
+                "allow_private": True,
+                "fallback": "closed",
+            },
+        )
+        invocation_line = None
+        for line in user_data.splitlines():
+            if line.startswith("MODE=assisted HAS_CLOUD_KEY="):
+                invocation_line = line
+                break
+        self.assertIsNotNone(
+            invocation_line,
+            "could not find MODE=assisted HAS_CLOUD_KEY= invocation line",
+        )
+        self.assertIn("${OPENCODE_API_KEY:-}", invocation_line)
+        # Bare $OPENCODE_API_KEY would crash under set -u. Substitute the
+        # safe form out, then check no bare reference remains.
+        remainder = invocation_line.replace("${OPENCODE_API_KEY:-}", "")
+        self.assertNotIn("$OPENCODE_API_KEY", remainder)
+
+    @patch.dict(
+        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
+    )
     def test_user_data_does_not_emit_nonexistent_tailscale_flags(self):
         """Ephemeral-ness is a property of the auth key (set when the key
         is generated at https://login.tailscale.com/admin/settings/keys),

@@ -1946,7 +1946,7 @@ def build_assisted_user_data(
         )
         preflight_block = (
             '\nlog "Probing local LLM before installing system packages..."\n'
-            'MODE=assisted HAS_CLOUD_KEY=$([ -n "$OPENCODE_API_KEY" ] && echo true || echo false) '
+            'MODE=assisted HAS_CLOUD_KEY=$([ -n "${OPENCODE_API_KEY:-}" ] && echo true || echo false) '
             "preflight_local_llm\n\n"
         )
 
