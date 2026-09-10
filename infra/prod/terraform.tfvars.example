@@ -51,6 +51,30 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # MUST match in
 # of infra/modules/core/user-pool/ locally, passing `environment = "prod"`.
 # See README.md, "Per-user bot pool setup (assisted mode)", for the full walkthrough.
 
+# Per-user local LLM routing (assisted or autonomous)
+# ------------------------------------------------------------------------------
+# Add the local_llm_* variables to infra/user-pool/terraform.tfvars to point
+# this user's agents at a local LLM reachable from the EC2 instance. The
+# endpoint must resolve to a private IP (RFC1918, ULA, or Tailscale CGNAT);
+# public IPs are hard-rejected at the Lambda. See README.md,
+# "Local LLMs (route agents to a model you control)", for the full walkthrough
+# including the three always-on transports (Tailscale, WireGuard, AWS Client VPN).
+
+# Terraform state bucket (supplied at init time, not via tfvars):
+# ------------------------------------------------------------------------------
+# The S3 backend bucket is intentionally NOT a tfvars variable —
+# Terraform cannot evaluate input variables inside the backend block.
+# Supply it instead via a -backend.hcl file (gitignored), e.g.:
+#
+#   # infra/prod-backend.hcl
+#   bucket = "<your-terraform-state-bucket>"
+#
+# then run:
+#
+#   terraform init -backend-config=infra/prod-backend.hcl
+#
+# See README.md for the full setup walkthrough.
+
 # State file: S3 key is "prod/blitzlog.tfstate" in the bucket named in prod-backend.hcl.
 # Migrate the legacy single-key state ("blitzlog.tfstate") with:
 #   terraform init -migrate-state -backend-config=prod-backend.hcl

@@ -12,3 +12,8 @@ output "owner_login" {
   description = "Owner login this pool belongs to"
   value       = var.owner_login
 }
+
+output "tailscale_auth_key_parameter_arn" {
+  description = "ARN of the per-user Tailscale auth key SSM parameter (empty string when not configured)"
+  value       = try(aws_ssm_parameter.local_llm["tailscale-auth-key"].arn, "")
+}

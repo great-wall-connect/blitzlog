@@ -1,11 +1,14 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
+import socket
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import boto3
 import jwt
@@ -94,6 +97,209 @@ def get_telegram_user_id(sender_login: str) -> str | None:
         if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
             return None
         raise
+
+
+def parse_telegram_decision(
+    get_updates_payload: dict, allowed_callbacks: set[str]
+) -> str | None:
+    """Return the first matching callback_query.data decision in a Telegram
+    getUpdates response, or None if none of the updates carry an allowed
+    callback. Free-text messages are ignored.
+    """
+    for update in get_updates_payload.get("result", []) or []:
+        callback = update.get("callback_query") or {}
+        data = callback.get("data") or ""
+        if data in allowed_callbacks:
+            return data
+    return None
+
+
+_LOCAL_LLM_ALWAYS_BLOCKED_V4 = [
+    ipaddress.IPv4Network("127.0.0.0/8"),
+    ipaddress.IPv4Network("169.254.0.0/16"),
+]
+_LOCAL_LLM_ALWAYS_BLOCKED_V6 = [
+    ipaddress.IPv6Network("::1/128"),
+    ipaddress.IPv6Network("fe80::/10"),
+    ipaddress.IPv6Network("::ffff:127.0.0.0/104"),
+    ipaddress.IPv6Network("::ffff:169.254.0.0/112"),
+]
+_LOCAL_LLM_OPTIN_V4 = [
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+    ipaddress.IPv4Network("100.64.0.0/10"),
+]
+_LOCAL_LLM_OPTIN_V6 = [
+    ipaddress.IPv6Network("fc00::/7"),
+]
+
+
+def _ip_always_blocked(ip_obj: ipaddress._BaseAddress) -> bool:
+    pools = (
+        _LOCAL_LLM_ALWAYS_BLOCKED_V4
+        if isinstance(ip_obj, ipaddress.IPv4Address)
+        else _LOCAL_LLM_ALWAYS_BLOCKED_V6
+    )
+    return any(ip_obj in net for net in pools)
+
+
+def _ip_is_opt_in_only(ip_obj: ipaddress._BaseAddress) -> bool:
+    pools = (
+        _LOCAL_LLM_OPTIN_V4
+        if isinstance(ip_obj, ipaddress.IPv4Address)
+        else _LOCAL_LLM_OPTIN_V6
+    )
+    return any(ip_obj in net for net in pools)
+
+
+def _resolve_endpoint_ips(endpoint: str) -> list[str]:
+    parsed = urlparse(endpoint)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"endpoint {endpoint!r} has no hostname")
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    ips: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        ip = sockaddr[0]
+        if "%" in ip:
+            ip = ip.split("%", 1)[0]
+        ips.append(ip)
+    return ips
+
+
+def get_local_llm_config(sender_login: str) -> dict | None:
+    """Read this user's local-llm SSM params and validate the endpoint URL.
+
+    Returns a dict with keys {endpoint, model, api_key, allow_private, fallback}
+    if a valid local LLM is configured, or None if no params exist, the endpoint
+    fails the safety guard, or required fields are missing.
+
+    Safety guard rules:
+      - Always blocked: loopback, link-local (covers IMDS).
+      - Opt-in (requires local_llm_endpoint_allow_private_cidrs == true):
+        RFC1918 (10/8, 172.16/12, 192.168/16), ULA (fc00::/7),
+        Tailscale CGNAT (100.64.0.0/10).
+      - Anything else (public IPs, including DNS that resolves to a public IP)
+        is hard-rejected with no opt-in.
+    """
+    if not sender_login:
+        return None
+
+    try:
+        paginator = ssm.get_paginator("get_parameters_by_path")
+        pages = paginator.paginate(
+            Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/local-llm",
+            WithDecryption=True,
+        )
+        params: dict[str, str] = {}
+        for page in pages:
+            for p in page.get("Parameters", []) or []:
+                key = p["Name"].rsplit("/", 1)[-1]
+                params[key] = p["Value"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
+            return None
+        raise
+
+    endpoint = (params.get("endpoint") or "").strip()
+    if not endpoint:
+        return None
+
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in ("http", "https"):
+        logger.warning(
+            "Local LLM endpoint %s rejected: non-http(s) scheme %r",
+            endpoint,
+            parsed.scheme,
+        )
+        return None
+
+    if not parsed.hostname:
+        logger.warning("Local LLM endpoint %s rejected: no hostname", endpoint)
+        return None
+
+    try:
+        resolved_ips = _resolve_endpoint_ips(endpoint)
+    except (socket.gaierror, ValueError) as e:
+        logger.warning(
+            "Local LLM endpoint %s rejected: DNS resolution failed: %s",
+            endpoint,
+            e,
+        )
+        return None
+
+    if not resolved_ips:
+        logger.warning(
+            "Local LLM endpoint %s rejected: no resolved addresses", endpoint
+        )
+        return None
+
+    allow_private = (params.get("allow-private-cidrs") or "").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
+    for ip_str in resolved_ips:
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            logger.warning(
+                "Local LLM endpoint %s rejected: cannot parse resolved IP %r",
+                endpoint,
+                ip_str,
+            )
+            return None
+
+        if _ip_always_blocked(ip_obj):
+            logger.warning(
+                "Local LLM endpoint %s rejected: resolves to always-blocked IP %s "
+                "(loopback or link-local)",
+                endpoint,
+                ip_obj,
+            )
+            return None
+
+        if _ip_is_opt_in_only(ip_obj):
+            if not allow_private:
+                logger.warning(
+                    "Local LLM endpoint %s rejected: resolves to private IP %s "
+                    "but local_llm_endpoint_allow_private_cidrs is not enabled",
+                    endpoint,
+                    ip_obj,
+                )
+                return None
+            continue
+
+        logger.warning(
+            "Local LLM endpoint %s rejected: resolves to public IP %s",
+            endpoint,
+            ip_obj,
+        )
+        return None
+
+    model = (params.get("model") or "").strip()
+    if not model:
+        logger.warning("Local LLM endpoint %s rejected: model is empty", endpoint)
+        return None
+
+    fallback = (params.get("fallback") or "closed").strip().lower()
+    if fallback not in ("closed", "cloud"):
+        fallback = "closed"
+
+    return {
+        "endpoint": endpoint,
+        "model": model,
+        "api_key": params.get("api-key") or "",
+        "allow_private": allow_private,
+        "fallback": fallback,
+        "tailscale_auth_key": (params.get("tailscale-auth-key") or "").strip(),
+    }
 
 
 def _lock_key(sender_login: str, bot_name: str) -> str:
@@ -454,9 +660,27 @@ def launch_ec2_spot_instance(
     return resp["Instances"][0]["InstanceId"]
 
 
-def _read_secrets_from_ssm_script(issue_number: int) -> str:
+def _read_secrets_from_ssm_script(issue_number: int, local_llm: bool = False) -> str:
+    """Render the bootstrap snippet that fetches the GitHub token and (when a
+    cloud run is intended) the OPENCODE_API_KEY from SSM via IMDSv2.
+
+    When local_llm is True the OPENCODE_API_KEY export is omitted so the agent
+    has no cloud credentials in its environment. The cloud-fallback path
+    re-reads the SSM param on demand.
+    """
     ssm_root = _ssm_root()
     blitzlog_env = _blitzlog_env()
+
+    api_key_block = ""
+    if not local_llm:
+        api_key_block = (
+            "\n"
+            f"OPENCODE_API_KEY=$(aws ssm get-parameter --name "
+            f'"{ssm_root}/opencode/api-key" --with-decryption --query '
+            f'Parameter.Value --output text --region "$REGION")\n'
+            "export OPENCODE_API_KEY\n"
+        )
+
     return f"""
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
@@ -465,10 +689,7 @@ export AWS_DEFAULT_REGION=$REGION
 export BLITZLOG_ENV={blitzlog_env}
 
 _CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "{ssm_root}/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
-export _CC_GITHUB_TOKEN
-
-OPENCODE_API_KEY=$(aws ssm get-parameter --name "{ssm_root}/opencode/api-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
-export OPENCODE_API_KEY
+export _CC_GITHUB_TOKEN{api_key_block}
 
 STT_API_URL=$(aws ssm get-parameter --name "{ssm_root}/stt/api-url" --query Parameter.Value --output text --region "$REGION")
 export STT_API_URL
@@ -541,6 +762,47 @@ curl -fsSL https://opencode.ai/install | bash
 export PATH=/root/.opencode/bin:$PATH
 hash -r
 opencode --version
+"""
+
+
+def _install_tailscale_script() -> str:
+    """Install Tailscale and enroll the EC2 instance into the user's Tailnet.
+
+    Runs only when TAILSCALE_AUTH_KEY is set in the bootstrap environment
+    (the Lambda passes it through from the per-user SSM param
+    /blitzlog/users/<login>/local-llm/tailscale-auth-key). The auth key
+    should be generated with Ephemeral: enabled and Tags: tag:blitzlog-agent
+    so the node auto-removes when the EC2 terminates and the ACL can grant
+    scoped access. --accept-routes=false prevents the EC2 from picking up
+    advertised subnet routes from other Tailnet devices — the EC2 only
+    needs peer-to-peer reachability to the LLM endpoint, not full split
+    tunnel routing.
+    """
+    return """
+if [ -n "$TAILSCALE_AUTH_KEY" ]; then
+    log "Installing Tailscale..."
+    dnf install -y yum-utils
+    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazonlinux/2023/tailscale.repo
+    dnf install -y tailscale
+    systemctl enable --now tailscaled
+
+    log "Authenticating EC2 instance to Tailscale Tailnet..."
+    TSC_HOSTNAME="blitzlog-agent-${ISSUE_NUMBER}-$(date +%s)"
+    if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
+                     --hostname="$TSC_HOSTNAME" \
+                     --ephemeral \
+                     --accept-routes=false; then
+        log "WARNING: tailscale up failed; preflight_local_llm will likely time out"
+    fi
+    for i in $(seq 1 30); do
+        STATE=$(tailscale status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('BackendState',''))" 2>/dev/null || echo "")
+        if [ "$STATE" = "Running" ]; then break; fi
+        log "Waiting for tailscaled to be Running... ($i/30)"
+        sleep 2
+    done
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1 || echo "")
+    log "Tailscale connected: hostname=$TSC_HOSTNAME, ip=$TAILSCALE_IP"
+fi
 """
 
 
@@ -661,9 +923,9 @@ WHISPER_LANGUAGE=${{STT_LANGUAGE}}
 REQUEST_TIMEOUT_MS=60000
 ENVEOF
 
-systemctl daemon-reload
-systemctl enable whisper-stt-shim.service
-systemctl restart whisper-stt-shim.service
+    systemctl daemon-reload
+    systemctl enable whisper-stt-shim.service
+    systemctl restart whisper-stt-shim.service
 
 # 5. Health-check the shim before the bot starts.
 for i in $(seq 1 30); do
@@ -681,13 +943,49 @@ done
 """
 
 
-def _write_opencode_config_script(autonomous: bool = True) -> str:
+def _write_opencode_config_script(
+    autonomous: bool = True, local_provider: dict | None = None
+) -> str:
+    """Render the bootstrap snippet that writes /root/.config/opencode/opencode.json.
+
+    When local_provider is None (the cloud path) the single minimax-coding-plan
+    provider block is emitted. When local_provider is a dict with keys
+    {endpoint, model, api_key}, the cloud provider block is omitted entirely and
+    a `local` provider block is emitted in its place — opencode has no cloud
+    credentials to address even if it tries.
+    """
     compaction = '"auto": false'
     agent_prompt = (
         ""
         if autonomous
         else ',\n      "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."'
     )
+
+    if local_provider is None:
+        provider_block = (
+            '  "provider": {\n'
+            '    "minimax-coding-plan": {\n'
+            '      "options": {\n'
+            '        "apiKey": "{env:OPENCODE_API_KEY}"\n'
+            "      }\n"
+            "    }\n"
+            "  }"
+        )
+    else:
+        api_key_line = ""
+        if local_provider.get("api_key"):
+            api_key_line = '        "apiKey": "{env:LOCAL_LLM_API_KEY}",\n'
+        provider_block = (
+            '  "provider": {\n'
+            '    "local": {\n'
+            '      "options": {\n'
+            '        "baseURL": "{env:LOCAL_LLM_ENDPOINT}",\n'
+            f"{api_key_line}"
+            "      }\n"
+            "    }\n"
+            "  }"
+        )
+
     return (
         """
 mkdir -p /root/.config/opencode
@@ -708,17 +1006,229 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
         + """
     }
   },
-  "provider": {
-    "minimax-coding-plan": {
-      "options": {
-        "apiKey": "{env:OPENCODE_API_KEY}"
-      }
-    }
-  }
+"""
+        + provider_block
+        + """
 }
 OPENCODECFG
 """
     )
+
+
+def _switch_to_cloud_fallback_script() -> str:
+    """Render the bash function `switch_to_cloud_fallback` that re-emits the
+    cloud opencode config, exports OPENCODE_API_KEY from SSM, restarts
+    opencode serve (assisted), and notifies the user on Telegram.
+
+    Only emitted in assisted-mode user-data when local_llm is configured;
+    autonomous mode aborts on unreachable local LLM and never needs this.
+    """
+    ssm_root = _ssm_root()
+    return f"""
+switch_to_cloud_fallback() {{
+  log "Switching to cloud fallback..."
+
+  if ! OPENCODE_API_KEY=$(aws ssm get-parameter \\
+      --name "{ssm_root}/opencode/api-key" \\
+      --with-decryption \\
+      --query Parameter.Value \\
+      --output text \\
+      --region "$REGION" 2>/dev/null); then
+    log "ERROR: cloud fallback requested but {ssm_root}/opencode/api-key is not configured in SSM."
+    log "ERROR: refusing to switch; aborting run instead."
+    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+      -d chat_id="${{TELEGRAM_USER_ID}}" \\
+      -d text="Cloud fallback requested but no cloud API key is configured. Aborting." || true
+    /usr/local/bin/assisted-shutdown.sh
+    exit 1
+  fi
+  export OPENCODE_API_KEY
+
+  mkdir -p /root/.config/opencode
+  cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
+{{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "${{OPENCODE_MODEL}}",
+  "default_agent": "build",
+  "compaction": {{
+    "auto": false
+  }},
+  "agent": {{
+    "build": {{
+      "steps": 75,
+      "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."
+    }}
+  }},
+  "provider": {{
+    "minimax-coding-plan": {{
+      "options": {{
+        "apiKey": "{{env:OPENCODE_API_KEY}}"
+      }}
+    }}
+  }}
+}}
+OPENCODECFG
+
+  if [ -n "${{OPENCODE_PID:-}}" ] && kill -0 "$OPENCODE_PID" 2>/dev/null; then
+    kill "$OPENCODE_PID" 2>/dev/null || true
+    wait "$OPENCODE_PID" 2>/dev/null || true
+  fi
+
+  cd /workspace/repo 2>/dev/null || cd / || true
+  OPENCODE_SERVER_USERNAME=agent
+  OPENCODE_SERVER_PASSWORD="${{OPENCODE_SERVER_PASSWORD:-$(openssl rand -hex 16)}}"
+  export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
+  opencode serve --hostname 127.0.0.1 --port 4096 &
+  OPENCODE_PID=$!
+
+  curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
+    -d chat_id="${{TELEGRAM_USER_ID}}" \\
+    -d text="Switched to cloud fallback (user request). Inference now going to ${{OPENCODE_MODEL}}." || true
+
+  log "Cloud fallback active. OPENCODE_PID=$OPENCODE_PID"
+}}
+"""
+
+
+def _preflight_local_llm_script(mode: str) -> str:
+    """Render the bash function `preflight_local_llm` that probes the local
+    LLM endpoint and either proceeds, switches to cloud (assisted only),
+    retries, or aborts.
+
+    Required env vars at call time:
+        LOCAL_LLM_ENDPOINT  - URL to probe
+        MODE                - "autonomous" or "assisted"
+        TELEGRAM_BOT_TOKEN  - (assisted only)
+        TELEGRAM_USER_ID    - (assisted only)
+        LOCAL_LLM_FALLBACK  - "closed" or "cloud"
+        HAS_CLOUD_KEY       - "true" if /blitzlog/opencode/api-key is configured
+
+    On success: returns 0 and the bootstrap continues with the local LLM.
+    On assisted-mode cloud-switch: returns 0 and the caller invokes
+    switch_to_cloud_fallback (defined separately, only in assisted bootstrap).
+    On autonomous unreachable / assisted abort / no-reply: calls `exit 1`
+    (autonomous) or `/usr/local/bin/assisted-shutdown.sh` (assisted).
+    """
+    if mode == "autonomous":
+        return r"""
+preflight_local_llm() {
+  local endpoint="${LOCAL_LLM_ENDPOINT}"
+  log "Preflight: probing local LLM at $endpoint (mode=autonomous)"
+
+  for attempt in $(seq 1 10); do
+    if curl -sf -m 10 "$endpoint/health" >/dev/null 2>&1 \
+       || curl -sf -m 10 "$endpoint/v1/models" >/dev/null 2>&1; then
+      log "Local LLM reachable (attempt $attempt/10)"
+      return 0
+    fi
+    log "Local LLM probe failed (attempt $attempt/10), sleeping 30s..."
+    sleep 30
+  done
+
+  log "ACTIONABLE: Local LLM unreachable after 10 attempts (5 min)"
+  log "ACTIONABLE: Autonomous mode aborting — local LLM unreachable."
+  exit 1
+}
+"""
+
+    return r"""
+preflight_local_llm() {
+  local endpoint="${LOCAL_LLM_ENDPOINT}"
+  local bot_token="${TELEGRAM_BOT_TOKEN:-}"
+  local user_id="${TELEGRAM_USER_ID:-}"
+  local fallback="${LOCAL_LLM_FALLBACK:-closed}"
+  local has_cloud_key="${HAS_CLOUD_KEY:-false}"
+  local max_retries="${LOCAL_LLM_MAX_RETRIES:-5}"
+
+  log "Preflight: probing local LLM at $endpoint (mode=assisted, fallback=$fallback)"
+
+  for attempt in $(seq 1 10); do
+    if curl -sf -m 10 "$endpoint/health" >/dev/null 2>&1 \
+       || curl -sf -m 10 "$endpoint/v1/models" >/dev/null 2>&1; then
+      log "Local LLM reachable (attempt $attempt/10)"
+      return 0
+    fi
+    log "Local LLM probe failed (attempt $attempt/10), sleeping 30s..."
+    sleep 30
+  done
+
+  log "ACTIONABLE: Local LLM unreachable after 10 attempts (5 min)"
+
+  if [ -z "$bot_token" ] || [ -z "$user_id" ]; then
+    log "ACTIONABLE: Telegram credentials missing; aborting."
+    exit 1
+  fi
+
+  local reply_markup
+  if [ "$fallback" = "cloud" ] && [ "$has_cloud_key" = "true" ]; then
+    reply_markup='{"inline_keyboard":[[{"text":"Use cloud fallback","callback_data":"cloud"},{"text":"Retry","callback_data":"retry"},{"text":"Abort","callback_data":"abort"}]]}'
+  else
+    reply_markup='{"inline_keyboard":[[{"text":"Retry","callback_data":"retry"},{"text":"Abort","callback_data":"abort"}]]}'
+  fi
+
+  local text="Local LLM unreachable after 5 min. The agent cannot reach your local endpoint. Pick an action:"
+  if ! curl -sf -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+      -d "chat_id=${user_id}" \
+      --data-urlencode "text=$text" \
+      --data-urlencode "reply_markup=$reply_markup" >/dev/null; then
+    log "ACTIONABLE: Failed to send Telegram prompt; aborting."
+    exit 1
+  fi
+
+  log "Sent Telegram prompt; waiting up to 10 min for user reply..."
+
+  local deadline=$(($(date +%s) + 600))
+  local decision=""
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 5
+    decision=$(curl -sf "https://api.telegram.org/bot${bot_token}/getUpdates" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for u in data.get('result', []):
+        cb = u.get('callback_query') or {}
+        if cb.get('data') in ('retry', 'cloud', 'abort'):
+            print(cb['data'])
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+" 2>/dev/null) || decision=""
+    if [ -n "$decision" ]; then
+      break
+    fi
+  done
+
+  if [ -z "$decision" ]; then
+    log "ACTIONABLE: No Telegram reply within 10 min; aborting."
+    /usr/local/bin/assisted-shutdown.sh
+    exit 1
+  fi
+
+  log "Telegram decision: $decision"
+
+  case "$decision" in
+    retry)
+      if [ "$max_retries" -le 0 ]; then
+        log "ACTIONABLE: max retries exhausted; aborting."
+        /usr/local/bin/assisted-shutdown.sh
+        exit 1
+      fi
+      log "User chose retry; re-running preflight"
+      LOCAL_LLM_MAX_RETRIES=$((max_retries - 1)) preflight_local_llm
+      ;;
+    cloud)
+      log "User chose cloud fallback; switching inference to cloud"
+      switch_to_cloud_fallback
+      ;;
+    abort)
+      log "User chose abort; shutting down"
+      /usr/local/bin/assisted-shutdown.sh
+      ;;
+  esac
+}
+"""
 
 
 _SESSION_ARCHIVE_PLUGIN_JS = r"""export const SessionArchive = async ({ project, client, $, directory }) => {
@@ -1203,7 +1713,11 @@ aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --regio
 
 
 def build_autonomous_user_data(
-    repo: str, issue_number: int, sender_login: str = "", sender_id: str = ""
+    repo: str,
+    issue_number: int,
+    sender_login: str = "",
+    sender_id: str = "",
+    local_llm: dict | None = None,
 ) -> str:
     prompt = (
         f"Work on GitHub issue #{issue_number}. Follow AGENTS.md for branch naming, "
@@ -1212,7 +1726,13 @@ def build_autonomous_user_data(
     )
 
     s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
-    opencode_model = os.environ.get("OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3")
+    base_opencode_model = os.environ.get(
+        "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
+    )
+    if local_llm:
+        opencode_model = f"local/{local_llm['model']}"
+    else:
+        opencode_model = base_opencode_model
     s3_archive_prefix = f"{repo}/issue/{issue_number}"
 
     git_user_name = sender_login or ""
@@ -1220,10 +1740,48 @@ def build_autonomous_user_data(
         f"{sender_id}+{sender_login}@users.noreply.github.com" if sender_login else ""
     )
 
+    local_llm_exports = ""
+    preflight_block = ""
+    preflight_definitions = ""
+    tailscale_install_block = ""
+    if local_llm:
+        tailscale_key = local_llm.get("tailscale_auth_key") or ""
+        local_llm_exports = (
+            f"LOCAL_LLM_ENDPOINT=\"{local_llm['endpoint']}\"\n"
+            f"LOCAL_LLM_MODEL=\"{local_llm['model']}\"\n"
+            f"LOCAL_LLM_API_KEY=\"{local_llm.get('api_key', '')}\"\n"
+            f"LOCAL_LLM_FALLBACK=\"{local_llm['fallback']}\"\n"
+        )
+        if tailscale_key:
+            local_llm_exports += f'TAILSCALE_AUTH_KEY="{tailscale_key}"\n'
+        local_llm_exports += (
+            "export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY "
+            "LOCAL_LLM_FALLBACK"
+        )
+        if tailscale_key:
+            local_llm_exports += " TAILSCALE_AUTH_KEY"
+        local_llm_exports += "\n"
+        if tailscale_key:
+            tailscale_install_block = (
+                '\nlog "Installing and authenticating Tailscale..."\n'
+                + _install_tailscale_script()
+                + "\n"
+            )
+        preflight_definitions = _preflight_local_llm_script("autonomous")
+        preflight_block = (
+            '\nlog "Probing local LLM before installing system packages..."\n'
+            "MODE=autonomous "
+            "HAS_CLOUD_KEY=false "
+            "preflight_local_llm\n\n"
+        )
+
     return f"""#!/bin/bash
 set -euo pipefail
 export HOME=/root
 export GIT_TERMINAL_PROMPT=0
+
+# Defensive env scrubbing (always — cheap hygiene).
+unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
 
 LOG_FILE="/var/log/backend-bootstrap.log"
 log() {{
@@ -1238,13 +1796,15 @@ OPENCODE_MODEL="{opencode_model}"
 S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
-export ISSUE_NUMBER OPENCODE_MODEL S3_LOGS_BUCKET OPENCODE_NONINTERACTIVE OPENCODE_PROMPT SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
+{local_llm_exports}export ISSUE_NUMBER OPENCODE_MODEL S3_LOGS_BUCKET OPENCODE_NONINTERACTIVE OPENCODE_PROMPT SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
 
 log "=== Cloud-coder bootstrap starting (autonomous) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
+{("log \"Local LLM configured: endpoint=$LOCAL_LLM_ENDPOINT, model=$LOCAL_LLM_MODEL\"" if local_llm else "")}
 
 log "Reading secrets from SSM..."
-{_read_secrets_from_ssm_script(issue_number)}
+{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
+{tailscale_install_block}{preflight_definitions}{preflight_block}
 
 log "Installing system packages..."
 {_install_system_packages_script()}
@@ -1263,10 +1823,10 @@ cd /workspace/repo
 {_install_toolchain_script()}
 
 log "Writing opencode config and session archive plugin..."
-{_write_opencode_config_script(autonomous=True)}
+{_write_opencode_config_script(autonomous=True, local_provider=local_llm)}
 {_write_session_archive_plugin_script()}
 
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"zai[a-z-]*"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'), api_key_prefix=${{OPENCODE_API_KEY:0:8}}..."
+log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
 log "Writing spot watchdog and periodic autosave plugins..."
 {_write_spot_watchdog_plugin_script()}
@@ -1327,12 +1887,24 @@ def build_assisted_user_data(
     bot_name: str = "",
     bot_token: str = "",
     telegram_user_id: str = "",
+    local_llm: dict | None = None,
 ) -> str:
     s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
-    opencode_model = os.environ.get("OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3")
-    _, opencode_model_id = (
-        opencode_model.split("/", 1) if "/" in opencode_model else ("", opencode_model)
+    base_opencode_model = os.environ.get(
+        "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
+    if local_llm:
+        opencode_model = f"local/{local_llm['model']}"
+        opencode_model_provider = "local"
+        opencode_model_id = local_llm["model"]
+    else:
+        opencode_model = base_opencode_model
+        opencode_model_provider = "minimax-coding-plan"
+        _, opencode_model_id = (
+            base_opencode_model.split("/", 1)
+            if "/" in base_opencode_model
+            else ("", base_opencode_model)
+        )
     s3_archive_prefix = f"{repo}/issue/{issue_number}"
 
     git_user_name = sender_login or ""
@@ -1340,10 +1912,49 @@ def build_assisted_user_data(
         f"{sender_id}+{sender_login}@users.noreply.github.com" if sender_login else ""
     )
 
+    local_llm_exports = ""
+    preflight_block = ""
+    preflight_definitions = ""
+    tailscale_install_block = ""
+    if local_llm:
+        tailscale_key = local_llm.get("tailscale_auth_key") or ""
+        local_llm_exports = (
+            f"LOCAL_LLM_ENDPOINT=\"{local_llm['endpoint']}\"\n"
+            f"LOCAL_LLM_MODEL=\"{local_llm['model']}\"\n"
+            f"LOCAL_LLM_API_KEY=\"{local_llm.get('api_key', '')}\"\n"
+            f"LOCAL_LLM_FALLBACK=\"{local_llm['fallback']}\"\n"
+        )
+        if tailscale_key:
+            local_llm_exports += f'TAILSCALE_AUTH_KEY="{tailscale_key}"\n'
+        local_llm_exports += (
+            "export LOCAL_LLM_ENDPOINT LOCAL_LLM_MODEL LOCAL_LLM_API_KEY "
+            "LOCAL_LLM_FALLBACK"
+        )
+        if tailscale_key:
+            local_llm_exports += " TAILSCALE_AUTH_KEY"
+        local_llm_exports += "\n"
+        if tailscale_key:
+            tailscale_install_block = (
+                '\nlog "Installing and authenticating Tailscale..."\n'
+                + _install_tailscale_script()
+                + "\n"
+            )
+        preflight_definitions = (
+            _preflight_local_llm_script("assisted") + _switch_to_cloud_fallback_script()
+        )
+        preflight_block = (
+            '\nlog "Probing local LLM before installing system packages..."\n'
+            'MODE=assisted HAS_CLOUD_KEY=$([ -n "$OPENCODE_API_KEY" ] && echo true || echo false) '
+            "preflight_local_llm\n\n"
+        )
+
     return f"""#!/bin/bash
 set -euo pipefail
 export HOME=/root
 export GIT_TERMINAL_PROMPT=0
+
+# Defensive env scrubbing (always — cheap hygiene).
+unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
 
 LOG_FILE="/var/log/backend-bootstrap.log"
 log() {{
@@ -1356,16 +1967,18 @@ OPENCODE_MODEL="{opencode_model}"
 S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
-export ISSUE_NUMBER OPENCODE_MODEL S3_LOGS_BUCKET SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
+{local_llm_exports}export ISSUE_NUMBER OPENCODE_MODEL S3_LOGS_BUCKET SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
 
 log "=== Cloud-coder bootstrap starting (assisted) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
+{("log \"Local LLM configured: endpoint=$LOCAL_LLM_ENDPOINT, model=$LOCAL_LLM_MODEL\"" if local_llm else "")}
 
 log "Reading secrets from SSM..."
-{_read_secrets_from_ssm_script(issue_number)}
+{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
+{tailscale_install_block}{preflight_definitions}{preflight_block}
 
 log "Installing system packages..."
 {_install_system_packages_script()}
@@ -1393,10 +2006,10 @@ log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
 
 log "Writing opencode config and session archive plugin..."
-{_write_opencode_config_script(autonomous=False)}
+{_write_opencode_config_script(autonomous=False, local_provider=local_llm)}
 {_write_session_archive_plugin_script()}
 
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"zai[a-z-]*"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'), api_key_prefix=${{OPENCODE_API_KEY:0:8}}..."
+log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
 log "Writing spot watchdog and periodic autosave plugins..."
 {_write_spot_watchdog_plugin_script()}
@@ -1420,7 +2033,7 @@ export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
 OPENCODE_SERVER_USERNAME=agent
 OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
 export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
-opencode serve --port 4096 &
+opencode serve --hostname 127.0.0.1 --port 4096 &
 OPENCODE_PID=$!
 
 for i in $(seq 1 30); do
@@ -1450,7 +2063,7 @@ TELEGRAM_ALLOWED_USER_ID=${{TELEGRAM_USER_ID}}
 OPENCODE_API_URL=http://localhost:4096
 OPENCODE_SERVER_USERNAME=agent
 OPENCODE_SERVER_PASSWORD=${{OPENCODE_SERVER_PASSWORD}}
-OPENCODE_MODEL_PROVIDER=minimax-coding-plan
+OPENCODE_MODEL_PROVIDER={opencode_model_provider}
 OPENCODE_MODEL_ID={opencode_model_id}
 BOT_LOCALE=en
 TELEGRAM_FORCE_IPV4=true
@@ -1748,6 +2361,16 @@ def lambda_handler(event, context):
             }
         bot_name, bot_token = pool_result
 
+    local_llm = None
+    if sender_login:
+        try:
+            local_llm = get_local_llm_config(sender_login)
+        except (ClientError, ValueError, OSError) as e:
+            logger.warning(
+                "Failed to read local LLM config for %s: %s", sender_login, e
+            )
+            local_llm = None
+
     def _builder(repo, issue_number, sender_login="", sender_id=""):
         if mode == "assisted":
             return builder(
@@ -1758,8 +2381,9 @@ def lambda_handler(event, context):
                 bot_name=bot_name,
                 bot_token=bot_token,
                 telegram_user_id=telegram_user_id,
+                local_llm=local_llm,
             )
-        return builder(repo, issue_number, sender_login, sender_id)
+        return builder(repo, issue_number, sender_login, sender_id, local_llm=local_llm)
 
     try:
         instance_id = launch_ec2_spot_instance(
