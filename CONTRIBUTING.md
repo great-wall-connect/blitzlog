@@ -53,6 +53,9 @@ mise run test
 
 # Build the Lambda package locally
 mise run build
+
+# Release a stuck bot pool lock (assisted mode)
+python scripts/release-bot-lock.py --sender <github_login> --bot <bot_name>
 ```
 
 ### Updating Python dependencies
