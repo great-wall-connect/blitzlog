@@ -20,13 +20,7 @@ live in `_common.py`.
 
 import os
 
-from .. import BLITZLOG_ENV
-from ..plugins import (
-    _write_periodic_autosave_plugin_script,
-    _write_session_archive_plugin_script,
-    _write_spot_watchdog_plugin_script,
-)
-from ._common import (
+from _common import (
     _configure_git_script,
     _decode_api_errors_script,
     _install_opencode_script,
@@ -43,6 +37,11 @@ from ._common import (
     _tailscale_install_block,
     _write_opencode_config_script,
     script_header,
+)
+from plugins import (
+    _write_periodic_autosave_plugin_script,
+    _write_session_archive_plugin_script,
+    _write_spot_watchdog_plugin_script,
 )
 
 
@@ -177,9 +176,3 @@ log "Launching opencode agent..."
 cd /workspace/repo
 OPENCODE_NONINTERACTIVE=1 /usr/local/bin/watchdog.sh opencode run --agent build "$OPENCODE_PROMPT" 2>&1 | tee -a "$LOG_FILE"
 """
-
-
-# Silence ruff: BLITZLOG_ENV is read by ec2.launch_ec2_spot_instance for the
-# instance Name tag and indirectly used by _upload_logs_and_terminate_script's
-# path scheme; importing it here keeps the dependency explicit.
-_ = BLITZLOG_ENV

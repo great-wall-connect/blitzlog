@@ -16,7 +16,7 @@ change to e.g. the opencode install steps is one edit instead of two.
 import os
 from urllib.parse import urlparse
 
-from .. import SSM_PATH, WHISPER_STT_SHIM_SOURCE, _blitzlog_env, _ssm_root
+from _env import WHISPER_STT_SHIM_SOURCE, _blitzlog_env, _ssm_root
 
 
 def _git_identity_block(sender_login: str, sender_id: str) -> str:

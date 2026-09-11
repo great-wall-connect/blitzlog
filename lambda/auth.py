@@ -23,7 +23,7 @@ import jwt
 import requests
 from botocore.config import Config
 
-from . import SSM_PATH, logger
+from _env import SSM_PATH, logger
 
 _ssm = boto3.client("ssm", config=Config(retries={"max_attempts": 1}))
 

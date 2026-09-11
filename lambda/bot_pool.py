@@ -27,8 +27,8 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from . import BOT_POOL_SSM_PATH, logger
-from .llm_guard import (
+from _env import BOT_POOL_SSM_PATH, logger
+from llm_guard import (
     _ip_always_blocked,
     _ip_is_opt_in_only,
     _resolve_endpoint_ips,

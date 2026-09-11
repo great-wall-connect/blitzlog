@@ -20,7 +20,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from . import BLITZLOG_ENV, SSM_PATH, logger
+from _env import BLITZLOG_ENV, SSM_PATH, logger
 
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")
