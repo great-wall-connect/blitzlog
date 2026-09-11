@@ -323,13 +323,6 @@ class TestParseTelegramDecision(unittest.TestCase):
         self.assertIsNone(parse_telegram_decision(payload, {"retry", "abort"}))
 
 
-def parse_telegram_decision(payload, allowed):
-    # Local re-export so the test module reads naturally.
-    from bot_pool import parse_telegram_decision as _ptd
-
-    return _ptd(payload, allowed)
-
-
 def _local_llm_pages(params, login="octocat"):
     return [
         {
@@ -348,8 +341,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
     @patch("bot_pool._ssm")
     def test_returns_none_when_no_params(self, mock_ssm):
         mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._ssm")
@@ -357,8 +348,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         mock_ssm.get_paginator.return_value.paginate.side_effect = ClientError(
             {"Error": {"Code": "ParameterNotFound"}}, "GetParametersByPath"
         )
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._ssm")
@@ -366,8 +355,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {"model": "qwen2.5-coder:32b"}
         )
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._ssm")
@@ -375,8 +362,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {"endpoint": "http://100.64.0.5:11434"}
         )
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -391,8 +376,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["100.64.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertIsNotNone(cfg)
         self.assertEqual(cfg["endpoint"], "http://100.64.0.5:11434")
@@ -410,8 +393,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["100.64.0.5"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -425,8 +406,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["169.254.169.254"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -440,8 +419,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["127.0.0.1"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -454,8 +431,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -469,8 +444,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertIsNotNone(cfg)
 
@@ -485,8 +458,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["203.0.113.5"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -500,8 +471,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["104.18.32.47"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -514,8 +483,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -530,8 +497,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertEqual(cfg["fallback"], "closed")
 
@@ -547,8 +512,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertEqual(cfg["api_key"], "secret-key")
 
@@ -564,15 +527,11 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["10.0.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertEqual(cfg["api_key"], "")
 
     @patch("bot_pool._ssm")
     def test_returns_none_when_sender_login_empty(self, mock_ssm):
-        from bot_pool import get_local_llm_config
-
         self.assertIsNone(get_local_llm_config(""))
 
     @patch("bot_pool._resolve_endpoint_ips")
@@ -587,8 +546,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["100.64.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertIsNotNone(cfg)
         self.assertEqual(cfg["tailscale_auth_key"], "tskey-auth-foobar")
@@ -604,8 +561,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             }
         )
         mock_resolve.return_value = ["100.64.0.5"]
-        from bot_pool import get_local_llm_config
-
         cfg = get_local_llm_config("octocat")
         self.assertIsNotNone(cfg)
         self.assertEqual(cfg["tailscale_auth_key"], "")
@@ -625,8 +580,6 @@ class TestGetLocalLlmConfig(unittest.TestCase):
                 "model": "qwen2.5-coder:32b",
             }
         )
-        from bot_pool import get_local_llm_config
-
         get_local_llm_config("daniel-sarosi-gwc")
         called_path = mock_ssm.get_paginator.return_value.paginate.call_args.kwargs[
             "Path"
