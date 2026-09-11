@@ -15,15 +15,15 @@ def _with_env(fn):
 
 
 def _build_assisted(**kwargs):
-    defaults = dict(
-        repo="owner/repo",
-        issue_number=42,
-        sender_login="octocat",
-        sender_id="12345",
-        bot_name="escobar",
-        bot_token="123:ABC",
-        telegram_user_id="99999",
-    )
+    defaults = {
+        "repo": "owner/repo",
+        "issue_number": 42,
+        "sender_login": "octocat",
+        "sender_id": "12345",
+        "bot_name": "escobar",
+        "bot_token": "123:ABC",
+        "telegram_user_id": "99999",
+    }
     defaults.update(kwargs)
     return build_assisted_user_data(**defaults)
 
@@ -424,7 +424,7 @@ class TestNodeVersionGuard(unittest.TestCase):
 
 
 class TestAssistedLocalLlm(unittest.TestCase):
-    LOCAL_LLM = {
+    LOCAL_LLM = {  # noqa: RUF012 - intentional class-level test fixture
         "endpoint": "http://100.64.0.5:11434",
         "model": "qwen2.5-coder:32b",
         "api_key": "secret",
@@ -439,9 +439,7 @@ class TestAssistedLocalLlm(unittest.TestCase):
         self.assertIn("export OPENCODE_API_KEY", user_data)
 
     def test_local_llm_switches_model(self):
-        user_data = _with_env(
-            lambda: _build_assisted(local_llm=self.LOCAL_LLM)
-        )
+        user_data = _with_env(lambda: _build_assisted(local_llm=self.LOCAL_LLM))
         self.assertIn('OPENCODE_MODEL="local/qwen2.5-coder:32b"', user_data)
         self.assertIn("OPENCODE_MODEL_PROVIDER=local", user_data)
         self.assertIn("OPENCODE_MODEL_ID=qwen2.5-coder:32b", user_data)
@@ -464,9 +462,7 @@ class TestAssistedLocalLlm(unittest.TestCase):
         self.assertNotIn('"minimax-coding-plan":', startup_cfg)
 
     def test_local_llm_includes_preflight(self):
-        user_data = _with_env(
-            lambda: _build_assisted(local_llm=self.LOCAL_LLM)
-        )
+        user_data = _with_env(lambda: _build_assisted(local_llm=self.LOCAL_LLM))
         self.assertIn("preflight_local_llm()", user_data)
         self.assertIn("MODE=assisted", user_data)
 

@@ -139,9 +139,7 @@ class TestSpotWatchdogPlugin(unittest.TestCase):
 
 class TestPeriodicAutosavePlugin(unittest.TestCase):
     def test_plugin_exports_named_function(self):
-        self.assertIn(
-            "export const PeriodicAutosave", PERIODIC_AUTOSAVE_PLUGIN_JS
-        )
+        self.assertIn("export const PeriodicAutosave", PERIODIC_AUTOSAVE_PLUGIN_JS)
 
     def test_plugin_handles_session_created(self):
         self.assertIn("session.created", PERIODIC_AUTOSAVE_PLUGIN_JS)

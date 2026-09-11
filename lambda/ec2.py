@@ -17,10 +17,9 @@ import uuid
 from datetime import datetime, timezone
 
 import boto3
+from _env import BLITZLOG_ENV, SSM_PATH, logger
 from botocore.config import Config
 from botocore.exceptions import ClientError
-
-from _env import BLITZLOG_ENV, SSM_PATH, logger
 
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")

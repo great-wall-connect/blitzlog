@@ -4,8 +4,10 @@ import os
 import unittest
 from unittest.mock import patch
 
-from plugins import _write_periodic_autosave_plugin_script, _write_spot_watchdog_plugin_script
-
+from plugins import (
+    _write_periodic_autosave_plugin_script,
+    _write_spot_watchdog_plugin_script,
+)
 from scripts.autonomous import build_autonomous_user_data
 
 
@@ -61,9 +63,7 @@ class TestAutonomousModelAndDiagnostics(unittest.TestCase):
         self.assertIn("api_key_prefix", user_data)
 
     def test_default_opencode_model_is_minimax(self):
-        with patch.dict(
-            os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True
-        ):
+        with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):
             self.assertIn(
                 "minimax-coding-plan/MiniMax-M3",
                 build_autonomous_user_data("owner/repo", 1),
@@ -123,7 +123,7 @@ class TestAutonomousPluginOrdering(unittest.TestCase):
 
 
 class TestAutonomousLocalLlm(unittest.TestCase):
-    LOCAL_LLM = {
+    LOCAL_LLM = {  # noqa: RUF012 - intentional class-level test fixture
         "endpoint": "http://100.64.0.5:11434",
         "model": "qwen2.5-coder:32b",
         "api_key": "",
@@ -139,7 +139,9 @@ class TestAutonomousLocalLlm(unittest.TestCase):
 
     def test_local_llm_switches_model(self):
         user_data = _with_env(
-            lambda: build_autonomous_user_data("owner/repo", 42, local_llm=self.LOCAL_LLM)
+            lambda: build_autonomous_user_data(
+                "owner/repo", 42, local_llm=self.LOCAL_LLM
+            )
         )
         self.assertIn('OPENCODE_MODEL="local/qwen2.5-coder:32b"', user_data)
         self.assertIn("LOCAL_LLM_ENDPOINT=", user_data)
@@ -149,7 +151,9 @@ class TestAutonomousLocalLlm(unittest.TestCase):
 
     def test_local_llm_includes_preflight(self):
         user_data = _with_env(
-            lambda: build_autonomous_user_data("owner/repo", 42, local_llm=self.LOCAL_LLM)
+            lambda: build_autonomous_user_data(
+                "owner/repo", 42, local_llm=self.LOCAL_LLM
+            )
         )
         self.assertIn("preflight_local_llm()", user_data)
         self.assertIn("MODE=autonomous", user_data)
@@ -174,7 +178,9 @@ class TestAutonomousLocalLlm(unittest.TestCase):
 
     def test_local_llm_omits_tailscale_when_key_empty(self):
         user_data = _with_env(
-            lambda: build_autonomous_user_data("owner/repo", 42, local_llm=self.LOCAL_LLM)
+            lambda: build_autonomous_user_data(
+                "owner/repo", 42, local_llm=self.LOCAL_LLM
+            )
         )
         self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
         self.assertNotIn("tailscale up", user_data)

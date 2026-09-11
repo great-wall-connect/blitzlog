@@ -165,9 +165,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        from scripts.autonomous import build_autonomous_user_data
-
         from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -214,9 +213,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        from scripts.autonomous import build_autonomous_user_data
-
         from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -259,9 +257,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        from scripts.assisted import build_assisted_user_data
-
         from ec2 import launch_ec2_spot_instance
+        from scripts.assisted import build_assisted_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -305,9 +302,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        from scripts.autonomous import build_autonomous_user_data
-
         from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -349,9 +345,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
 
-        from scripts.autonomous import build_autonomous_user_data
-
         from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data

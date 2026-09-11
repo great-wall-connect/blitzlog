@@ -16,7 +16,6 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-
 _LOCAL_LLM_ALWAYS_BLOCKED_V4 = [
     ipaddress.IPv4Network("127.0.0.0/8"),
     ipaddress.IPv4Network("169.254.0.0/16"),

@@ -119,7 +119,9 @@ def lambda_handler(event, context):
 
     try:
         github_token = get_github_app_token(repo_full_name)
-    except Exception as e:
+    except (
+        Exception
+    ) as e:  # noqa: BLE001 - GitHub App auth can raise many types; log + 500
         logger.exception("GitHub App auth failed")
 
         return {

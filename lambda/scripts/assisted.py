@@ -30,7 +30,6 @@ from _common import (
     _configure_git_script,
     _install_opencode_script,
     _install_system_packages_script,
-    _install_tailscale_script,
     _install_toolchain_script,
     _install_whisper_stt_script,
     _local_llm_env_block,

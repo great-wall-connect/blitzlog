@@ -24,10 +24,9 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import boto3
+from _env import BOT_POOL_SSM_PATH, logger
 from botocore.config import Config
 from botocore.exceptions import ClientError
-
-from _env import BOT_POOL_SSM_PATH, logger
 from llm_guard import (
     _ip_always_blocked,
     _ip_is_opt_in_only,

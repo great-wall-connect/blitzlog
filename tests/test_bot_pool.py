@@ -6,14 +6,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from botocore.exceptions import ClientError
-
 from bot_pool import (
     acquire_bot_token,
-    get_telegram_user_id,
     get_local_llm_config,
+    get_telegram_user_id,
     parse_telegram_decision,
 )
+from botocore.exceptions import ClientError
 
 
 class TestAcquireBotToken(unittest.TestCase):

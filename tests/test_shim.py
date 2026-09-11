@@ -587,7 +587,7 @@ class TestContentLengthRead(unittest.TestCase):
         handler = self.shim_server.Handler.__new__(self.shim_server.Handler)
         handler.rfile = BytesIO(body + sentinel)
         handler.headers = {
-            "Content-Type": f"multipart/form-data; boundary=xyz",
+            "Content-Type": "multipart/form-data; boundary=xyz",
             "Content-Length": str(cl),
         }
         handler.__dict__["rfile"] = handler.rfile

@@ -13,9 +13,6 @@ the shared builders (`_read_secrets_from_ssm_script`,
 change to e.g. the opencode install steps is one edit instead of two.
 """
 
-import os
-from urllib.parse import urlparse
-
 from _env import WHISPER_STT_SHIM_SOURCE, _blitzlog_env, _ssm_root
 
 
@@ -93,8 +90,7 @@ def script_header(
     """
     if opencode_prompt is not None:
         opencode_interactive_lines = (
-            f'OPENCODE_NONINTERACTIVE=1\n'
-            f'OPENCODE_PROMPT="{opencode_prompt}"\n'
+            f"OPENCODE_NONINTERACTIVE=1\n" f'OPENCODE_PROMPT="{opencode_prompt}"\n'
         )
         interactive_export = " OPENCODE_NONINTERACTIVE OPENCODE_PROMPT"
     else:
@@ -763,7 +759,11 @@ def _tailscale_install_block(local_llm: dict | None) -> str:
     """
     if not local_llm or not (local_llm.get("tailscale_auth_key") or ""):
         return ""
-    return '\nlog "Installing and authenticating Tailscale..."\n' + _install_tailscale_script() + "\n"
+    return (
+        '\nlog "Installing and authenticating Tailscale..."\n'
+        + _install_tailscale_script()
+        + "\n"
+    )
 
 
 def _preflight_definitions(mode: str) -> str:
@@ -772,7 +772,9 @@ def _preflight_definitions(mode: str) -> str:
     emitted so the preflight can call it on a `cloud` Telegram callback.
     """
     if mode == "assisted":
-        return _preflight_local_llm_script("assisted") + _switch_to_cloud_fallback_script()
+        return (
+            _preflight_local_llm_script("assisted") + _switch_to_cloud_fallback_script()
+        )
     return _preflight_local_llm_script("autonomous")
 
 

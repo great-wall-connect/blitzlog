@@ -21,9 +21,8 @@ from datetime import datetime, timedelta, timezone
 import boto3
 import jwt
 import requests
-from botocore.config import Config
-
 from _env import SSM_PATH, logger
+from botocore.config import Config
 
 _ssm = boto3.client("ssm", config=Config(retries={"max_attempts": 1}))
 

@@ -6,10 +6,10 @@ rendering for both cloud and local providers."""
 import unittest
 
 from _common import (
-    _decode_api_errors_script,
-    _install_whisper_stt_script,
     _configure_git_script,
+    _decode_api_errors_script,
     _install_toolchain_script,
+    _install_whisper_stt_script,
     _preflight_local_llm_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
@@ -52,8 +52,8 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("--with-decryption", script[stt_key_idx : stt_key_idx + 200])
 
     def test_paths_use_dev_env_when_blitzlog_env_set(self):
-        from unittest.mock import patch
         import os
+        from unittest.mock import patch
 
         with patch.dict(os.environ, {"BLITZLOG_ENV": "dev"}):
             script = _read_secrets_from_ssm_script(42)
@@ -69,13 +69,17 @@ class TestSTTInBotConfig(unittest.TestCase):
 
     @staticmethod
     def _build_assisted():
-        from scripts.assisted import build_assisted_user_data
         import os
         from unittest.mock import patch
 
+        from scripts.assisted import build_assisted_user_data
+
         with patch.dict(
             os.environ,
-            {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"},
+            {
+                "S3_LOGS_BUCKET": "test-bucket",
+                "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+            },
         ):
             return build_assisted_user_data(
                 "owner/repo",
