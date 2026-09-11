@@ -773,16 +773,19 @@ def _install_tailscale_script() -> str:
     /blitzlog/users/<login>/local-llm/tailscale-auth-key). The auth key
     should be generated with Ephemeral: enabled and Tags: tag:blitzlog-agent
     so the node auto-removes when the EC2 terminates and the ACL can grant
-    scoped access. --accept-routes=false prevents the EC2 from picking up
-    advertised subnet routes from other Tailnet devices — the EC2 only
-    needs peer-to-peer reachability to the LLM endpoint, not full split
-    tunnel routing.
+    scoped access. Ephemeral-ness is a property of the auth key itself —
+    there is no `--ephemeral` flag on `tailscale up` (see
+    https://tailscale.com/docs/features/ephemeral-nodes, which uses
+    `sudo tailscale up --auth-key=<your ephemeral key>`). --accept-routes=false
+    prevents the EC2 from picking up advertised subnet routes from other
+    Tailnet devices — the EC2 only needs peer-to-peer reachability to the
+    LLM endpoint, not full split-tunnel routing.
     """
     return """
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
     log "Installing Tailscale..."
     dnf install -y yum-utils
-    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazonlinux/2023/tailscale.repo
+    dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
     dnf install -y tailscale
     systemctl enable --now tailscaled
 
@@ -790,7 +793,6 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
     TSC_HOSTNAME="blitzlog-agent-${ISSUE_NUMBER}-$(date +%s)"
     if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
                      --hostname="$TSC_HOSTNAME" \
-                     --ephemeral \
                      --accept-routes=false; then
         log "WARNING: tailscale up failed; preflight_local_llm will likely time out"
     fi
@@ -975,13 +977,29 @@ def _write_opencode_config_script(
         api_key_line = ""
         if local_provider.get("api_key"):
             api_key_line = '        "apiKey": "{env:LOCAL_LLM_API_KEY}",\n'
+        # Register the configured model in provider.local.models so opencode
+        # can resolve it when the bot passes the model as 'provider/model'.
+        # The format is 'provider_id/model_id' with the FIRST slash as the
+        # separator (see https://opencode.ai/docs/models) — so a model id
+        # like 'qwen/qwen3.8-27b' is parsed as (provider=local,
+        # model_id=qwen/qwen3.8-27b), and the model must be registered
+        # under that exact key (with the embedded slash) in provider.models
+        # for opencode to find it. Without this, opencode emits
+        # 'ProviderModelNotFoundError: Model not found: local/qwen/qwen3.8-27b'
+        # even though the server is reachable and the model exists. The key
+        # is JSON-serialized so future ids with embedded quotes or
+        # backslashes don't break the bootstrap.
+        model_id_json = json.dumps(local_provider["model"])
         provider_block = (
             '  "provider": {\n'
             '    "local": {\n'
             '      "options": {\n'
             '        "baseURL": "{env:LOCAL_LLM_ENDPOINT}",\n'
             f"{api_key_line}"
-            "      }\n"
+            "      },\n"
+            f'      "models": {{\n'
+            f"        {model_id_json}: {{}}\n"
+            f"      }}\n"
             "    }\n"
             "  }"
         )
@@ -1113,11 +1131,18 @@ def _preflight_local_llm_script(mode: str) -> str:
         return r"""
 preflight_local_llm() {
   local endpoint="${LOCAL_LLM_ENDPOINT}"
+  # Build the auth-header argv array only when a key is configured. The
+  # array form (vs. inline string interpolation) keeps curl's argv parsing
+  # intact for keys that contain characters like ':', '+', '/', or '='.
+  local auth_args=()
+  if [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
+    auth_args=(-H "Authorization: Bearer ${LOCAL_LLM_API_KEY}")
+  fi
   log "Preflight: probing local LLM at $endpoint (mode=autonomous)"
 
   for attempt in $(seq 1 10); do
-    if curl -sf -m 10 "$endpoint/health" >/dev/null 2>&1 \
-       || curl -sf -m 10 "$endpoint/v1/models" >/dev/null 2>&1; then
+    if curl -sf -m 10 "${auth_args[@]}" "$endpoint/health" >/dev/null 2>&1 \
+       || curl -sf -m 10 "${auth_args[@]}" "$endpoint/v1/models" >/dev/null 2>&1; then
       log "Local LLM reachable (attempt $attempt/10)"
       return 0
     fi
@@ -1139,12 +1164,19 @@ preflight_local_llm() {
   local fallback="${LOCAL_LLM_FALLBACK:-closed}"
   local has_cloud_key="${HAS_CLOUD_KEY:-false}"
   local max_retries="${LOCAL_LLM_MAX_RETRIES:-5}"
+  # Build the auth-header argv array only when a key is configured. The
+  # array form (vs. inline string interpolation) keeps curl's argv parsing
+  # intact for keys that contain characters like ':', '+', '/', or '='.
+  local auth_args=()
+  if [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
+    auth_args=(-H "Authorization: Bearer ${LOCAL_LLM_API_KEY}")
+  fi
 
   log "Preflight: probing local LLM at $endpoint (mode=assisted, fallback=$fallback)"
 
   for attempt in $(seq 1 10); do
-    if curl -sf -m 10 "$endpoint/health" >/dev/null 2>&1 \
-       || curl -sf -m 10 "$endpoint/v1/models" >/dev/null 2>&1; then
+    if curl -sf -m 10 "${auth_args[@]}" "$endpoint/health" >/dev/null 2>&1 \
+       || curl -sf -m 10 "${auth_args[@]}" "$endpoint/v1/models" >/dev/null 2>&1; then
       log "Local LLM reachable (attempt $attempt/10)"
       return 0
     fi
@@ -1730,7 +1762,7 @@ def build_autonomous_user_data(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
     if local_llm:
-        opencode_model = f"local/{local_llm['model']}"
+        opencode_model = local_llm["model"]
     else:
         opencode_model = base_opencode_model
     s3_archive_prefix = f"{repo}/issue/{issue_number}"
@@ -1894,7 +1926,7 @@ def build_assisted_user_data(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
     if local_llm:
-        opencode_model = f"local/{local_llm['model']}"
+        opencode_model = local_llm["model"]
         opencode_model_provider = "local"
         opencode_model_id = local_llm["model"]
     else:
@@ -1944,7 +1976,7 @@ def build_assisted_user_data(
         )
         preflight_block = (
             '\nlog "Probing local LLM before installing system packages..."\n'
-            'MODE=assisted HAS_CLOUD_KEY=$([ -n "$OPENCODE_API_KEY" ] && echo true || echo false) '
+            'MODE=assisted HAS_CLOUD_KEY=$([ -n "${OPENCODE_API_KEY:-}" ] && echo true || echo false) '
             "preflight_local_llm\n\n"
         )
 
