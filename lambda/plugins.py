@@ -80,29 +80,39 @@ PLUGIN_EOF
 
 
 def _write_idle_watchdog_plugin_script() -> str:
-    """Emit the idle-watchdog plugin into the bootstrap. Only called from
+    """Emit the idle-watchdog plugin heredoc body. Only called from
     `build_assisted_user_data` (autonomous mode does not need an idle
     watchdog — the opencode run is fire-and-forget).
+
+    The JS is inlined directly (no escape pass) inside a single-quoted
+    heredoc with marker `IDLE_WATCHDOG_PLUGIN_JS`. The plugin directory
+    was already created by the session-archive plugin writer earlier in
+    the bootstrap, so this writer doesn't re-create it. The caller
+    controls the surrounding `log` line and trailing blank.
     """
-    escaped = _escape_for_single_quoted_heredoc(IDLE_WATCHDOG_PLUGIN_JS)
-    return f"""
-mkdir -p /root/.config/opencode/plugins
-cat > /root/.config/opencode/plugins/idle-watchdog.js <<'PLUGIN_EOF'
-{escaped}
-PLUGIN_EOF
-"""
+    return (
+        f"cat > /root/.config/opencode/plugins/idle-watchdog.js "
+        f"<<'IDLE_WATCHDOG_PLUGIN_JS'\n"
+        f"{IDLE_WATCHDOG_PLUGIN_JS}\n"
+        f"IDLE_WATCHDOG_PLUGIN_JS"
+    )
 
 
 def _write_shutdown_tool_script() -> str:
-    """Emit the opencode `shutdown` tool. Only called from
+    """Emit the opencode `shutdown` tool heredoc body. Only called from
     `build_assisted_user_data`; autonomous mode has no interactive
     surface that needs a shutdown tool (the watchdog terminates on
     timeout).
+
+    The JS is inlined directly (no escape pass) inside a single-quoted
+    heredoc with marker `SHUTDOWN_TOOL_JS`. The directory
+    `/root/.config/opencode/tools/` is created here (matches the
+    pre-refactor layout where it wasn't created by an earlier writer).
     """
-    escaped = _escape_for_single_quoted_heredoc(SHUTDOWN_TOOL_JS)
-    return f"""
-mkdir -p /root/.config/opencode/tools
-cat > /root/.config/opencode/tools/shutdown.js <<'TOOL_EOF'
-{escaped}
-TOOL_EOF
-"""
+    return (
+        f"mkdir -p /root/.config/opencode/tools\n"
+        f"cat > /root/.config/opencode/tools/shutdown.js "
+        f"<<'SHUTDOWN_TOOL_JS'\n"
+        f"{SHUTDOWN_TOOL_JS}\n"
+        f"SHUTDOWN_TOOL_JS"
+    )

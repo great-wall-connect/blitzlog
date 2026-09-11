@@ -137,14 +137,14 @@ def build_assisted_user_data(
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
         local_llm_env=local_llm_env,
+        local_llm_log_line=local_llm_log,
         opencode_prompt=None,
     )
 
-    return f"""{header}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
-{local_llm_log}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 {tailscale_block}{preflight_defs}{preflight_call}
 log "Installing system packages..."
 {_install_system_packages_script()}

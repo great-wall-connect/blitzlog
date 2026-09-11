@@ -99,12 +99,13 @@ def build_autonomous_user_data(
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
         local_llm_env=local_llm_env,
+        local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
     )
 
-    return f"""{header}
-{local_llm_log}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 {tailscale_block}{preflight_defs}{preflight_call}
+
 log "Installing system packages..."
 {_install_system_packages_script()}
 

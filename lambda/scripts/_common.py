@@ -125,6 +125,7 @@ SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
 {local_llm_log_line}
+
 log "Reading secrets from SSM..."
 """
 
@@ -796,9 +797,11 @@ def _preflight_block(local_llm: dict | None, mode: str) -> str:
 
 
 def _local_llm_log_line(local_llm: dict | None) -> str:
-    """Emit the 'Local LLM configured: ...' diagnostic, or "" if no
-    local LLM is in play.
+    """Emit the 'Local LLM configured: ...' diagnostic line (without
+    trailing newline — the script_header places the surrounding
+    newlines so the byte layout matches the pre-refactor single-file
+    handler). Returns "" when no local LLM is in play.
     """
     if not local_llm:
         return ""
-    return 'log "Local LLM configured: endpoint=$LOCAL_LLM_ENDPOINT, model=$LOCAL_LLM_MODEL"\n'
+    return 'log "Local LLM configured: endpoint=$LOCAL_LLM_ENDPOINT, model=$LOCAL_LLM_MODEL"'
