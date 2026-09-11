@@ -50,6 +50,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Effect = "Allow"
         Action = [
           "ssm:GetParameter",
+          "ssm:DeleteParameter",
         ]
         Resource = [
           aws_ssm_parameter.github_app_id.arn,
@@ -57,6 +58,13 @@ resource "aws_iam_role_policy" "lambda_policy" {
           aws_ssm_parameter.github_app_installation_id.arn,
           aws_ssm_parameter.github_webhook_secret.arn,
           "arn:aws:ssm:*::parameter/aws/service/*",
+          # Packer-published agent AMI ids (issue #55). The fallback
+          # chain in get_agent_ami() also reads /aws/service/* which
+          # is already permitted above. The DeleteParameter grant is
+          # for the self-heal-on-stale code path
+          # (_read_custom_agent_ami in lambda/handler.py).
+          "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/agent-ami-id-docker-al2023",
+          "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/agent-ami-id-docker-ubuntu",
         ]
       },
       {

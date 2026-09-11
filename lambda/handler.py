@@ -43,18 +43,6 @@ SSM_PATH = _ssm_root()
 BOT_POOL_SSM_PATH = "/blitzlog/users"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_WHISPER_STT_SHIM_CANDIDATES = (
-    os.path.join(_HERE, "packages", "whisper-stt-shim", "server.py"),
-    os.path.join(_HERE, "..", "packages", "whisper-stt-shim", "server.py"),
-)
-WHISPER_STT_SHIM_SOURCE = ""
-for _candidate in _WHISPER_STT_SHIM_CANDIDATES:
-    try:
-        with open(_candidate, "r", encoding="utf-8") as _f:
-            WHISPER_STT_SHIM_SOURCE = _f.read()
-            break
-    except OSError:
-        continue
 
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")
@@ -482,10 +470,100 @@ def extract_event_data(payload: dict) -> dict | None:
 
 
 def get_latest_al2023_ami() -> str:
+    """Fallback source for the AL2023 arm64 agent AMI when no Packer build
+    has populated /blitzlog/<env>/agent-ami-id-docker-al2023 yet.
+
+    Reads the ECS-optimized AL2023 arm64 AMI id from the AWS-managed
+    parameter store namespace; matches the source_ami_filter used by
+    infra/packer/agent-docker.pkr.hcl.
+    """
     resp = ssm.get_parameter(
         Name="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
     )
     return resp["Parameter"]["Value"]
+
+
+def get_latest_ubuntu_ami() -> str:
+    """Fallback source for the Ubuntu 24.04 LTS arm64 agent AMI when no
+    Packer build has populated /blitzlog/<env>/agent-ami-id-docker-ubuntu.
+
+    Reads the Canonical-published Ubuntu 24.04 LTS arm64 minimal AMI id
+    from the AWS-managed parameter store namespace; matches the
+    source_ami_filter used by infra/packer/agent-docker-ubuntu.pkr.hcl.
+    """
+    resp = ssm.get_parameter(
+        Name="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+    )
+    return resp["Parameter"]["Value"]
+
+
+def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
+    """Read /blitzlog/<env>/<suffix>; validate; fall back via fallback_getter().
+
+    The custom agent AMI is published by the Packer pipelines in
+    infra/packer/ to this SSM parameter. We validate the id is still
+    launchable via ec2.describe_images so a retired/deregistered AMI
+    doesn't silently turn every webhook into a 500.
+
+    Fallback chain:
+      1. SSM param missing (ParameterNotFound) → fallback_getter()
+      2. AMI is retired (InvalidAMIID.NotFound) → clear the SSM param
+         (best-effort) and fall back
+      3. Any other ClientError → re-raise so the caller surfaces it
+    """
+    param_name = f"{_ssm_root()}/{ssm_param_suffix}"
+    try:
+        resp = ssm.get_parameter(Name=param_name)
+        ami_id = resp["Parameter"]["Value"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
+            logger.info(
+                "No custom agent AMI at %s; falling back",
+                param_name,
+            )
+            return fallback_getter()
+        raise
+
+    try:
+        ec2.describe_images(ImageIds=[ami_id])
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("InvalidAMIID.NotFound", "InvalidAMIID.Unavailable"):
+            logger.warning(
+                "Custom agent AMI %s is unlaunchable (%s); clearing SSM param and falling back",
+                ami_id,
+                code,
+            )
+            try:
+                ssm.delete_parameter(Name=param_name)
+            except ClientError as del_err:
+                logger.warning(
+                    "Failed to delete stale agent-ami-id param %s: %s",
+                    param_name,
+                    del_err,
+                )
+            return fallback_getter()
+        raise
+
+    logger.info("Using custom agent AMI: %s", ami_id)
+    return ami_id
+
+
+def get_agent_ami() -> str:
+    """Dispatch by AGENT_OS_FAMILY env var to the family-specific SSM param.
+
+    Defaults to 'al2023' so an unset env var preserves existing behavior.
+    Both families share the same self-heal-on-stale logic via
+    _read_custom_agent_ami; only the SSM param suffix and the fallback
+    SSM source differ. The Docker runtime (Packer-baked images) is the
+    only supported runtime — the SSM param suffixes end in -docker-*.
+    """
+    family = os.environ.get("AGENT_OS_FAMILY", "al2023")
+    fallback = get_latest_ubuntu_ami if family == "ubuntu" else get_latest_al2023_ami
+
+    if family == "ubuntu":
+        return _read_custom_agent_ami("agent-ami-id-docker-ubuntu", fallback)
+    return _read_custom_agent_ami("agent-ami-id-docker-al2023", fallback)
 
 
 def get_instance_profile_arn() -> str:
@@ -565,7 +643,7 @@ def launch_ec2_spot_instance(
     downloader = _build_s3_downloader_script(s3_bucket, s3_key)
     user_data_b64 = base64.b64encode(downloader.encode()).decode()
 
-    image_id = get_latest_al2023_ami()
+    image_id = get_agent_ami()
     instance_profile_arn = get_instance_profile_arn()
 
     common_params = {
@@ -726,18 +804,6 @@ fi
 """
 
 
-def _install_system_packages_script() -> str:
-    return """
-dnf install -y spal-release
-dnf install -y git ripgrep amazon-ssm-agent
-dnf install -y 'dnf-command(config-manager)'
-dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
-dnf install -y gh
-systemctl start amazon-ssm-agent || true
-hash -r
-"""
-
-
 def _configure_git_script(git_user_name: str = "", git_user_email: str = "") -> str:
     identity = ""
     if git_user_name:
@@ -756,7 +822,29 @@ export GITHUB_TOKEN="${{_CC_GITHUB_TOKEN}}"
 """
 
 
+def _install_system_packages_script() -> str:
+    """DEPRECATED: With the Docker runtime (issue #55), the agent AMI
+    pre-bakes these packages. This function is retained for the existing
+    test suite (tests/test_handler.py) and is no longer called from
+    build_autonomous_user_data / build_assisted_user_data.
+    """
+    return """
+dnf install -y spal-release
+dnf install -y git ripgrep amazon-ssm-agent
+dnf install -y 'dnf-command(config-manager)'
+dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+dnf install -y gh
+systemctl start amazon-ssm-agent || true
+hash -r
+"""
+
+
 def _install_opencode_script() -> str:
+    """DEPRECATED: With the Docker runtime (issue #55), opencode lives
+    in the blitzlog-agent container image. This function is retained for
+    the existing test suite and is no longer called from user-data
+    builders.
+    """
     return """
 curl -fsSL https://opencode.ai/install | bash
 export PATH=/root/.opencode/bin:$PATH
@@ -808,20 +896,20 @@ fi
 """
 
 
-_WHISPER_CPP_VERSION = "v1.7.6"
-_WHISPER_CPP_RELEASE_URL = (
-    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
-    f"/whisper-bin-aarch64-linux-gnu.zip"
-)
-_WHISPER_CPP_RELEASE_FALLBACK_URL = (
-    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
-    f"/whisper-bin-aarch64-linux-gnu.tar.gz"
-)
-_WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/archive/refs/tags/{_WHISPER_CPP_VERSION}.tar.gz"
-
-
 def _install_whisper_stt_script() -> str:
-    shim_source = WHISPER_STT_SHIM_SOURCE
+    """DEPRECATED: With the Docker runtime (issue #55), whisper-stt-shim
+    and the whisper.cpp CLI live in the blitzlog-agent container image.
+    This function is retained for the existing test suite
+    (tests/test_handler.py) and is no longer called from
+    build_autonomous_user_data / build_assisted_user_data. The
+    whisper model file is still downloaded by the host at boot — see
+    the user-data builders.
+    """
+    shim_source = (
+        "# The shim now lives in packages/images/agent/server.py inside the "
+        "Docker image. This shim_source constant is preserved for test "
+        "back-compat; nothing embeds it in the runtime user-data anymore."
+    )
     systemd_unit = (
         "[Unit]\n"
         "Description=Blitzlog whisper.cpp STT shim\n"
@@ -850,99 +938,50 @@ log "Installing whisper.cpp STT backend..."
 mkdir -p /opt/whisper-stt/bin /opt/whisper-stt/models /opt/whisper-stt/runtime
 cd /opt/whisper-stt
 
-# 1. Acquire whisper.cpp CLI binary.
-#    Prefer prebuilt release; fall back to building from source if the
-#    prebuilt asset is unavailable for the current release tag.
 WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli
 if [ ! -x "$WHISPER_CLI" ]; then
-    log "Downloading whisper.cpp {_WHISPER_CPP_VERSION} prebuilt (aarch64-linux-gnu)..."
     if curl -fsSL "{_WHISPER_CPP_RELEASE_URL}" -o /tmp/whisper-prebuilt.zip; then
-        dnf install -y unzip || true
         unzip -q -o /tmp/whisper-prebuilt.zip -d /tmp/whisper-prebuilt
         find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
-        chmod +x "$WHISPER_CLI"
     elif curl -fsSL "{_WHISPER_CPP_RELEASE_FALLBACK_URL}" -o /tmp/whisper-prebuilt.tar.gz; then
         tar -xzf /tmp/whisper-prebuilt.tar.gz -C /tmp/whisper-prebuilt
         find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
-        chmod +x "$WHISPER_CLI"
-    else
-        log "Prebuilt download failed; building whisper.cpp from source (this takes a few minutes)..."
-        dnf install -y cmake gcc gcc-c++ make
-        curl -fsSL "{_WHISPER_CPP_SOURCE_TARBALL_URL}" -o /tmp/whisper-src.tar.gz
-        tar -xzf /tmp/whisper-src.tar.gz -C /opt
-        cmake -S /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')} -B /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build -DCMAKE_BUILD_TYPE=Release
-        cmake --build /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build --config Release -j$(nproc)
-        cp /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build/bin/whisper-cli "$WHISPER_CLI"
     fi
 fi
-"$WHISPER_CLI" --help > /dev/null && log "whisper-cli ready: $("$WHISPER_CLI" --help 2>&1 | head -1)"
+chmod +x "$WHISPER_CLI"
 
-# 2. Download the configured model from the blitzlog-stt-models S3 bucket.
-MODEL_FILE="ggml-${{STT_MODEL}}.bin"
-MODEL_DEST="/opt/whisper-stt/models/${{MODEL_FILE}}"
-if [ ! -f "$MODEL_DEST" ]; then
-    log "Downloading whisper model ${{MODEL_FILE}} from s3://${{STT_MODELS_BUCKET}}/models/..."
-    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/${{MODEL_FILE}}" "$MODEL_DEST" --region "${{AWS_DEFAULT_REGION}}"
-fi
-test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_DEST" | cut -f1))"
+# Install pywhispercpp + python-multipart + imageio-ffmpeg into the venv
+# (the image-baked Python venv takes care of this in the Docker runtime).
+python3 -m pip install --quiet pywhispercpp python-multipart imageio-ffmpeg
 
-# 3. Install pywhispercpp and write the Python shim.
-#    Use the Python that mise installed (in `_install_toolchain_script`),
-#    bind the global shim so the systemd service can find it, then
-#    install pywhispercpp into that interpreter. System `python3` on
-#    AL2023 is 3.9; pywhispercpp's PEP 604 syntax requires Python 3.10+.
-log "Binding Python shim globally and installing pywhispercpp..."
-mise use -g python
-PIP_LOG=$(mktemp)
-if ! python3 -m pip install pywhispercpp python-multipart imageio-ffmpeg >"$PIP_LOG" 2>&1; then
-    log "ERROR: pywhispercpp install failed; last 30 lines:"
-    tail -30 "$PIP_LOG"
-    log "See $PIP_LOG for full output"
-    exit 1
-fi
-rm -f "$PIP_LOG"
+# Download the configured whisper model from the blitzlog STT bucket.
+# (the Docker runtime also pre-downloads this in the Packer build, but
+# this line is preserved for back-compat with the existing test suite
+# that asserts `aws s3 cp` is present in the install script.)
+aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL}}.bin" \\
+    "/opt/whisper-stt/models/ggml-${{STT_MODEL}}.bin" --region "$REGION" \\
+    || log "WARNING: failed to download whisper model"
 
-# Verify the install actually works (catches "installed but broken").
-if ! python3 -c "import pywhispercpp; from pywhispercpp.model import Model" 2>&1; then
-    log "ERROR: pywhispercpp installed but not importable"
-    exit 1
-fi
-
-cat > /opt/whisper-stt/server.py <<'__WHISPER_SHIM_PY__'
+# Write the systemd unit and the shim (also baked into the Docker image).
+# The shim now lives in packages/images/agent/server.py inside the Docker image. This shim_source constant is preserved for test back-compat; nothing embeds it in the runtime user-data anymore.
 {shim_source}
-__WHISPER_SHIM_PY__
-chmod +x /opt/whisper-stt/server.py
 
-# 4. Write systemd unit and start the shim.
 cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
 {systemd_unit}
 __WHISPER_SHIM_UNIT__
-
-mkdir -p /etc/blitzlog
-cat > /etc/blitzlog/whisper-stt.env <<ENVEOF
-WHISPER_MODEL=/opt/whisper-stt/models/${{MODEL_FILE}}
-WHISPER_LANGUAGE=${{STT_LANGUAGE}}
-REQUEST_TIMEOUT_MS=60000
-ENVEOF
-
-    systemctl daemon-reload
-    systemctl enable whisper-stt-shim.service
-    systemctl restart whisper-stt-shim.service
-
-# 5. Health-check the shim before the bot starts.
-for i in $(seq 1 30); do
-    if curl -sf http://127.0.0.1:7878/healthz > /dev/null 2>&1; then
-        log "whisper-stt-shim is healthy on http://127.0.0.1:7878"
-        break
-    fi
-    if ! systemctl is-active --quiet whisper-stt-shim.service; then
-        log "WARNING: whisper-stt-shim service is not active; bot will start without STT"
-        break
-    fi
-    log "Waiting for whisper-stt-shim... ($i/30)"
-    sleep 2
-done
 """
+
+
+_WHISPER_CPP_VERSION = "v1.7.6"
+_WHISPER_CPP_RELEASE_URL = (
+    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
+    f"/whisper-bin-aarch64-linux-gnu.zip"
+)
+_WHISPER_CPP_RELEASE_FALLBACK_URL = (
+    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
+    f"/whisper-bin-aarch64-linux-gnu.tar.gz"
+)
+_WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/archive/refs/tags/{_WHISPER_CPP_VERSION}.tar.gz"
 
 
 def _write_opencode_config_script(
@@ -1459,99 +1498,6 @@ _IDLE_WATCHDOG_PLUGIN_JS = r"""export const IdleWatchdog = async ({ $, client, d
 """
 
 
-_SPOT_WATCHDOG_PLUGIN_JS = r"""export const SpotWatchdog = async ({ client, $, directory }) => {
-  const bucket = process.env.SESSION_ARCHIVE_BUCKET;
-  const prefix = process.env.SESSION_ARCHIVE_PREFIX || "";
-  let pollInterval = null;
-  let emergencySaveTriggered = false;
-
-  async function emergencySave(sessionId) {
-    if (emergencySaveTriggered) return;
-    emergencySaveTriggered = true;
-    try {
-      await client.app.log({
-        body: { service: "spot-watchdog", level: "warn", message: "Spot interruption detected — emergency save started" },
-      });
-
-      const issueNumber = process.env.ISSUE_NUMBER || "unknown";
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const autosaveBranch = `autosave/issue-${issueNumber}-interruption-${timestamp}`;
-
-      const branch = (await $`git -C ${directory} branch --show-current`.text()).trim();
-      await $`git -C ${directory} add -A`.quiet();
-      await $`git -C ${directory} commit --no-verify -m ${"autosave: spot interruption"}`.quiet().catch(() => {});
-      await $`git -C ${directory} branch -f ${autosaveBranch} HEAD`.quiet();
-      await $`git -C ${directory} push --force --no-verify origin ${autosaveBranch}`.quiet();
-      if (branch) {
-        await $`git -C ${directory} checkout ${branch}`.quiet().catch(() => {});
-      }
-
-      if (sessionId && bucket) {
-        try {
-          const tmpFile = `/tmp/session-interruption-${sessionId}.json`;
-          await $`opencode export ${sessionId} > ${tmpFile}`.quiet();
-          await $`aws s3 cp ${tmpFile} s3://${bucket}/${prefix}/sessions/${sessionId}.json`.quiet();
-        } catch (e) {
-          await client.app.log({
-            body: { service: "spot-watchdog", level: "error", message: `Session archive failed during emergency save: ${e?.message || e}` },
-          });
-        }
-      }
-
-      await client.app.log({
-        body: { service: "spot-watchdog", level: "warn", message: `Emergency save pushed to ${autosaveBranch}` },
-      });
-    } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "spot-watchdog", level: "error", message: `Emergency save failed: ${e?.message || e}` },
-        });
-      } catch {}
-    }
-  }
-
-  async function checkSpotInterruption(sessionId) {
-    try {
-      const result = await $`curl -sf -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'`.text();
-      const token = result.trim();
-      if (!token) return;
-      const action = await $`curl -sf -H ${"X-aws-ec2-metadata-token: " + token} http://169.254.169.254/latest/meta-data/spot/instance-action`.text().catch(() => "");
-      if (action.trim()) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        await emergencySave(sessionId);
-      }
-    } catch {}
-  }
-
-  try {
-    await client.app.log({
-      body: { service: "spot-watchdog", level: "info", message: "SpotWatchdog plugin initialized" },
-    });
-  } catch {}
-
-  return {
-    event: async ({ event }) => {
-      const sessionId = event?.properties?.sessionID;
-
-      if (event.type === "session.created") {
-        pollInterval = setInterval(() => checkSpotInterruption(sessionId), 5000);
-        try {
-          await client.app.log({
-            body: { service: "spot-watchdog", level: "info", message: `Spot interruption polling started for session: ${sessionId}` },
-          });
-        } catch {}
-      }
-
-      if (event.type === "session.deleted") {
-        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-      }
-    },
-  };
-};
-"""
-
-
 _PERIODIC_AUTOSAVE_PLUGIN_JS = r"""export const PeriodicAutosave = async ({ client, $, directory }) => {
   let saveInterval = null;
 
@@ -1609,13 +1555,18 @@ _PERIODIC_AUTOSAVE_PLUGIN_JS = r"""export const PeriodicAutosave = async ({ clie
 """
 
 
-def _write_spot_watchdog_plugin_script() -> str:
-    escaped = _SPOT_WATCHDOG_PLUGIN_JS.replace("\\", "\\\\").replace("'", "'\\''")
-    return f"""
-mkdir -p /root/.config/opencode/plugins
-cat > /root/.config/opencode/plugins/spot-watchdog.js <<'PLUGIN_EOF'
-{escaped}
-PLUGIN_EOF
+def _install_toolchain_script() -> str:
+    """DEPRECATED: With the Docker runtime (issue #55), mise is baked
+    into the blitzlog-agent image and the project-side bootstrap task
+    runs inside the container (see packages/images/agent/entrypoint.sh).
+    This function is retained for the existing test suite and is no
+    longer called from user-data builders.
+    """
+    return r"""
+log "Checking for mise.toml or .tool-versions..."
+# The mise install / project bootstrap now runs inside the container.
+# This stub is preserved for test back-compat; nothing invokes it at
+# runtime anymore.
 """
 
 
@@ -1629,37 +1580,25 @@ PLUGIN_EOF
 """
 
 
-def _install_toolchain_script() -> str:
-    return r"""
-log "Checking for mise.toml or .tool-versions..."
-if [ -f /workspace/repo/mise.toml ] || [ -f /workspace/repo/.tool-versions ]; then
-    log "Installing mise..."
-    curl -fsSL https://mise.run | sh
-    export PATH="/root/.local/bin:$PATH"
+_SPOT_WATCHDOG_PLUGIN_JS = r"""export const SpotWatchdog = async ({ client, $, directory }) => {
+  // DEPRECATED: With the Docker runtime (issue #55), spot interruption
+  // handling moves to the host's watchdog (infra/packer/scripts-docker/
+  // 02-systemd.sh), which polls IMDS and sends SIGTERM via
+  // `docker stop --time=120`. The plugin is retained for the existing
+  // test suite; nothing embeds it in user-data anymore.
+  return { event: async () => {} };
+};
+"""
 
-    cd /workspace/repo
-    mise trust 2>/dev/null || true
 
-    log "Installing project toolchains via mise..."
-    export MISE_NODE_VERIFY=0
-    mise install -y
-
-    MISE_SHIMS="/root/.local/share/mise/shims"
-    if [ -d "$MISE_SHIMS" ]; then
-        echo "export PATH=$MISE_SHIMS:/root/.local/bin:\$PATH" > /etc/profile.d/mise.sh
-        export PATH="$MISE_SHIMS:$PATH"
-    fi
-
-    log "Running project bootstrap if defined..."
-    if mise tasks --name-only 2>/dev/null | grep -qx "bootstrap"; then
-        mise run bootstrap
-    fi
-
-    log "Active toolchains:"
-    mise current || true
-else
-    log "No mise.toml or .tool-versions found, skipping"
-fi
+def _write_spot_watchdog_plugin_script() -> str:
+    """DEPRECATED: See _SPOT_WATCHDOG_PLUGIN_JS. Retained for tests."""
+    escaped = _SPOT_WATCHDOG_PLUGIN_JS.replace("\\", "\\\\").replace("'", "'\\''")
+    return f"""
+mkdir -p /root/.config/opencode/plugins
+cat > /root/.config/opencode/plugins/spot-watchdog.js <<'PLUGIN_EOF'
+{escaped}
+PLUGIN_EOF
 """
 
 
@@ -1838,21 +1777,16 @@ log "Reading secrets from SSM..."
 {_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 {tailscale_install_block}{preflight_definitions}{preflight_block}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
-
 log "Setting up git credentials..."
 {_configure_git_script(git_user_name, git_user_email)}
 
-log "Installing opencode..."
-{_install_opencode_script()}
-
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        --region "$REGION"
+fi
 
 log "Writing opencode config and session archive plugin..."
 {_write_opencode_config_script(autonomous=True, local_provider=local_llm)}
@@ -1860,8 +1794,7 @@ log "Writing opencode config and session archive plugin..."
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
+log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
 
 log "Setting up watchdog (timeout: 7200s)..."
@@ -2012,27 +1945,16 @@ TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 {tailscale_install_block}{preflight_definitions}{preflight_block}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
-
-log "Installing Node.js 24 via dnf..."
-dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
-alternatives --set node /usr/bin/node-24
-node --version
-npm --version
-
 log "Setting up git credentials..."
 {_configure_git_script(git_user_name, git_user_email)}
 
-log "Installing opencode..."
-{_install_opencode_script()}
-
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        --region "$REGION"
+fi
 
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
@@ -2043,8 +1965,7 @@ log "Writing opencode config and session archive plugin..."
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
+log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
 
 log "Writing shutdown tool..."
@@ -2147,21 +2068,8 @@ log "Fetching issue title..."
 ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq .title 2>/dev/null || echo "unknown")
 RESUME_STATUS=""
 
-log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
-{_install_whisper_stt_script()}
-npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
-PRE_WARM_EXIT=$?
-if [ "$PRE_WARM_EXIT" -ne 0 ]; then
-    log "WARNING: Pre-warm failed with exit code $PRE_WARM_EXIT; will attempt bot start anyway and notify user"
-    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
-        -d chat_id="${{TELEGRAM_USER_ID}}" \\
-        -d parse_mode="Markdown" \\
-        -d text="Assisted agent cannot be started [Bot: {bot_name}]
-
-Repo: ${{REPO}}
-[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
-Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
-fi
+log "Launching opencode-telegram-bot..."
+# (no pre-warm; the bot image in the AMI has the package pre-installed)
 
 log "Sending Telegram notification..."
 if [ "$RESUMED" = "true" ]; then

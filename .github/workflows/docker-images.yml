@@ -1,0 +1,123 @@
+name: docker-images
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/images/agent/**"
+      - ".github/workflows/docker-images.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/images/agent/**"
+      - ".github/workflows/docker-images.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to publish (e.g. 2.1.0). Defaults to 'latest'."
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build blitzlog-agent image
+    runs-on: ubuntu-24.04-arm64
+    timeout-minutes: 20
+
+    env:
+      IMAGE_NAME: blitzlog-agent
+      REGISTRY: ghcr.io
+      OWNER: great-wall-connect
+      # Default to "latest" for dispatch; CI runs override with git SHA + semver.
+      IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag (push only)
+        id: tag
+        if: github.event_name == 'push'
+        run: |
+          # Tag with semver (from pkrvars.hcl if changed) plus the short SHA.
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "value=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (PR only — no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./packages/images/agent
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/arm64
+
+      - name: Build and push (push to main)
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./packages/images/agent
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/arm64
+
+      - name: Build and push (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./packages/images/agent
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/arm64
+
+      - name: Image size gate
+        run: |
+          docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}' \
+            | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 0.5) { print "REJECTED (too big): " $0; exit 1 } }'
+          echo "Image size OK"
+
+  trivy:
+    name: Trivy scan
+    runs-on: ubuntu-24.04-arm64
+    needs: build
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ghcr.io/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:latest
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
