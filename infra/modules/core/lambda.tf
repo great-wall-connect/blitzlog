@@ -30,13 +30,13 @@ data "archive_file" "lambda_zip" {
 resource "null_resource" "lambda_build" {
   triggers = {
     # Package entrypoint + modules
-    handler_py  = filemd5("${path.module}/../../../lambda/handler.py")
-    env_py      = filemd5("${path.module}/../../../lambda/_env.py")
-    auth_py     = filemd5("${path.module}/../../../lambda/auth.py")
-    bot_pool_py = filemd5("${path.module}/../../../lambda/bot_pool.py")
+    handler_py   = filemd5("${path.module}/../../../lambda/handler.py")
+    env_py       = filemd5("${path.module}/../../../lambda/_env.py")
+    auth_py      = filemd5("${path.module}/../../../lambda/auth.py")
+    bot_pool_py  = filemd5("${path.module}/../../../lambda/bot_pool.py")
     llm_guard_py = filemd5("${path.module}/../../../lambda/llm_guard.py")
-    ec2_py      = filemd5("${path.module}/../../../lambda/ec2.py")
-    plugins_py  = filemd5("${path.module}/../../../lambda/plugins.py")
+    ec2_py       = filemd5("${path.module}/../../../lambda/ec2.py")
+    plugins_py   = filemd5("${path.module}/../../../lambda/plugins.py")
 
     # scripts/ subpackage
     scripts_common_py     = filemd5("${path.module}/../../../lambda/scripts/_common.py")
@@ -44,11 +44,11 @@ resource "null_resource" "lambda_build" {
     scripts_assisted_py   = filemd5("${path.module}/../../../lambda/scripts/assisted.py")
 
     # JS plugin sources (loaded at cold-start, embedded into bootstrap heredoc)
-    plugin_session_archive_js = filemd5("${path.module}/../../../lambda/plugins/session_archive.js")
-    plugin_spot_watchdog_js   = filemd5("${path.module}/../../../lambda/plugins/spot_watchdog.js")
+    plugin_session_archive_js   = filemd5("${path.module}/../../../lambda/plugins/session_archive.js")
+    plugin_spot_watchdog_js     = filemd5("${path.module}/../../../lambda/plugins/spot_watchdog.js")
     plugin_periodic_autosave_js = filemd5("${path.module}/../../../lambda/plugins/periodic_autosave.js")
-    plugin_idle_watchdog_js   = filemd5("${path.module}/../../../lambda/plugins/idle_watchdog.js")
-    plugin_shutdown_tool_js   = filemd5("${path.module}/../../../lambda/plugins/shutdown_tool.js")
+    plugin_idle_watchdog_js     = filemd5("${path.module}/../../../lambda/plugins/idle_watchdog.js")
+    plugin_shutdown_tool_js     = filemd5("${path.module}/../../../lambda/plugins/shutdown_tool.js")
 
     # Runtime deps + the embedded whisper-stt shim
     requirements = filemd5("${path.module}/../../../lambda/requirements.txt")
