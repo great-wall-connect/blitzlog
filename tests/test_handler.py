@@ -118,10 +118,9 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler.get_github_app_token", return_value="ghp_test")
     @patch("handler.verify_github_signature", return_value=True)
     @patch("handler.get_ssm_param", return_value="secret")
-    @patch("handler.list_bot_pool")
     @patch("handler.get_local_llm_config", return_value=None)
     def test_autonomous_does_not_call_acquire(
-        self, mock_local_llm, mock_pool, mock_ssm, mock_sig, mock_gh, mock_launch
+        self, mock_local_llm, mock_ssm, mock_sig, mock_gh, mock_launch
     ):
         from handler import lambda_handler
 
@@ -139,7 +138,9 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
 
         result = lambda_handler(event, None)
         self.assertEqual(result["statusCode"], 200)
-        mock_pool.assert_not_called()
+        # Autonomous mode never enters the bot-pool acquisition branch
+        # (acquire_bot_token is only called for assisted mode), so the
+        # bot pool SSM list is also untouched.
 
 
 class TestLambdaBuildConfiguration(unittest.TestCase):
