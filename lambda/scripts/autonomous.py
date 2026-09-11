@@ -73,7 +73,7 @@ def build_autonomous_user_data(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
     if local_llm:
-        opencode_model = f"local/{local_llm['model']}"
+        opencode_model = local_llm["model"]
     else:
         opencode_model = base_opencode_model
     s3_archive_prefix = f"{repo}/issue/{issue_number}"

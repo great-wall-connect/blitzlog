@@ -143,7 +143,7 @@ class TestAutonomousLocalLlm(unittest.TestCase):
                 "owner/repo", 42, local_llm=self.LOCAL_LLM
             )
         )
-        self.assertIn('OPENCODE_MODEL="local/qwen2.5-coder:32b"', user_data)
+        self.assertIn('OPENCODE_MODEL="qwen2.5-coder:32b"', user_data)
         self.assertIn("LOCAL_LLM_ENDPOINT=", user_data)
         self.assertIn("LOCAL_LLM_MODEL=", user_data)
         self.assertNotIn('"minimax-coding-plan":', user_data)
@@ -173,8 +173,16 @@ class TestAutonomousLocalLlm(unittest.TestCase):
         )
         self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
         self.assertIn("tailscale up", user_data)
-        self.assertIn("--ephemeral", user_data)
+        self.assertIn("--accept-routes=false", user_data)
         self.assertIn("blitzlog-agent-${ISSUE_NUMBER}", user_data)
+        # Regression: --ephemeral is NOT a tailscale up flag. Ephemeral-ness
+        # is a property of the auth key itself (set when the key is
+        # generated at https://login.tailscale.com/admin/settings/keys).
+        # Passing --ephemeral makes tailscale up exit with
+        # "flag provided but not defined: -ephemeral", leaving the node
+        # unauthenticated and the preflight probe timing out.
+        self.assertNotIn("--ephemeral", user_data)
+        self.assertNotIn(" -ephemeral", user_data)
 
     def test_local_llm_omits_tailscale_when_key_empty(self):
         user_data = _with_env(

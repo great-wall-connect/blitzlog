@@ -374,6 +374,55 @@ class TestPreflightScript(unittest.TestCase):
         script = _preflight_local_llm_script("assisted")
         self.assertIn("switch_to_cloud_fallback", script)
 
+    def test_preflight_script_sends_auth_header_when_api_key_set(self):
+        """When LOCAL_LLM_API_KEY is set, the probe must send the
+        Authorization header. Some OpenAI-compatible servers (LiteLLM,
+        vLLM behind an auth proxy, etc.) return 401 on /health and
+        /v1/models without the key, even when the server itself is up."""
+        for mode in ("autonomous", "assisted"):
+            with self.subTest(mode=mode):
+                script = _preflight_local_llm_script(mode)
+                self.assertIn(
+                    'auth_args=(-H "Authorization: Bearer ${LOCAL_LLM_API_KEY}")',
+                    script,
+                )
+                self.assertIn('"${auth_args[@]}"', script)
+
+    def test_preflight_script_handles_api_key_with_special_chars(self):
+        """Regression for API keys containing ':' / '+' / '/' / '='.
+
+        Inline string interpolation (e.g. -H "Authorization: Bearer
+        ${LOCAL_LLM_API_KEY}") would let shell metacharacters in the key
+        break curl's argv parsing. The bash array form guarantees each
+        element becomes exactly one argv entry, regardless of what's
+        in the value."""
+        for mode in ("autonomous", "assisted"):
+            with self.subTest(mode=mode):
+                script = _preflight_local_llm_script(mode)
+                # The bare ${LOCAL_LLM_API_KEY} must appear ONLY inside
+                # the array element, never as an unquoted argv fragment.
+                self.assertIn(
+                    'auth_args=(-H "Authorization: Bearer ${LOCAL_LLM_API_KEY}")',
+                    script,
+                )
+                # No unquoted `${LOCAL_LLM_API_KEY}` in a curl line.
+                for line in script.splitlines():
+                    if "curl " in line and "auth_args" not in line:
+                        self.assertNotIn("${LOCAL_LLM_API_KEY}", line)
+
+    def test_preflight_script_uses_safe_env_default(self):
+        """Regression for handler.py:1947 (set -u safety). The preflight
+        function references LOCAL_LLM_API_KEY via ${VAR:-} so a future
+        code path that forgets to export it doesn't crash the script
+        under set -u."""
+        for mode in ("autonomous", "assisted"):
+            with self.subTest(mode=mode):
+                script = _preflight_local_llm_script(mode)
+                self.assertIn("${LOCAL_LLM_API_KEY:-}", script)
+                # No bare $LOCAL_LLM_API_KEY outside the safe default form.
+                stripped = script.replace("${LOCAL_LLM_API_KEY:-}", "")
+                self.assertNotIn("$LOCAL_LLM_API_KEY", stripped)
+
 
 class TestReadSecretsWithLocalLlm(unittest.TestCase):
     def test_cloud_path_exports_api_key(self):
@@ -436,6 +485,58 @@ class TestLocalLlmOpencodeConfig(unittest.TestCase):
             }
         )
         self.assertIn('"baseURL": "{env:LOCAL_LLM_ENDPOINT}"', script)
+
+    def test_local_provider_renders_models_block(self):
+        """Register the configured model under provider.local.models so
+        opencode can resolve it when the bot passes 'provider/model'.
+        Without this, opencode emits 'Model not found' for any
+        non-built-in provider because it has no catalog of which
+        keys are valid for that provider."""
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+            }
+        )
+        self.assertIn('"models":', script)
+        self.assertIn('"qwen2.5-coder:32b": {}', script)
+
+    def test_local_provider_renders_models_with_slash_in_id(self):
+        """Regression for handler.py's _write_opencode_config_script: when
+        the model id itself contains a slash (e.g. 'qwen/qwen3.8-27b'
+        from a LiteLLM-style proxy), the bootstrap must register it
+        exactly as the key in provider.local.models. The opencode docs
+        format is 'provider_id/model_id' with the FIRST slash as the
+        separator, so 'local/qwen/qwen3.8-27b' is parsed as
+        (provider=local, model_id=qwen/qwen3.8-27b) — and the model
+        must be registered under that exact key for opencode to find
+        it. Otherwise: 'ProviderModelNotFoundError: Model not found:
+        local/qwen/qwen3.8-27b'."""
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen/qwen3.8-27b",
+                "api_key": "",
+            }
+        )
+        self.assertIn('"models":', script)
+        self.assertIn('"qwen/qwen3.8-27b": {}', script)
+
+    def test_local_provider_models_key_uses_json_serialization(self):
+        """Regression: API-key-style or otherwise JSON-special-char-bearing
+        model ids must not break the rendered bootstrap. We use
+        json.dumps() in the bootstrap generator; verify a hypothetical
+        id with a double-quote survives intact (would otherwise terminate
+        the string early and corrupt the JSON)."""
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": 'qwen/with"quote',
+                "api_key": "",
+            }
+        )
+        self.assertIn('"qwen/with\\"quote": {}', script)
 
 
 if __name__ == "__main__":
