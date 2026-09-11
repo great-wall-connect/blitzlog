@@ -420,6 +420,8 @@ You can configure blitzlog to point this user's agents at a local LLM you run yo
 
 > **Endpoints must not be publicly addressable.** blitzlog rejects any endpoint that resolves to a public IP, with no opt-in. All supported transports keep the endpoint on a private network (VPN, mesh, or VPC-internal). The endpoint URL is stored as a `SecureString` SSM parameter because it can reveal home-network topology.
 
+> **Auth on `/health`.** The preflight probe hits `/health` and falls back to `/v1/models`. Some OpenAI-compatible servers (LiteLLM, vLLM behind an auth proxy, etc.) require auth on `/health` too. The probe sends `Authorization: Bearer ${LOCAL_LLM_API_KEY}` when the key is non-empty — set `local_llm_api_key` to the same token the agent will use at runtime, otherwise the probe will see 401 and the run will abort (autonomous) or prompt `[Retry]/[Abort]` (assisted) after 5 minutes.
+
 ### Configuration
 
 Add the following block to your `infra/user-pool/terraform.tfvars`:
@@ -432,6 +434,13 @@ Add the following block to your `infra/user-pool/terraform.tfvars`:
 # Anything else (including public IPs and public DNS that resolves to public IPs)
 # is hard-rejected at the Lambda.
 local_llm_endpoint                       = "http://100.x.y.z:11434"
+# Pass the model id through verbatim. The bootstrap does NOT prefix it
+# with the provider name — opencode infers the (sole) `local` provider
+# automatically. If your server's model ids contain `/` (e.g.
+# `qwen/qwen3.8-27b` from a LiteLLM-style proxy), pass them through as-is:
+# the slash is part of the model id, not a provider separator. The bootstrap
+# also registers the model under provider.local.models in opencode.json
+# so opencode can resolve it when the bot invokes `local/<model>`.
 local_llm_model                          = "qwen2.5-coder:32b"
 local_llm_api_key                        = ""        # empty for no-auth endpoints (Ollama default)
 local_llm_endpoint_allow_private_cidrs   = true      # required for any private-IP endpoint
@@ -444,7 +453,9 @@ local_llm_fallback                       = "closed"  # or "cloud" (assisted mode
 tailscale_auth_key                       = "tskey-auth-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-After `terraform apply`, three new SSM parameters exist under `/blitzlog/users/<owner_login>/local-llm/`: `endpoint`, `model`, `api-key` (all `SecureString`); plus `allow-private-cidrs` and `fallback` (both `String`). The agent's `opencode.json` on the EC2 instance is then written with a single `local` provider block:
+After `terraform apply`, three new SSM parameters exist under `/blitzlog/users/<owner_login>/local-llm/`: `endpoint`, `model`, `api-key` (all `SecureString`); plus `allow-private-cidrs` and `fallback` (both `String`). The agent's `opencode.json` on the EC2 instance is then written with a single `local` provider block. The model id comes from `local_llm_model` in your `terraform.tfvars` — substituted at Lambda invocation time in `_write_opencode_config_script()` (Python f-string interpolation against `local_provider["model"]` from `get_local_llm_config()`), so what's shown below is the SHAPE of the rendered file, not a template with placeholders. The `100.x.y.z:11434` and `<your local LLM API key, if any>` are likewise illustrative; the runtime values come from your SSM parameters.
+
+Concrete example for a user whose `local_llm_model = "qwen/qwen3.8-27b"`:
 
 ```json
 "provider": {
@@ -452,12 +463,15 @@ After `terraform apply`, three new SSM parameters exist under `/blitzlog/users/<
     "options": {
       "baseURL": "http://100.x.y.z:11434",
       "apiKey": "<your local LLM API key, if any>"
+    },
+    "models": {
+      "qwen/qwen3.8-27b": {}
     }
   }
 }
 ```
 
-The `OPENCODE_MODEL` becomes `local/<your-model-id>` (the `provider/model-id` form opencode expects). The cloud provider block is **omitted** entirely so the agent has no cloud credentials to address even if a prompt-injection attempt tries to redirect it.
+The `OPENCODE_MODEL` is the model id verbatim (no `local/` prefix) — opencode infers the sole `local` provider. The bot reads `OPENCODE_MODEL_PROVIDER=local` + `OPENCODE_MODEL_ID=qwen/qwen3.8-27b` from the bot env and constructs `local/qwen/qwen3.8-27b` per the opencode convention; opencode parses the first slash as the separator, looks the model up under `provider.local.models`, and uses the registered id when calling the upstream API. **The `models` map is required for any custom (non-built-in) provider** — without it, opencode has no catalog of valid keys for the provider and emits `Model not found: local/<id>` even when the server is reachable and the model exists. The cloud provider block is **omitted** entirely so the agent has no cloud credentials to address even if a prompt-injection attempt tries to redirect it.
 
 ### Credential stripping
 
