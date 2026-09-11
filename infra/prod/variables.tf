@@ -56,6 +56,17 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "agent_os_family" {
+  description = "OS family for the agent AMI (al2023 or ubuntu). Defaults to al2023. Per-env choice; rebuild the AMI in the new family before switching."
+  type        = string
+  default     = "al2023"
+
+  validation {
+    condition     = contains(["al2023", "ubuntu"], var.agent_os_family)
+    error_message = "agent_os_family must be 'al2023' or 'ubuntu'."
+  }
+}
+
 variable "opencode_api_key" {
   description = "API key for the OpenCode inference provider"
   type        = string

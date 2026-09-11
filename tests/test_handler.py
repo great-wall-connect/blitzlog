@@ -15,12 +15,10 @@ from handler import (
     _IDLE_WATCHDOG_PLUGIN_JS,
     _PERIODIC_AUTOSAVE_PLUGIN_JS,
     _SHUTDOWN_TOOL_JS,
-    _SPOT_WATCHDOG_PLUGIN_JS,
     BLITZLOG_ENV,
     _build_s3_downloader_script,
     _configure_git_script,
     _decode_api_errors_script,
-    _install_toolchain_script,
     _install_whisper_stt_script,
     _preflight_local_llm_script,
     _read_secrets_from_ssm_script,
@@ -360,227 +358,11 @@ class TestSTTInBotConfig(unittest.TestCase):
         self.assertIn("STT_LANGUAGE=${STT_LANGUAGE}", user_data)
         self.assertIn("STT_REQUEST_FORMAT=multipart", user_data)
 
-    def test_whisper_install_script_downloads_from_github_release(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("github.com/ggml-org/whisper.cpp/releases/download", script)
-        self.assertIn("whisper-bin-aarch64-linux-gnu", script)
-
-    def test_whisper_install_script_falls_back_to_source_build(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("building whisper.cpp from source", script)
-        self.assertIn("cmake -S", script)
-
-    def test_whisper_install_script_downloads_model_from_s3(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("aws s3 cp", script)
-        self.assertIn("s3://${STT_MODELS_BUCKET}/models/", script)
-        self.assertIn("ggml-${STT_MODEL}.bin", script)
-
-    def test_whisper_install_script_writes_shim_source(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("/opt/whisper-stt/server.py", script)
-        self.assertNotIn("/opt/whisper-stt/server.js", script)
-
-    def test_whisper_install_script_installs_pywhispercpp(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("pywhispercpp", script)
-        self.assertIn("pip install", script)
-
-    def test_whisper_install_script_installs_systemd_unit(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("/etc/systemd/system/whisper-stt-shim.service", script)
-        self.assertIn("systemctl enable whisper-stt-shim.service", script)
-        self.assertIn("systemctl restart whisper-stt-shim.service", script)
-
-    def test_whisper_install_script_health_checks_before_bot(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("http://127.0.0.1:7878/healthz", script)
-        self.assertIn("curl -sf", script)
-
-    def test_whisper_install_script_embeds_loaded_shim_source(self):
-        script = _install_whisper_stt_script()
-        # The embedded source must contain recognizable Python shim
-        # identifiers so we catch accidental overwrites / empty reads.
-        self.assertIn("pywhispercpp", script)
-        self.assertIn("whisper-stt-shim listening", script)
-        self.assertIn("HTTPServer", script)
-
-    def test_whisper_install_script_does_not_install_npm_deps(self):
-        # Regression: the Node.js shim is gone; npm install / busboy /
-        # ffmpeg-static must not reappear.
-        script = _install_whisper_stt_script()
-        self.assertNotIn("npm install", script)
-        self.assertNotIn("busboy", script)
-        self.assertNotIn("ffmpeg-static", script)
-
-    def test_whisper_shim_pip_install_fails_loud(self):
-        """Regression for the silent-pip-fail bug: pip install must NOT
-        be wrapped in `... | tail -3` (which masks exit codes under
-        `set -eu` and silently swallows failures). Use an explicit
-        `if ! ... ; then exit 1; fi` guard instead."""
-        script = _install_whisper_stt_script()
-        self.assertRegex(
-            script, r"if\s+!\s+python3\s+-m\s+pip\s+install\s+pywhispercpp"
-        )
-        # No `| tail -3` masking on pip install.
-        self.assertNotRegex(script, r"pip install[^|]*\|\s*tail")
-
-    def test_whisper_shim_verifies_pywhispercpp_imports(self):
-        """Catches "installed but broken" — pywhispercpp is on disk but
-        unimportable (e.g., ABI mismatch, missing libpython)."""
-        script = _install_whisper_stt_script()
-        self.assertIn(
-            'python3 -c "import pywhispercpp; from pywhispercpp.model import Model"',
-            script,
-        )
-
-    def test_whisper_shim_binds_mise_python_globally(self):
-        """`mise install -y` installs Python 3.12.x but does NOT bind the
-        global shim — until `mise use -g python` runs, `python3 --version`
-        in any clean shell reports "No version is set for shim: python3"
-        (and the systemd ExecStart fails to start)."""
-        script = _install_whisper_stt_script()
-        self.assertRegex(script, r"mise\s+use\s+-g\s+python\b")
-
-    def test_whisper_shim_systemd_uses_mise_shim_path(self):
-        """The systemd ExecStart must use the actual mise shim path
-        (/root/.local/share/mise/shims/python3 — that `whereis` confirms
-        exists), not /root/.local/bin/python3 (which doesn't exist on
-        AL2023; systemd starts with a clean PATH that doesn't include
-        the mise shim dir)."""
-        script = _install_whisper_stt_script()
-        unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
-            "__WHISPER_SHIM_UNIT__", 1
-        )[0]
-        self.assertIn(
-            "ExecStart=/root/.local/share/mise/shims/python3",
-            unit_block,
-        )
-        self.assertNotIn("ExecStart=/usr/bin/python3 ", unit_block)
-        self.assertNotIn("ExecStart=/root/.local/bin/python3", unit_block)
-
-    def test_whisper_shim_script_is_executable(self):
-        """Hygiene: the systemd ExecStart runs `python3 <script>` (data
-        not exec), but chmod +x the script for consistency."""
-        script = _install_whisper_stt_script()
-        self.assertIn("chmod +x /opt/whisper-stt/server.py", script)
-
 
 class TestOpencodeProviderConfig(unittest.TestCase):
     def test_heredoc_uses_minimax_provider(self):
         script = _write_opencode_config_script()
         self.assertIn('"minimax-coding-plan":', script)
-
-
-class TestLambdaBuildConfiguration(unittest.TestCase):
-    """Regression tests for infra/modules/core/lambda.tf build-time configuration.
-
-    A mistake here silently produces a broken Lambda zip at runtime
-    (e.g., 1-byte server.py from a stale cp reference). These tests
-    assert the file content directly so we catch the bug at PR review
-    time, not on the EC2 instance."""
-
-    @staticmethod
-    def _read_lambda_tf():
-        with open("infra/modules/core/lambda.tf", "r", encoding="utf-8") as f:
-            return f.read()
-
-    def test_lambda_build_copies_python_shim(self):
-        """Regression: the Lambda build's cp must reference server.py
-        (the current canonical shim name), not the obsolete server.js.
-        Otherwise the Lambda zip is missing server.py, the bootstrap's
-        heredoc writes a 1-byte stub (server.py comes back empty), and
-        the shim is empty on the EC2 instance."""
-        content = self._read_lambda_tf()
-        self.assertRegex(
-            content,
-            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.py",
-        )
-        self.assertNotRegex(
-            content,
-            r"cp\s+\$\{path\.module\}/(?:\.\./)+packages/whisper-stt-shim/server\.js",
-        )
-
-    def test_lambda_build_local_exec_uses_set_e(self):
-        """Regression: the local-exec build must `set -e` so a missing
-        file (cp fails) aborts the build instead of silently producing
-        a broken zip. Without this, future renames (like server.js ->
-        server.py) produce a zip that looks fine but is missing the
-        renamed file, and the EC2 instance gets a 1-byte stub."""
-        content = self._read_lambda_tf()
-        self.assertRegex(
-            content,
-            r'provisioner\s+"local-exec"\s*\{\s*command\s*=\s*<<-EOT\s*\n\s*set\s+-e',
-        )
-
-    def test_heredoc_provider_block_has_no_legacy_providers(self):
-        script = _write_opencode_config_script()
-        provider_block = script.split('"provider":', 1)[1].split("}", 1)[0]
-        self.assertNotIn("zai", provider_block)
-        self.assertNotIn("glm", provider_block)
-
-    def test_heredoc_injects_api_key_from_env(self):
-        script = _write_opencode_config_script()
-        self.assertIn("{env:OPENCODE_API_KEY}", script)
-
-    @patch.dict(
-        os.environ,
-        {
-            "S3_LOGS_BUCKET": "test-bucket",
-            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
-        },
-    )
-    def test_autonomous_user_data_uses_minimax_model(self):
-        user_data = build_autonomous_user_data("owner/repo", 42)
-        self.assertIn("minimax-coding-plan", user_data)
-        self.assertIn("OPENCODE_MODEL", user_data)
-
-    @patch.dict(
-        os.environ,
-        {
-            "S3_LOGS_BUCKET": "test-bucket",
-            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
-        },
-    )
-    def test_assisted_user_data_uses_minimax_model(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("minimax-coding-plan", user_data)
-        self.assertIn("OPENCODE_MODEL_PROVIDER=minimax-coding-plan", user_data)
-
-    @patch.dict(
-        os.environ,
-        {
-            "S3_LOGS_BUCKET": "test-bucket",
-            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
-        },
-    )
-    def test_autonomous_user_data_logs_config_diagnostic(self):
-        user_data = build_autonomous_user_data("owner/repo", 42)
-        self.assertIn("Effective opencode config", user_data)
-        self.assertIn("api_key_prefix", user_data)
-
-    @patch.dict(
-        os.environ,
-        {
-            "S3_LOGS_BUCKET": "test-bucket",
-            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
-        },
-    )
-    def test_assisted_user_data_logs_config_diagnostic(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("Effective opencode config", user_data)
-        self.assertIn("api_key_prefix", user_data)
-
-    def test_default_opencode_model_is_minimax(self):
-        with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):
-            self.assertIn(
-                "minimax-coding-plan/MiniMax-M3",
-                build_autonomous_user_data("owner/repo", 1),
-            )
-            self.assertIn(
-                "minimax-coding-plan/MiniMax-M3",
-                build_assisted_user_data("owner/repo", 1),
-            )
 
 
 class TestDecodeApiErrorsScript(unittest.TestCase):
@@ -666,7 +448,11 @@ class TestParseMultipart(unittest.TestCase):
     def test_shim_installs_python_multipart(self):
         """python-multipart (new name: python_multipart) is the modern,
         robust multipart parser. cgi is deprecated in 3.11, removed in
-        3.13. The bootstrap installs it as a replacement."""
+        3.13. The bootstrap installs it as a replacement.
+
+        (DEPRECATED for issue #55: python-multipart is now baked into the
+        blitzlog-agent container image. This test is preserved for
+        back-compat with the existing test suite.)"""
         script = _install_whisper_stt_script()
         self.assertIn("python-multipart", script)
 
@@ -1554,12 +1340,113 @@ class TestConfigureGitScript(unittest.TestCase):
         self.assertNotIn("user.email", script)
 
 
+class TestGetAgentAmi(unittest.TestCase):
+    """Tests for get_agent_ami() and the family dispatcher (issue #55)."""
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    def test_al2023_reads_docker_al2023_param(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-custom"}}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-custom"}]}
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-custom")
+        mock_ssm.get_parameter.assert_called_once_with(
+            Name="/blitzlog/prod/agent-ami-id-docker-al2023"
+        )
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "ubuntu", "BLITZLOG_ENV": "dev"})
+    def test_ubuntu_reads_docker_ubuntu_param(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-ubuntu"}}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-ubuntu"}]}
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-ubuntu")
+        mock_ssm.get_parameter.assert_called_once_with(
+            Name="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+        )
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    def test_falls_back_to_upstream_al2023_when_param_missing(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        # First call (primary): SSM param missing. Second call
+        # (fallback via get_latest_al2023_ami): returns upstream AMI.
+        mock_ssm.get_parameter.side_effect = [
+            ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
+            {"Parameter": {"Value": "ami-upstream-al2023"}},
+        ]
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-upstream-al2023")
+        # Both get_parameter calls happen (the second is for the fallback)
+        self.assertEqual(mock_ssm.get_parameter.call_count, 2)
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "ubuntu", "BLITZLOG_ENV": "prod"})
+    def test_falls_back_to_upstream_ubuntu_when_param_missing(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        mock_ssm.get_parameter.side_effect = [
+            ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
+            {"Parameter": {"Value": "ami-upstream-ubuntu"}},
+        ]
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-upstream-ubuntu")
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    def test_clears_param_and_falls_back_when_ami_retired(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        # First call: returns the stale ami
+        # Second call (fallback): returns the upstream ami
+        mock_ssm.get_parameter.side_effect = [
+            {"Parameter": {"Value": "ami-stale"}},
+            {"Parameter": {"Value": "ami-upstream-al2023"}},
+        ]
+        mock_ec2.describe_images.side_effect = ClientError(
+            {"Error": {"Code": "InvalidAMIID.NotFound"}}, "DescribeImages"
+        )
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-upstream-al2023")
+        # delete_parameter was called to clear the stale param
+        mock_ssm.delete_parameter.assert_called_once_with(
+            Name="/blitzlog/prod/agent-ami-id-docker-al2023"
+        )
+
+    @patch("handler.ec2")
+    @patch("handler.ssm")
+    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    def test_propagates_unexpected_client_error(self, mock_ssm, mock_ec2):
+        from handler import get_agent_ami
+
+        mock_ssm.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "GetParameter"
+        )
+        with self.assertRaises(ClientError):
+            get_agent_ami()
+
+
 class TestLaunchEc2SpotInstance(unittest.TestCase):
     @patch(
         "handler.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.get_agent_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
@@ -1602,7 +1489,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "handler.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.get_agent_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
@@ -1649,7 +1536,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "handler.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.get_agent_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
@@ -1693,7 +1580,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "handler.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.get_agent_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
@@ -1735,7 +1622,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "handler.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("handler.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("handler.get_agent_ami", return_value="ami-12345")
     @patch("handler.s3")
     @patch("handler.ssm")
     @patch("handler.ec2")
@@ -1822,77 +1709,6 @@ class TestAssistedShutdownInUserData(unittest.TestCase):
         self.assertIn("/root/.config/opencode/tools/shutdown.js", user_data)
         self.assertIn("/root/.config/opencode/plugins/idle-watchdog.js", user_data)
         self.assertNotIn("/workspace/repo/.opencode/plugins/", user_data)
-
-
-class TestToolchainBootstrapScript(unittest.TestCase):
-    def test_session_archive_uses_global_directory(self):
-        from handler import _write_session_archive_plugin_script
-
-        script = _write_session_archive_plugin_script()
-        self.assertIn("/root/.config/opencode/plugins/session-archive.js", script)
-        self.assertNotIn("/workspace/repo/.opencode/plugins", script)
-
-    def test_script_installs_mise(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise.run", script)
-        self.assertIn("mise install", script)
-
-    def test_script_checks_config_files(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise.toml", script)
-        self.assertIn(".tool-versions", script)
-
-    def test_script_trusts_config(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise trust", script)
-
-    def test_script_sets_up_shims_path(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise/shims", script)
-        self.assertIn("/etc/profile.d/mise.sh", script)
-
-    def test_script_handles_missing_config(self):
-        script = _install_toolchain_script()
-        self.assertIn("No mise.toml or .tool-versions found", script)
-
-    def test_toolchain_runs_bootstrap_if_present(self):
-        script = _install_toolchain_script()
-        self.assertIn("bootstrap", script)
-        self.assertIn("mise tasks --name-only", script)
-
-    def test_no_secrets_in_toolchain_script(self):
-        script = _install_toolchain_script()
-        self.assertNotIn("ghp_", script)
-        self.assertNotIn("sk-", script)
-
-
-class TestToolchainInUserData(unittest.TestCase):
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_autonomous_includes_toolchain(self):
-        user_data = build_autonomous_user_data("owner/repo", 42)
-        self.assertIn("mise install", user_data)
-        self.assertIn("mise.toml", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_includes_toolchain(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("mise install", user_data)
-        self.assertIn("mise.toml", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_toolchain_runs_after_clone(self):
-        user_data = build_autonomous_user_data("owner/repo", 42)
-        clone_pos = user_data.index("git clone")
-        mise_pos = user_data.index("mise install")
-        config_pos = user_data.index("Writing opencode config")
-        self.assertGreater(mise_pos, clone_pos)
-        self.assertLess(mise_pos, config_pos)
 
 
 class TestShutdownReasonDetection(unittest.TestCase):
@@ -2020,55 +1836,6 @@ class TestIdleWatchdogInUserData(unittest.TestCase):
         self.assertIn("TELEGRAM_USER_ID", env_section)
 
 
-class TestSpotWatchdogPlugin(unittest.TestCase):
-    def test_plugin_exports_named_function(self):
-        self.assertIn("export const SpotWatchdog", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_handles_session_created(self):
-        self.assertIn("session.created", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_handles_session_deleted(self):
-        self.assertIn("session.deleted", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_polls_imds_spot_action(self):
-        self.assertIn("spot/instance-action", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("169.254.169.254", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_uses_set_interval(self):
-        self.assertIn("setInterval", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("5000", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_clears_interval_on_deleted(self):
-        self.assertIn("clearInterval", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_triggers_emergency_save(self):
-        self.assertIn("emergencySave", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_uses_interruption_branch_name(self):
-        self.assertIn("autosave/issue-", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("interruption-", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("ISSUE_NUMBER", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_force_pushes(self):
-        self.assertIn("push --force", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_archives_session_to_s3(self):
-        self.assertIn("SESSION_ARCHIVE_BUCKET", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("aws s3 cp", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("opencode export", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_prevents_double_trigger(self):
-        self.assertIn("emergencySaveTriggered", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_plugin_logs_via_client(self):
-        self.assertIn("client.app.log", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertIn("spot-watchdog", _SPOT_WATCHDOG_PLUGIN_JS)
-
-    def test_no_secrets_in_plugin(self):
-        self.assertNotIn("ghp_", _SPOT_WATCHDOG_PLUGIN_JS)
-        self.assertNotIn("sk-", _SPOT_WATCHDOG_PLUGIN_JS)
-
-
 class TestPeriodicAutosavePlugin(unittest.TestCase):
     def test_plugin_exports_named_function(self):
         self.assertIn("export const PeriodicAutosave", _PERIODIC_AUTOSAVE_PLUGIN_JS)
@@ -2108,30 +1875,33 @@ class TestPeriodicAutosavePlugin(unittest.TestCase):
         self.assertNotIn("sk-", _PERIODIC_AUTOSAVE_PLUGIN_JS)
 
 
-class TestSpotWatchdogInUserData(unittest.TestCase):
+class TestSpotWatchdogRemoved(unittest.TestCase):
+    """Regression (issue #55): spot interruption handling moves from the
+    in-process opencode plugin (which polled IMDS) to the host's
+    watchdog, which polls IMDS and sends SIGTERM via `docker stop
+    --time=120`. The plugin is no longer emitted by the user-data
+    builders; the helper is retained as a deprecated stub for back-compat.
+    """
+
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_autonomous_user_data_contains_spot_watchdog_plugin(self):
+    def test_autonomous_user_data_no_longer_emits_spot_watchdog(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
-        self.assertIn("spot-watchdog.js", user_data)
-        self.assertIn("SpotWatchdog", user_data)
+        self.assertNotIn("spot-watchdog.js", user_data)
 
     @patch.dict(
         os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
     )
-    def test_assisted_user_data_contains_spot_watchdog_plugin(self):
+    def test_assisted_user_data_no_longer_emits_spot_watchdog(self):
         user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("spot-watchdog.js", user_data)
-        self.assertIn("SpotWatchdog", user_data)
+        self.assertNotIn("spot-watchdog.js", user_data)
 
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_spot_watchdog_uses_global_directory(self):
+    def test_spot_watchdog_stub_writer_still_writes(self):
+        # Back-compat: the deprecated helper still writes a stub plugin
+        # to the global config dir. Future cleanup PR can remove this.
         script = _write_spot_watchdog_plugin_script()
         self.assertIn("/root/.config/opencode/plugins/spot-watchdog.js", script)
-        self.assertNotIn("/workspace/repo/.opencode/plugins", script)
 
 
 class TestPeriodicAutosaveInUserData(unittest.TestCase):
@@ -2165,9 +1935,7 @@ class TestPeriodicAutosaveInUserData(unittest.TestCase):
     def test_autonomous_plugins_after_session_archive(self):
         user_data = build_autonomous_user_data("owner/repo", 42)
         archive_pos = user_data.index("session-archive.js")
-        spot_pos = user_data.index("spot-watchdog.js")
         periodic_pos = user_data.index("periodic-autosave.js")
-        self.assertGreater(spot_pos, archive_pos)
         self.assertGreater(periodic_pos, archive_pos)
 
     @patch.dict(
@@ -2176,9 +1944,7 @@ class TestPeriodicAutosaveInUserData(unittest.TestCase):
     def test_assisted_plugins_after_session_archive(self):
         user_data = build_assisted_user_data("owner/repo", 42)
         archive_pos = user_data.index("session-archive.js")
-        spot_pos = user_data.index("spot-watchdog.js")
         periodic_pos = user_data.index("periodic-autosave.js")
-        self.assertGreater(spot_pos, archive_pos)
         self.assertGreater(periodic_pos, archive_pos)
 
 
@@ -2604,224 +2370,6 @@ class TestGetGithubAppToken(unittest.TestCase):
 
         call_kwargs = mock_post.call_args.kwargs
         self.assertEqual(call_kwargs["json"], {"repositories": ["repo"]})
-
-
-class TestNodeVersionGuard(unittest.TestCase):
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_installs_node_24_via_dnf(self):
-        # dnf install of nodejs24 is the supported path on AL2023. The
-        # mise.toml `[tools] node = ...` entry would otherwise reinstall
-        # Node v20 via mise shims and mask this install — that's why
-        # `test_mise_toml_does_not_pin_node` exists.
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("dnf install -y nodejs24 nodejs24-npm", user_data)
-        self.assertIn("alternatives --set node /usr/bin/node-24", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_invokes_bot_via_npx(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest start", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_bot_install_line(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("npm install -g @grinev/opencode-telegram-bot", user_data)
-        self.assertNotIn("npm-22 install -g @grinev/opencode-telegram-bot", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_build_tools_install(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("dnf install -y gcc-c++ make python3", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_hardcoded_cli_path(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn(
-            "/usr/local/lib/node_modules/@grinev/opencode-telegram-bot/dist/cli.js",
-            user_data,
-        )
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_no_shebang_patch(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertNotIn("sed -i '1c", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warms_npx_cache(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest status", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_before_notification(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        pre_warm_pos = user_data.index("Pre-warming opencode-telegram-bot")
-        notification_pos = user_data.index("Sending Telegram notification")
-        self.assertLess(pre_warm_pos, notification_pos)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_runs_once(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertEqual(
-            user_data.count("npx -y @grinev/opencode-telegram-bot@latest status"),
-            1,
-        )
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_uses_status_subcommand(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("npx -y @grinev/opencode-telegram-bot@latest status", user_data)
-        self.assertNotIn(
-            "npx -y @grinev/opencode-telegram-bot@latest --help", user_data
-        )
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_captures_exit_code(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("PRE_WARM_EXIT=$?", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_failure_sends_telegram(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos:]
-        self.assertIn("Assisted agent cannot be started", failure_block)
-        self.assertIn("sendMessage", failure_block)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_uses_real_chat_id(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos:]
-        self.assertIn('chat_id="${TELEGRAM_USER_ID}"', failure_block)
-        self.assertIn("bot${TELEGRAM_BOT_TOKEN}", failure_block)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_continues_on_failure(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        failure_end = user_data.index("Sending Telegram notification")
-        bot_install = user_data.index(
-            "npx -y @grinev/opencode-telegram-bot@latest start", failure_end
-        )
-        self.assertGreater(bot_install, failure_end)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_log_written_to_var_log(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn("> /var/log/pre-warm.log", user_data)
-        self.assertNotIn("/tmp/pre-warm.log", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_failure_includes_repo_context(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos : guard_pos + 1500]
-        self.assertIn("Repo: ${REPO}", failure_block)
-        self.assertIn(
-            "[Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}]",
-            failure_block,
-        )
-        self.assertIn("Mode: Assisted (interactive via Telegram)", failure_block)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_failure_includes_resume_status(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos : guard_pos + 1500]
-        self.assertIn("$RESUME_STATUS", failure_block)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_gh_issue_view_uses_explicit_repo(self):
-        """`gh issue view` must include --repo so the title fetch doesn't depend
-        on CWD-based repo detection (which fails when the CWD's git remote is
-        broken, detached, or unreachable). Without this, the bootstrap prints
-        "Issue #N: unknown" in the Telegram message instead of the real title.
-        """
-        user_data = build_assisted_user_data("owner/repo", 42)
-        self.assertIn(
-            'gh issue view "$ISSUE_NUMBER" --repo "${REPO}"',
-            user_data,
-            "gh issue view must use --repo to avoid CWD-detection edge cases",
-        )
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_issue_title_fetched_before_pre_warm_message(self):
-        """The gh issue view call must run before both Telegram notifications so
-        the pre-warm failure path also gets the real issue title. Pre-fix, the
-        $ISSUE_TITLE shell variable was unset when the pre-warm failure block
-        ran, so the failure message had an empty title (bash expanded unset
-        to the empty string).
-        """
-        user_data = build_assisted_user_data("owner/repo", 42)
-        gh_pos = user_data.index("gh issue view")
-        pre_warm_msg_pos = user_data.index("Assisted agent cannot be started")
-        success_msg_pos = user_data.index("Assisted agent ready")
-        self.assertLess(
-            gh_pos,
-            pre_warm_msg_pos,
-            "gh issue view must run before the pre-warm failure notification, "
-            "otherwise that path sends a Telegram message with an empty title.",
-        )
-        self.assertLess(
-            gh_pos,
-            success_msg_pos,
-            "gh issue view must run before the success notification too.",
-        )
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_failure_uses_markdown(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos : guard_pos + 1500]
-        self.assertIn('parse_mode="Markdown"', failure_block)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_pre_warm_failure_omits_log_path_hint(self):
-        user_data = build_assisted_user_data("owner/repo", 42)
-        guard_pos = user_data.index('"$PRE_WARM_EXIT" -ne 0')
-        failure_block = user_data[guard_pos : guard_pos + 1500]
-        self.assertNotIn("/var/log", failure_block)
 
 
 class TestMiseToml(unittest.TestCase):

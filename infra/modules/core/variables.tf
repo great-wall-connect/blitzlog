@@ -66,6 +66,17 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "agent_os_family" {
+  description = "OS family for the agent AMI. 'al2023' reads /blitzlog/<env>/agent-ami-id-docker-al2023 (ECS-optimized AL2023 arm64 baked by Packer); 'ubuntu' reads /blitzlog/<env>/agent-ami-id-docker-ubuntu (Canonical Ubuntu 24.04 LTS arm64 baked by Packer). Per-env choice; one family per env. Switching families requires building the new AMI via the Packer workflow first."
+  type        = string
+  default     = "al2023"
+
+  validation {
+    condition     = contains(["al2023", "ubuntu"], var.agent_os_family)
+    error_message = "agent_os_family must be 'al2023' or 'ubuntu'."
+  }
+}
+
 variable "opencode_api_key" {
   description = "API key for the OpenCode inference provider"
   type        = string
