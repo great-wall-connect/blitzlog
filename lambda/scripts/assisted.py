@@ -146,6 +146,7 @@ TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 {tailscale_block}{preflight_defs}{preflight_call}
+
 log "Installing system packages..."
 {_install_system_packages_script()}
 
