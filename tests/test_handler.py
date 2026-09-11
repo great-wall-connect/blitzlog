@@ -8,11 +8,14 @@ files (test_scripts_*, test_auth.py, test_bot_pool.py, test_ec2.py).
 Tests in this file:
     - `TestLambdaHandlerBotPool`: webhook → launch flow (entrypoint)
     - `TestLambdaBuildConfiguration`: infra/modules/core/lambda.tf content
+    - `TestLambdaRuntimeImportPath`: AWS Lambda sys.path layout regression
     - `TestMiseToml`: top-level mise.toml Node/Terraform pinning regressions
 """
 
+import importlib
 import json
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -184,6 +187,126 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
             content,
             r'provisioner\s+"local-exec"\s*\{\s*command\s*=\s*<<-EOT\s*\n\s*set\s+-e',
         )
+
+    def test_lambda_build_triggers_track_init_py(self):
+        """Regression: the ``null_resource.lambda_build`` trigger map
+        must include a ``filemd5`` entry for ``lambda/__init__.py``.
+        The build script copies the entire ``lambda/`` tree into the
+        zip, so any file added there must be reflected in the trigger
+        map — otherwise adding the file changes the manifest of files
+        in the zip but Terraform won't detect a change and the rebuild
+        is skipped. We hit this with ``__init__.py``: the file is
+        required at runtime (it inserts ``lambda/`` onto ``sys.path``
+        so the bare-name imports inside the package resolve), but
+        until it was added to the trigger map, ``terraform apply``
+        was a no-op against an existing deployed zip that lacked it,
+        and the Lambda kept failing with ``ModuleNotFoundError: No
+        module named '_env'``."""
+        content = self._read_lambda_tf()
+        self.assertRegex(
+            content,
+            r"filemd5\(\"\$\{path\.module\}/(?:\.\./)+lambda/__init__\.py\"\)",
+            msg="lambda/__init__.py must appear in the lambda_build trigger map",
+        )
+
+    def test_lambda_build_local_exec_copies_lambda_directory_recursively(self):
+        """The local-exec must build the zip via ``cp -r …/lambda …/build/``,
+        not ``cp …/lambda/handler.py …/build/`` (which would skip every
+        sibling module — auth, bot_pool, ec2, llm_guard, plugins,
+        scripts/, plugins/*.js, __init__.py, …)."""
+        content = self._read_lambda_tf()
+        self.assertRegex(
+            content,
+            r"cp\s+-r\s+\$\{path\.module\}/(?:\.\./)+lambda\s+\$\{path\.module\}/build/",
+        )
+        self.assertNotRegex(
+            content,
+            r"cp\s+\$\{path\.module\}/(?:\.\./)+lambda/handler\.py\s+\$\{path\.module\}/build/",
+        )
+
+
+class TestLambdaRuntimeImportPath(unittest.TestCase):
+    """Regression for the AWS Lambda sys.path layout.
+
+    AWS Lambda's Python runtime initializes ``sys.path`` with only the
+    zip's task root (e.g. ``/var/task``). The package's modules use
+    bare-name imports (``from _env import logger``, ``from _common
+    import …``) because ``lambda`` is a Python keyword and cannot
+    appear in source-level ``import`` statements. Without a shim,
+    ``import lambda.handler`` at runtime fails immediately on the
+    first ``from _env import …`` inside ``handler.py`` with
+    ``ModuleNotFoundError: No module named '_env'`` — even though the
+    test suite passes, because ``tests/conftest.py`` adds ``lambda/``
+    and ``lambda/scripts/`` to ``sys.path`` and so bypasses the bug.
+
+    ``tests/conftest.py`` is a test-only convenience; AWS Lambda
+    doesn't honor it. This test rebuilds the runtime layout locally
+    (zip root on sys.path, package dirs absent) and asserts that
+    ``lambda.handler`` still imports cleanly. The fix is
+    ``lambda/__init__.py``'s ``sys.path.insert`` shim — without that
+    file this test fails with the exact error a real Lambda invocation
+    would surface.
+    """
+
+    @staticmethod
+    def _runtime_sys_path():
+        """Return a sys.path that mirrors what AWS Lambda sees at
+        cold-start: the zip's task root (the parent of ``lambda/``) on
+        sys.path, with the package and its ``scripts/`` subdirectory
+        NOT present. stdlib / site-packages paths are preserved."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        package_dir = os.path.join(repo_root, "lambda")
+        scripts_dir = os.path.join(package_dir, "scripts")
+        runtime_root = repo_root
+        # Drop any entry that points at the package or scripts dir; keep
+        # everything else (stdlib, site-packages, conftest inserts that
+        # are not pointing at the package itself).
+        return [
+            p
+            for p in sys.path
+            if os.path.realpath(p)
+            not in (os.path.realpath(package_dir), os.path.realpath(scripts_dir))
+        ] + [runtime_root]
+
+    def test_import_lambda_handler_under_runtime_sys_path(self):
+        """Mirror AWS Lambda's sys.path: zip root only. With the
+        ``__init__.py`` shim the import succeeds; without it the
+        import dies on ``from _env import logger`` in handler.py."""
+        runtime_path = self._runtime_sys_path()
+        # Drop any cached imports so the shim (if present) runs again
+        # and the bare-name imports inside handler.py resolve fresh
+        # against our crafted sys.path.
+        for mod in list(sys.modules):
+            if mod == "lambda" or mod.startswith("lambda."):
+                del sys.modules[mod]
+        saved_path = sys.path[:]
+        sys.path[:] = runtime_path
+        try:
+            handler = importlib.import_module("lambda.handler")
+            self.assertTrue(callable(handler.lambda_handler))
+            self.assertTrue(callable(handler.extract_event_data))
+        finally:
+            sys.path[:] = saved_path
+
+    def test_lambda_package_init_adjusts_sys_path(self):
+        """``lambda/__init__.py`` must exist and must insert both the
+        package dir and its ``scripts/`` subdir onto sys.path. This is
+        the shim that makes the runtime import work (see the test
+        above for the consumer-side check)."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        init_path = os.path.join(repo_root, "lambda", "__init__.py")
+        self.assertTrue(
+            os.path.isfile(init_path),
+            f"missing {init_path}; the runtime sys.path shim is required",
+        )
+        with open(init_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("sys.path.insert", content)
+        # Must insert BOTH the package root (for `from _env import …`,
+        # `from auth import …`, etc.) AND `scripts/` (for `from _common
+        # import …`, used by scripts/autonomous.py and scripts/assisted.py).
+        self.assertIn("lambda", content)
+        self.assertIn('"scripts"', content)
 
 
 class TestMiseToml(unittest.TestCase):
