@@ -67,6 +67,7 @@ def script_header(
     s3_bucket: str,
     s3_archive_prefix: str,
     local_llm_env: str,
+    local_llm_log_line: str = "",
     opencode_prompt: str | None = None,
 ) -> str:
     """Return the shebang + `set -euo pipefail` + defensive env scrub +
@@ -82,6 +83,13 @@ def script_header(
     `OPENCODE_PROMPT="<prompt>"`. Assisted mode does not — the opencode
     server runs interactively on port 4096 and the prompt comes from
     the Telegram user, not from the bootstrap.
+
+    `local_llm_log_line` (typically the output of `_local_llm_log_line`,
+    i.e. either `'log "Local LLM configured: ..."'` or "") is rendered
+    between the "log Repo" line and the "log Reading secrets from SSM"
+    line. When local_llm is not configured, "" produces a single blank
+    line between the two logs (matching the byte layout of the
+    pre-refactor single-file handler).
     """
     if opencode_prompt is not None:
         opencode_interactive_lines = (
@@ -116,7 +124,7 @@ SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
-
+{local_llm_log_line}
 log "Reading secrets from SSM..."
 """
 
