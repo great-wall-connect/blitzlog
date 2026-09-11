@@ -37,7 +37,10 @@ diagnostic-permissions fix.
 ## Lifecycle
 
 The bootstrap task is part of the EC2 user-data script synthesised in
-[`lambda/handler.py`](../lambda/handler.py). The relevant excerpt:
+[`lambda/scripts/autonomous.py`](../lambda/scripts/autonomous.py)
+(assisted mode lives in [`lambda/scripts/assisted.py`](../lambda/scripts/assisted.py);
+shared prologue helpers in [`lambda/scripts/_common.py`](../lambda/scripts/_common.py)).
+The relevant excerpt:
 
 ```bash
 log "Installing project toolchains via mise..."
