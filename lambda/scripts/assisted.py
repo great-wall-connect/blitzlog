@@ -26,14 +26,7 @@ script. Helpers shared with autonomous mode live in `_common.py`.
 
 import os
 
-from ..plugins import (
-    _write_idle_watchdog_plugin_script,
-    _write_periodic_autosave_plugin_script,
-    _write_session_archive_plugin_script,
-    _write_shutdown_tool_script,
-    _write_spot_watchdog_plugin_script,
-)
-from ._common import (
+from _common import (
     _configure_git_script,
     _install_opencode_script,
     _install_system_packages_script,
@@ -49,6 +42,13 @@ from ._common import (
     _tailscale_install_block,
     _write_opencode_config_script,
     script_header,
+)
+from plugins import (
+    _write_idle_watchdog_plugin_script,
+    _write_periodic_autosave_plugin_script,
+    _write_session_archive_plugin_script,
+    _write_shutdown_tool_script,
+    _write_spot_watchdog_plugin_script,
 )
 
 

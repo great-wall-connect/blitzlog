@@ -1,114 +1,34 @@
-"""Lambda webhook entrypoint + shared package-level constants.
+"""Lambda webhook entrypoint.
 
-The other modules in this package (`auth`, `bot_pool`, `ec2`,
-`plugins`, `scripts.*`) import shared constants from this module
-directly. We use absolute imports (no leading dot) so that the test
-suite — which adds `lambda/` to `sys.path` — can import every
-submodule as a top-level module.
+Receives GitHub `issues.labeled` webhooks, verifies the HMAC-SHA256
+signature, mints a short-lived GitHub App installation token, optionally
+acquires a free bot from the user's per-env-independent pool (assisted
+mode only), and launches an EC2 spot instance to run the agent.
 
-For AWS Lambda deployment, the Terraform build step copies the whole
-`lambda/` directory into `build/lambda/` and invokes the handler as
-`lambda.handler.lambda_handler`. The handler path string is a runtime
-identifier, not Python source, so `lambda` being a reserved keyword
-in Python source is not a problem for the AWS Lambda runtime — only
-for tests, which is why tests use absolute imports via `sys.path`.
-
-Module-level constants defined here:
-    BLITZLOG_ENV, SSM_PATH, BOT_POOL_SSM_PATH - env-scoped SSM namespaces
-    WHISPER_STT_SHIM_SOURCE - pre-loaded whisper-stt-shim server.py
-    logger                                    - root logger
-
-Submodule layout:
-    auth        - GitHub App JWT minting + webhook signature verification
-    bot_pool    - Telegram bot pool / per-user bot acquisition + locks
-    llm_guard   - IP-safety guard for user-configured local LLM endpoints
-    ec2         - EC2 spot instance launch + subnet/AMI/price helpers
-    plugins     - JS plugin .js loaders + heredoc-emit helpers
-    scripts     - User-data bootstrap script builders (autonomous / assisted / shared)
+`extract_event_data` normalizes both EventBridge-style payloads
+(`{"detail": {...}}`) and direct webhook payloads (`{"action": ..., ...}`)
+into a flat dict that the rest of the pipeline consumes.
 """
 
 import base64
 import json
-import logging
-import os
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-
-# ---------------------------------------------------------------------------
-# Env-scoped SSM namespaces + pre-loaded shim source
-# ---------------------------------------------------------------------------
-
-# Environment name passed in by Terraform as a Lambda env var (infra/modules/core/lambda.tf).
-# Used to namespace all per-env SSM parameters under /blitzlog/<env>/... so prod and dev
-# can coexist in the same AWS account without collision.
-# Defaults to "prod" so tests / out-of-Lambda callers continue to work without
-# the BLITZLOG_ENV env var being explicitly set.
-
-
-def _blitzlog_env() -> str:
-    return os.environ.get("BLITZLOG_ENV", "prod")
-
-
-def _ssm_root() -> str:
-    return f"/blitzlog/{_blitzlog_env()}"
-
-
-BLITZLOG_ENV = _blitzlog_env()
-SSM_PATH = _ssm_root()
-
-# Per-user data (bot pools, local LLM config) is env-independent — a user has
-# one Telegram bot pool and one local LLM endpoint, not one per env. Both prod
-# and dev Lambda instances read from this single namespace.
-BOT_POOL_SSM_PATH = "/blitzlog/users"
-
-
-def _load_shim_source() -> str:
-    """Read packages/whisper-stt-shim/server.py at cold start so the
-    bootstrap can drop it into /opt/whisper-stt/server.py without an
-    extra network hop. Tries two relative paths because the file lives
-    outside this package — one is correct in the Terraform-bundled zip
-    layout (lambda/packages/...), one in the source-tree layout used by
-    unit tests (../packages/...).
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = (
-        os.path.join(here, "packages", "whisper-stt-shim", "server.py"),
-        os.path.join(here, "..", "packages", "whisper-stt-shim", "server.py"),
-    )
-    for candidate in candidates:
-        try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                return f.read()
-        except OSError:
-            continue
-    return ""
-
-
-WHISPER_STT_SHIM_SOURCE = _load_shim_source()
-
-
-# ---------------------------------------------------------------------------
-# Lambda entrypoint
-# ---------------------------------------------------------------------------
-
-from botocore.exceptions import ClientError  # noqa: E402
-
-from auth import (  # noqa: E402
+from _env import logger
+from auth import (
     get_github_app_token,
     get_ssm_param,
     verify_github_signature,
 )
-from bot_pool import (  # noqa: E402
+from bot_pool import (
     _update_lock_instance_id,
     acquire_bot_token,
     get_local_llm_config,
     get_telegram_user_id,
 )
-from ec2 import launch_ec2_spot_instance  # noqa: E402
-from scripts.assisted import build_assisted_user_data  # noqa: E402
-from scripts.autonomous import build_autonomous_user_data  # noqa: E402
+from botocore.exceptions import ClientError
+from ec2 import launch_ec2_spot_instance
+from scripts.assisted import build_assisted_user_data
+from scripts.autonomous import build_autonomous_user_data
 
 
 def extract_event_data(payload: dict) -> dict | None:

@@ -403,6 +403,40 @@ done
 """
 
 
+def _install_toolchain_script() -> str:
+    return r"""
+log "Checking for mise.toml or .tool-versions..."
+if [ -f /workspace/repo/mise.toml ] || [ -f /workspace/repo/.tool-versions ]; then
+    log "Installing mise..."
+    curl -fsSL https://mise.run | sh
+    export PATH="/root/.local/bin:$PATH"
+
+    cd /workspace/repo
+    mise trust 2>/dev/null || true
+
+    log "Installing project toolchains via mise..."
+    export MISE_NODE_VERIFY=0
+    mise install -y
+
+    MISE_SHIMS="/root/.local/share/mise/shims"
+    if [ -d "$MISE_SHIMS" ]; then
+        echo "export PATH=$MISE_SHIMS:/root/.local/bin:\$PATH" > /etc/profile.d/mise.sh
+        export PATH="$MISE_SHIMS:$PATH"
+    fi
+
+    log "Running project bootstrap if defined..."
+    if mise tasks --name-only 2>/dev/null | grep -qx "bootstrap"; then
+        mise run bootstrap
+    fi
+
+    log "Active toolchains:"
+    mise current || true
+else
+    log "No mise.toml or .tool-versions found, skipping"
+fi
+"""
+
+
 def _write_opencode_config_script(
     autonomous: bool = True, local_provider: dict | None = None
 ) -> str:

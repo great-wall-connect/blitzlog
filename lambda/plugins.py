@@ -31,7 +31,7 @@ def _load_plugin_source(name: str) -> str:
 
 
 def _escape_for_single_quoted_heredoc(s: str) -> str:
-    """Escape a string for embedding inside a `<<'EOF'` bash heredoc.
+    r"""Escape a string for embedding inside a `<<'EOF'` bash heredoc.
 
     Bash single-quoted heredocs don't interpolate, but a literal `'`
     inside the body would terminate the quoting and start a new shell
