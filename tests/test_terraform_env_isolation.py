@@ -412,6 +412,31 @@ class TestEnvNamespacing(unittest.TestCase):
                 f"storage.tf must not contain {forbidden!r} — bucket config is owned by infra/bootstrap/",
             )
 
+    def test_ec2_agent_policy_grants_log_upload_for_its_own_env(self):
+        """Regression for issue #62 (Issue 2).
+
+        The EC2 agent role's s3:PutObject grant on run logs is restricted to
+        `${var.environment}/*` (so a prod EC2 cannot write to dev's logs and
+        vice versa). The watchdog and assisted-shutdown scripts upload to
+        `s3://<bucket>/$BLITZLOG_ENV/<repo>/issue/<n>/logs/<id>-<ts>.log`,
+        so the IAM grant MUST cover the `${var.environment}/*` prefix.
+        Without this assertion a future refactor that widens the prefix to
+        `*` (or removes it) silently breaks the env isolation invariant.
+        """
+        body = _policy_body_for_role("ec2_agent_policy", self.iam_tf)
+        self.assertIn(
+            "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*",
+            body,
+            "EC2 agent policy must grant s3:PutObject on "
+            "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/* — the "
+            "watchdog (autonomous.py:_upload_logs_and_terminate_script) and "
+            "assisted-shutdown.sh upload logs under "
+            "s3://<bucket>/$BLITZLOG_ENV/<repo>/issue/<n>/logs/<id>-<ts>.log. "
+            "Without this grant the upload is silently denied, the `|| true` "
+            "in the scripts swallows the error, and 'log Logs uploaded to S3' "
+            "lies — no logs are persisted.",
+        )
+
     def test_bootstrap_stack_exists_and_owns_buckets(self):
         """The infra/bootstrap/ stack must exist and contain the bucket resources.
 
