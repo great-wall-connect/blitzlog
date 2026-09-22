@@ -28,10 +28,6 @@ import os
 
 from _common import (
     _configure_git_script,
-    _install_opencode_script,
-    _install_system_packages_script,
-    _install_toolchain_script,
-    _install_whisper_stt_script,
     _local_llm_env_block,
     _local_llm_log_line,
     _preflight_block,
@@ -47,7 +43,6 @@ from plugins import (
     _write_periodic_autosave_plugin_script,
     _write_session_archive_plugin_script,
     _write_shutdown_tool_script,
-    _write_spot_watchdog_plugin_script,
 )
 
 
@@ -149,27 +144,16 @@ TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 {tailscale_block}{preflight_defs}{preflight_call}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
-
-log "Installing Node.js 24 via dnf..."
-dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
-alternatives --set node /usr/bin/node-24
-node --version
-npm --version
-
 log "Setting up git credentials..."
 {_configure_git_script(git_user_name, git_user_email)}
 
-log "Installing opencode..."
-{_install_opencode_script()}
-
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        --region "$REGION"
+fi
 
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
@@ -180,8 +164,7 @@ log "Writing opencode config and session archive plugin..."
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
+log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
 
 log "Writing shutdown tool..."
@@ -280,20 +263,7 @@ ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq
 RESUME_STATUS=""
 
 log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
-{_install_whisper_stt_script()}
-npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
-PRE_WARM_EXIT=$?
-if [ "$PRE_WARM_EXIT" -ne 0 ]; then
-    log "WARNING: Pre-warm failed with exit code $PRE_WARM_EXIT; will attempt bot start anyway and notify user"
-    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
-        -d chat_id="${{TELEGRAM_USER_ID}}" \\
-        -d parse_mode="Markdown" \\
-        -d text="Assisted agent cannot be started [Bot: {bot_name}]
-
-Repo: ${{REPO}}
-[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
-Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
-fi
+# (no pre-warm; the bot image in the AMI has the package pre-installed)
 
 log "Sending Telegram notification..."
 if [ "$RESUMED" = "true" ]; then

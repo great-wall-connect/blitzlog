@@ -28,10 +28,100 @@ SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
 
 
 def get_latest_al2023_ami() -> str:
+    """Fallback source for the AL2023 arm64 agent AMI when no Packer build
+    has populated /blitzlog/<env>/agent-ami-id-docker-al2023 yet.
+
+    Reads the ECS-optimized AL2023 arm64 AMI id from the AWS-managed
+    parameter store namespace; matches the source_ami_filter used by
+    infra/packer/agent-docker.pkr.hcl.
+    """
     resp = boto3.client("ssm").get_parameter(
         Name="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
     )
     return resp["Parameter"]["Value"]
+
+
+def get_latest_ubuntu_ami() -> str:
+    """Fallback source for the Ubuntu 24.04 LTS arm64 agent AMI when no
+    Packer build has populated /blitzlog/<env>/agent-ami-id-docker-ubuntu.
+
+    Reads the Canonical-published Ubuntu 24.04 LTS arm64 minimal AMI id
+    from the AWS-managed parameter store namespace; matches the
+    source_ami_filter used by infra/packer/agent-docker-ubuntu.pkr.hcl.
+    """
+    resp = boto3.client("ssm").get_parameter(
+        Name="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+    )
+    return resp["Parameter"]["Value"]
+
+
+def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
+    """Read /blitzlog/<env>/<suffix>; validate; fall back via fallback_getter().
+
+    The custom agent AMI is published by the Packer pipelines in
+    infra/packer/ to this SSM parameter. We validate the id is still
+    launchable via ec2.describe_images so a retired/deregistered AMI
+    doesn't silently turn every webhook into a 500.
+
+    Fallback chain:
+      1. SSM param missing (ParameterNotFound) → fallback_getter()
+      2. AMI is retired (InvalidAMIID.NotFound) → clear the SSM param
+         (best-effort) and fall back
+      3. Any other ClientError → re-raise so the caller surfaces it
+    """
+    from _env import _ssm_root  # late import to read env at call time
+
+    param_name = f"{_ssm_root()}/{ssm_param_suffix}"
+    ssm = boto3.client("ssm")
+    try:
+        resp = ssm.get_parameter(Name=param_name)
+        ami_id = resp["Parameter"]["Value"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
+            logger.info("No custom agent AMI at %s; falling back", param_name)
+            return fallback_getter()
+        raise
+
+    try:
+        ec2.describe_images(ImageIds=[ami_id])
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("InvalidAMIID.NotFound", "InvalidAMIID.Unavailable"):
+            logger.warning(
+                "Custom agent AMI %s is unlaunchable (%s); clearing SSM param and falling back",
+                ami_id,
+                code,
+            )
+            try:
+                ssm.delete_parameter(Name=param_name)
+            except ClientError as del_err:
+                logger.warning(
+                    "Failed to delete stale agent-ami-id param %s: %s",
+                    param_name,
+                    del_err,
+                )
+            return fallback_getter()
+        raise
+
+    logger.info("Using custom agent AMI: %s", ami_id)
+    return ami_id
+
+
+def get_agent_ami() -> str:
+    """Dispatch by AGENT_OS_FAMILY env var to the family-specific SSM param.
+
+    Defaults to 'al2023' so an unset env var preserves existing behavior.
+    Both families share the same self-heal-on-stale logic via
+    _read_custom_agent_ami; only the SSM param suffix and the fallback
+    SSM source differ. The Docker runtime (Packer-baked images) is the
+    only supported runtime — the SSM param suffixes end in -docker-*.
+    """
+    family = os.environ.get("AGENT_OS_FAMILY", "al2023")
+    fallback = get_latest_ubuntu_ami if family == "ubuntu" else get_latest_al2023_ami
+
+    if family == "ubuntu":
+        return _read_custom_agent_ami("agent-ami-id-docker-ubuntu", fallback)
+    return _read_custom_agent_ami("agent-ami-id-docker-al2023", fallback)
 
 
 def get_instance_profile_arn() -> str:

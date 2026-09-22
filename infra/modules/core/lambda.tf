@@ -53,7 +53,6 @@ resource "null_resource" "lambda_build" {
 
     # Runtime deps + the embedded whisper-stt shim
     requirements = filemd5("${path.module}/../../../lambda/requirements.txt")
-    shim_source  = filemd5("${path.module}/../../../packages/whisper-stt-shim/server.py")
   }
 
   provisioner "local-exec" {
@@ -99,6 +98,7 @@ resource "aws_lambda_function" "handler" {
       EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
       OPENCODE_MODEL            = var.opencode_model
       OPENCODE_AGENT_MAX_STEPS  = tostring(var.opencode_agent_max_steps)
+      AGENT_OS_FAMILY           = var.agent_os_family
       S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
     }
   }

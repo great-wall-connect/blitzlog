@@ -23,9 +23,6 @@ import os
 from _common import (
     _configure_git_script,
     _decode_api_errors_script,
-    _install_opencode_script,
-    _install_system_packages_script,
-    _install_toolchain_script,
     _local_llm_env_block,
     _local_llm_log_line,
     _preflight_block,
@@ -39,7 +36,6 @@ from _common import (
 from plugins import (
     _write_periodic_autosave_plugin_script,
     _write_session_archive_plugin_script,
-    _write_spot_watchdog_plugin_script,
 )
 
 
@@ -107,21 +103,16 @@ def build_autonomous_user_data(
     return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 {tailscale_block}{preflight_defs}{preflight_call}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
-
 log "Setting up git credentials..."
 {_configure_git_script(git_user_name, git_user_email)}
 
-log "Installing opencode..."
-{_install_opencode_script()}
-
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        --region "$REGION"
+fi
 
 log "Writing opencode config and session archive plugin..."
 {_write_opencode_config_script(autonomous=True, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
@@ -129,8 +120,7 @@ log "Writing opencode config and session archive plugin..."
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
+log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
 
 log "Setting up watchdog (timeout: 7200s)..."
