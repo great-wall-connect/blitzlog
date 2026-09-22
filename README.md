@@ -728,9 +728,9 @@ List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recu
 
 **Symptom:** Spot price lookup returns nothing, or every spot launch attempt fails; capacity / availability errors in Lambda logs.
 
-**Diagnose:** Blitzlog prefers spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (`SPOT_INSTANCE_TYPES` in `lambda/handler.py`). Some regions have little or no spot capacity for `t4g.*`.
+**Diagnose:** Blitzlog defaults to spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (the `spot_instance_types` Terraform variable in `infra/modules/core/variables.tf`, plumbed to the `infra/prod/` and `infra/dev/` layers). Some regions have little or no spot capacity for `t4g.*`.
 
-**Fix:** Switch `aws_region` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
+**Fix:** Switch `aws_region` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to a region with Arm spot inventory, or override `spot_instance_types` in the same tfvars file with families that have inventory in your region, then re-run `terraform apply`. The list is passed to the Lambda as the `SPOT_INSTANCE_TYPES_JSON` env var, so no Lambda rebuild is needed.
 
 ### Voice notes not transcribing
 

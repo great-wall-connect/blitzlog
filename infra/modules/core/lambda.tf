@@ -99,6 +99,9 @@ resource "aws_lambda_function" "handler" {
       EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
       OPENCODE_MODEL            = var.opencode_model
       S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
+      # JSON-encoded so a single env var can carry the ordered list; the Lambda
+      # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
+      SPOT_INSTANCE_TYPES_JSON  = jsonencode(var.spot_instance_types)
     }
   }
 

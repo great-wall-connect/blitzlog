@@ -1,11 +1,20 @@
 """EC2 spot-instance launch + subnet/AMI/price helpers."""
 
 import base64
+import importlib
+import json
 import os
 import unittest
 from unittest.mock import patch
 
-from ec2 import _build_s3_downloader_script, get_az_subnet_map, get_spot_prices
+import ec2 as ec2_module
+from ec2 import (
+    _DEFAULT_SPOT_INSTANCE_TYPES,
+    _build_s3_downloader_script,
+    _load_spot_instance_types,
+    get_az_subnet_map,
+    get_spot_prices,
+)
 
 
 class TestGetSpotPrices(unittest.TestCase):
@@ -359,6 +368,111 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertEqual(block_device[0]["Ebs"]["VolumeSize"], 20)
         self.assertEqual(block_device[0]["Ebs"]["VolumeType"], "gp3")
         self.assertTrue(block_device[0]["Ebs"]["DeleteOnTermination"])
+
+
+class TestLoadSpotInstanceTypes(unittest.TestCase):
+    """Cover the SPOT_INSTANCE_TYPES_JSON env var parser (issue #26).
+
+    Terraform is the source of truth at deploy time, but we still need to
+    behave sensibly when the env var is absent (unit tests), malformed
+    (operator typo in tfvars), or has the wrong shape (e.g. accidentally
+    passed a JSON object instead of a list).
+    """
+
+    def setUp(self):
+        # Snapshot the module-level constant so we can restore it after each
+        # test — the value is frozen at import time, but reload below is the
+        # safer way to exercise the parser.
+        self._original = ec2_module.SPOT_INSTANCE_TYPES
+        self._saved_env = os.environ.pop("SPOT_INSTANCE_TYPES_JSON", None)
+
+    def tearDown(self):
+        if self._saved_env is None:
+            os.environ.pop("SPOT_INSTANCE_TYPES_JSON", None)
+        else:
+            os.environ["SPOT_INSTANCE_TYPES_JSON"] = self._saved_env
+        ec2_module.SPOT_INSTANCE_TYPES = self._original
+
+    def _reload(self):
+        importlib.reload(ec2_module)
+
+    def test_missing_env_falls_back_to_defaults(self):
+        os.environ.pop("SPOT_INSTANCE_TYPES_JSON", None)
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_empty_string_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = ""
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_whitespace_only_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = "   "
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_valid_json_list_is_returned(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = json.dumps(
+            ["m6i.large", "m6i.xlarge", "c6i.large"]
+        )
+        self.assertEqual(
+            _load_spot_instance_types(),
+            ["m6i.large", "m6i.xlarge", "c6i.large"],
+        )
+
+    def test_malformed_json_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = "[t4g.medium, t4g.large"
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_non_list_json_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = json.dumps({"types": ["t4g.medium"]})
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_empty_list_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = "[]"
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_list_with_non_string_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = json.dumps(["t4g.medium", 42])
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_list_with_empty_string_falls_back_to_defaults(self):
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = json.dumps(["t4g.medium", ""])
+        self.assertEqual(
+            _load_spot_instance_types(), list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
+
+    def test_module_level_constant_uses_env_var(self):
+        """After import (or reload), SPOT_INSTANCE_TYPES must reflect the env var
+        so launch_ec2_spot_instance picks up the operator's override."""
+        os.environ["SPOT_INSTANCE_TYPES_JSON"] = json.dumps(["c7g.large"])
+        self._reload()
+        try:
+            self.assertEqual(ec2_module.SPOT_INSTANCE_TYPES, ["c7g.large"])
+        finally:
+            # Reload with no env var so other tests in this module see the default.
+            os.environ.pop("SPOT_INSTANCE_TYPES_JSON", None)
+            self._reload()
+
+    def test_module_level_constant_falls_back_without_env_var(self):
+        """Bare import (no SPOT_INSTANCE_TYPES_JSON) must produce the defaults,
+        matching the behaviour other modules and out-of-Lambda callers depend on."""
+        os.environ.pop("SPOT_INSTANCE_TYPES_JSON", None)
+        self._reload()
+        self.assertEqual(
+            ec2_module.SPOT_INSTANCE_TYPES, list(_DEFAULT_SPOT_INSTANCE_TYPES)
+        )
 
 
 if __name__ == "__main__":

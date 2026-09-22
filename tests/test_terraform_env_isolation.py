@@ -443,6 +443,49 @@ class TestEnvNamespacing(unittest.TestCase):
                 f"infra/bootstrap/main.tf must configure {required} on the shared buckets",
             )
 
+    def test_lambda_wires_spot_instance_types_env_var(self):
+        """Issue #26: SPOT_INSTANCE_TYPES_JSON must be passed to the Lambda so
+        operators can switch spot instance families per region without
+        rebuilding the Lambda zip. The Lambda parses this env var in
+        lambda/ec2.py::_load_spot_instance_types.
+
+        If a future refactor drops the env var (or hardcodes the list back
+        in the Lambda zip), the operator override in terraform.tfvars
+        silently stops working — this test makes that drift visible.
+        """
+        self.assertIn(
+            "SPOT_INSTANCE_TYPES_JSON",
+            self.lambda_tf,
+            "infra/modules/core/lambda.tf must pass SPOT_INSTANCE_TYPES_JSON "
+            "as a Lambda env var so operators can override spot instance "
+            "families per region (issue #26)",
+        )
+        self.assertIn(
+            "jsonencode(var.spot_instance_types)",
+            self.lambda_tf,
+            "SPOT_INSTANCE_TYPES_JSON must be jsonencode(var.spot_instance_types) "
+            "so the Lambda parses a single ordered list from one env var",
+        )
+        # The variable must be declared in variables.tf so prod/dev layers
+        # can override it in terraform.tfvars.
+        variables_tf = (
+            REPO_ROOT / "infra" / "modules" / "core" / "variables.tf"
+        ).read_text()
+        self.assertIn(
+            'variable "spot_instance_types"',
+            variables_tf,
+            "infra/modules/core/variables.tf must declare spot_instance_types",
+        )
+        # Plumbed through both env layers so terraform.tfvars overrides
+        # actually reach the core module.
+        for layer in ("prod", "dev"):
+            layer_main = (REPO_ROOT / "infra" / layer / "main.tf").read_text()
+            self.assertIn(
+                "spot_instance_types = var.spot_instance_types",
+                layer_main,
+                f"infra/{layer}/main.tf must pass spot_instance_types to the core module",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
