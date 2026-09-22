@@ -22,9 +22,9 @@ resource "terraform_data" "webhook_drift_check" {
   ) ? 1 : 0
 
   input = {
-    token = var.github_webhook_check_token
-    repos = var.github_webhook_check_repos
-    ssm   = local.ssm_github_webhook_secret_name
+    token  = var.github_webhook_check_token
+    repos  = var.github_webhook_check_repos
+    ssm    = local.ssm_github_webhook_secret_name
     region = var.aws_region
   }
 
