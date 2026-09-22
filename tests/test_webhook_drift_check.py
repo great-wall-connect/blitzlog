@@ -115,28 +115,28 @@ class TestDriftCheckVariables(unittest.TestCase):
         """infra/prod must pass both variables through to the core module —
         otherwise an operator setting them in tfvars is silently dropped."""
         main_tf = PROD_MAIN_TF.read_text()
-        self.assertIn(
-            "github_webhook_check_token  = var.github_webhook_check_token",
+        self.assertRegex(
             main_tf,
+            r"github_webhook_check_token\s*=\s*var\.github_webhook_check_token",
             "infra/prod/main.tf must forward github_webhook_check_token to the core module",
         )
-        self.assertIn(
-            "github_webhook_check_repos  = var.github_webhook_check_repos",
+        self.assertRegex(
             main_tf,
+            r"github_webhook_check_repos\s*=\s*var\.github_webhook_check_repos",
             "infra/prod/main.tf must forward github_webhook_check_repos to the core module",
         )
 
     def test_dev_wrapper_forwards_both_variables(self):
         """infra/dev must pass both variables through to the core module."""
         main_tf = DEV_MAIN_TF.read_text()
-        self.assertIn(
-            "github_webhook_check_token  = var.github_webhook_check_token",
+        self.assertRegex(
             main_tf,
+            r"github_webhook_check_token\s*=\s*var\.github_webhook_check_token",
             "infra/dev/main.tf must forward github_webhook_check_token to the core module",
         )
-        self.assertIn(
-            "github_webhook_check_repos  = var.github_webhook_check_repos",
+        self.assertRegex(
             main_tf,
+            r"github_webhook_check_repos\s*=\s*var\.github_webhook_check_repos",
             "infra/dev/main.tf must forward github_webhook_check_repos to the core module",
         )
 
