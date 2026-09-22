@@ -50,6 +50,7 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # stt_model_source_url      = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 # stt_models_bucket_name    = "gwc-blitzlog-stt-models"          # SAME bucket as prod by default; override only if you provisioned a separate one via infra/bootstrap/
 # aws_profile               = "terraform"                        # Pin the AWS profile used by the upload provisioner
+# spot_instance_types       = ["t4g.medium", "t4g.large", "t4g.xlarge"]  # Override for regions without Arm spot inventory; passed to the Lambda as SPOT_INSTANCE_TYPES_JSON. Order = preference order.
 
 # Per-user Telegram bot pools (assisted mode)
 # ------------------------------------------------------------------------------

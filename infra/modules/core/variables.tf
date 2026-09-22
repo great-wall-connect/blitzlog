@@ -131,3 +131,19 @@ variable "aws_profile" {
   type        = string
   default     = ""
 }
+
+variable "spot_instance_types" {
+  description = "EC2 spot instance types to try, in preference order (cheapest first when prices differ). Passed to the Lambda as the SPOT_INSTANCE_TYPES_JSON env var so operators can switch families per region without rebuilding the Lambda zip. Defaults to Arm (t4g.*) types; override in terraform.tfvars for regions without Arm spot inventory."
+  type        = list(string)
+  default     = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+
+  validation {
+    condition     = length(var.spot_instance_types) > 0
+    error_message = "spot_instance_types must contain at least one instance type."
+  }
+
+  validation {
+    condition     = alltrue([for t in var.spot_instance_types : can(regex("^[a-z][0-9][a-z]?\\.[a-z0-9]+$", t))])
+    error_message = "Each entry in spot_instance_types must be a valid EC2 instance type name (e.g. t4g.medium, m6i.large)."
+  }
+}

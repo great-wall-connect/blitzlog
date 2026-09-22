@@ -42,4 +42,6 @@ module "core" {
   stt_models_bucket_name = var.stt_models_bucket_name
 
   aws_profile = var.aws_profile
+
+  spot_instance_types = var.spot_instance_types
 }

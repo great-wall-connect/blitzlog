@@ -12,6 +12,7 @@ boot via IMDSv2-fetched credentials.
 """
 
 import base64
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -24,7 +25,47 @@ from botocore.exceptions import ClientError
 ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
 s3 = boto3.client("s3")
 
-SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+# Fallback used when SPOT_INSTANCE_TYPES_JSON is unset or unparseable. Kept
+# in sync with the default of `var.spot_instance_types` in infra/modules/core
+# /variables.tf — Terraform is the source of truth at deploy time; this only
+# protects unit tests and out-of-Lambda callers from a hard failure.
+_DEFAULT_SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+
+
+def _load_spot_instance_types() -> list[str]:
+    """Parse the SPOT_INSTANCE_TYPES_JSON env var set by Terraform.
+
+    Returns the parsed list on success, or falls back to
+    _DEFAULT_SPOT_INSTANCE_TYPES when the env var is missing, empty,
+    unparseable, or not a non-empty list of strings. Logging at warning
+    on parse failure so a misconfigured Terraform apply is visible in
+    CloudWatch without aborting the request.
+    """
+    raw = os.environ.get("SPOT_INSTANCE_TYPES_JSON", "").strip()
+    if not raw:
+        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            "SPOT_INSTANCE_TYPES_JSON is not valid JSON (%s); falling back to defaults",
+            e,
+        )
+        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or not all(isinstance(item, str) and item for item in parsed)
+    ):
+        logger.warning(
+            "SPOT_INSTANCE_TYPES_JSON must be a non-empty JSON list of strings; "
+            "falling back to defaults",
+        )
+        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
+    return parsed
+
+
+SPOT_INSTANCE_TYPES: list[str] = _load_spot_instance_types()
 
 
 def get_latest_al2023_ami() -> str:

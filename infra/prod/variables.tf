@@ -116,3 +116,9 @@ variable "aws_profile" {
   type        = string
   default     = ""
 }
+
+variable "spot_instance_types" {
+  description = "EC2 spot instance types the Lambda will try, in preference order. Forwarded to the Lambda as the SPOT_INSTANCE_TYPES_JSON env var so operators can switch families per region without rebuilding the Lambda zip. Override in terraform.tfvars for regions without Arm (t4g.*) spot inventory; defaults match the core module."
+  type        = list(string)
+  default     = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+}
