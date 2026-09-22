@@ -128,11 +128,14 @@ def build_assisted_user_data(
     preflight_defs = _preflight_definitions("assisted") if local_llm else ""
     preflight_call = _preflight_block(local_llm, "assisted")
 
+    opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
+
     header = script_header(
         mode="assisted",
         repo=repo,
         issue_number=issue_number,
         opencode_model=opencode_model,
+        opencode_max_steps=opencode_max_steps,
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
         local_llm_env=local_llm_env,
@@ -172,7 +175,7 @@ log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
 
 log "Writing opencode config and session archive plugin..."
-{_write_opencode_config_script(autonomous=False, local_provider=local_llm)}
+{_write_opencode_config_script(autonomous=False, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
 {_write_session_archive_plugin_script()}
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"

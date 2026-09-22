@@ -790,6 +790,7 @@ aws sqs receive-message \
 - Lambda logs: CloudWatch log group `/aws/lambda/blitzlog-prod-handler` (or `/aws/lambda/blitzlog-dev-handler` for dev) — 14-day retention.
 - Agent run logs (per-issue): uploaded to `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/logs/...` (env prefix keeps prod and dev logs separated).
 - OpenCode session exports (audit trail): `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/sessions/...`.
+- **Per-session step ceiling**: the opencode CLI stops a session after `opencode_agent_max_steps` agentic iterations and forces a summarization (the "Maximum steps reached" message in `/var/log/backend-bootstrap.log`). Default 500 — sized well above a typical multi-file task but a safety net against runaway loops. Tune per env via the Terraform variable (see `infra/{dev,prod}/terraform.tfvars.example`).
 
 ---
 

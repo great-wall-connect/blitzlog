@@ -63,6 +63,7 @@ def script_header(
     repo: str,
     issue_number: int,
     opencode_model: str,
+    opencode_max_steps: int,
     s3_bucket: str,
     s3_archive_prefix: str,
     local_llm_env: str,
@@ -89,6 +90,10 @@ def script_header(
     line. When local_llm is not configured, "" produces a single blank
     line between the two logs (matching the byte layout of the
     pre-refactor single-file handler).
+
+    `opencode_max_steps` is exported as `OPENCODE_AGENT_MAX_STEPS="N"` and
+    is later substituted into the rendered `opencode.json` heredoc by
+    `_write_opencode_config_script` / `_switch_to_cloud_fallback_script`.
     """
     if opencode_prompt is not None:
         opencode_interactive_lines = (
@@ -115,10 +120,11 @@ log() {{
 ISSUE_NUMBER={issue_number}
 REPO="{repo}"
 {opencode_interactive_lines}OPENCODE_MODEL="{opencode_model}"
+OPENCODE_AGENT_MAX_STEPS="{opencode_max_steps}"
 S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
-{local_llm_env}export ISSUE_NUMBER OPENCODE_MODEL S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
+{local_llm_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
 
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
@@ -447,7 +453,9 @@ fi
 
 
 def _write_opencode_config_script(
-    autonomous: bool = True, local_provider: dict | None = None
+    autonomous: bool = True,
+    local_provider: dict | None = None,
+    opencode_max_steps: int = 500,
 ) -> str:
     """Render the bootstrap snippet that writes /root/.config/opencode/opencode.json.
 
@@ -508,7 +516,7 @@ def _write_opencode_config_script(
     return (
         """
 mkdir -p /root/.config/opencode
-cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
+cat > /root/.config/opencode/opencode.json <<OPENCODECFG
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "{env:OPENCODE_MODEL}",
@@ -520,7 +528,7 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
   },
   "agent": {
     "build": {
-      "steps": 75"""
+      "steps": ${OPENCODE_AGENT_MAX_STEPS}"""
         + agent_prompt
         + """
     }
@@ -741,7 +749,7 @@ switch_to_cloud_fallback() {{
   export OPENCODE_API_KEY
 
   mkdir -p /root/.config/opencode
-  cat > /root/.config/opencode/opencode.json <<'OPENCODECFG'
+  cat > /root/.config/opencode/opencode.json <<OPENCODECFG
 {{
   "$schema": "https://opencode.ai/config.json",
   "model": "${{OPENCODE_MODEL}}",
@@ -751,7 +759,7 @@ switch_to_cloud_fallback() {{
   }},
   "agent": {{
     "build": {{
-      "steps": 75,
+      "steps": ${{OPENCODE_AGENT_MAX_STEPS}},
       "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."
     }}
   }},

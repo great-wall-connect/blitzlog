@@ -66,6 +66,12 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "opencode_agent_max_steps" {
+  description = "Maximum number of agentic iterations the opencode CLI is allowed per session. When the per-session counter reaches this cap, opencode injects MAX_STEPS_PROMPT and forces a summarization — the agent stops mid-task. Default 500 is sized well above a typical multi-file change (variable + script + wrapper + tests + docs + verify + commit + PR) but still acts as a safety net against runaway loops. Set higher for particularly large tasks; lower for cost-sensitive deployments."
+  type        = number
+  default     = 500
+}
+
 variable "opencode_api_key" {
   description = "API key for the OpenCode inference provider"
   type        = string
