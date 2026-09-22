@@ -13,6 +13,7 @@ from _common import (
     _preflight_local_llm_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
+    script_header,
 )
 from _env import BLITZLOG_ENV
 
@@ -537,6 +538,110 @@ class TestLocalLlmOpencodeConfig(unittest.TestCase):
             }
         )
         self.assertIn('"qwen/with\\"quote": {}', script)
+
+
+class TestOpencodeMaxSteps(unittest.TestCase):
+    """Regression guard for issue #65: the opencode bootstrap used to
+    hard-code `"steps": 75` in the rendered opencode.json heredoc, which
+    forced a per-session "Maximum steps reached" summarization long
+    before the autonomous agent could complete a non-trivial multi-file
+    task. The cap is now driven by the `OPENCODE_AGENT_MAX_STEPS` env
+    var, populated from the Terraform `opencode_agent_max_steps`
+    variable via the Lambda's environment."""
+
+    def test_bootstrap_substitutes_env_var_into_steps_field(self):
+        """The rendered heredoc must reference ${OPENCODE_AGENT_MAX_STEPS}
+        (read at EC2 bootstrap time), not a baked-in number."""
+        script = _write_opencode_config_script(opencode_max_steps=500)
+        self.assertIn('"steps": ${OPENCODE_AGENT_MAX_STEPS}', script)
+
+    def test_bootstrap_substitutes_env_var_with_custom_cap(self):
+        """A non-default cap must still produce the same env-var token —
+        we never bake the value into the bootstrap."""
+        script = _write_opencode_config_script(opencode_max_steps=250)
+        self.assertIn('"steps": ${OPENCODE_AGENT_MAX_STEPS}', script)
+        self.assertNotIn('"steps": 250', script)
+        self.assertNotIn('"steps": 500', script)
+
+    def test_no_hardcoded_75_in_bootstrap(self):
+        """Regression: the previous literal `"steps": 75` capped the agent
+        below the iteration count of a typical multi-file change. Hard
+        fail if any future change re-introduces a baked-in number."""
+        self.assertNotIn('"steps": 75', _write_opencode_config_script())
+        self.assertNotIn(
+            '"steps": 75', _write_opencode_config_script(opencode_max_steps=500)
+        )
+        self.assertNotIn(
+            '"steps": 75', _write_opencode_config_script(opencode_max_steps=250)
+        )
+
+    def test_default_cap_is_500(self):
+        """When no cap is passed (e.g. legacy call sites / tests that don't
+        care about the value), the function falls back to the same
+        default as the Terraform variable — 500."""
+        script = _write_opencode_config_script()
+        self.assertIn('"steps": ${OPENCODE_AGENT_MAX_STEPS}', script)
+
+    def test_local_provider_branch_also_substitutes_env_var(self):
+        """The `local_llm` code path emits the same agent block. Make
+        sure the override applies to it too."""
+        script = _write_opencode_config_script(
+            local_provider={
+                "endpoint": "http://100.64.0.5:11434",
+                "model": "qwen2.5-coder:32b",
+                "api_key": "",
+            },
+            opencode_max_steps=500,
+        )
+        self.assertIn('"steps": ${OPENCODE_AGENT_MAX_STEPS}', script)
+
+    def test_cloud_fallback_heredoc_substitutes_env_var(self):
+        """`_switch_to_cloud_fallback_script` re-renders opencode.json
+        on a switch from local-LLM to cloud. The env var is exported by
+        the outer bootstrap (see script_header), so it must also be
+        expanded inside this nested heredoc."""
+        from _common import _switch_to_cloud_fallback_script
+
+        script = _switch_to_cloud_fallback_script()
+        self.assertIn('"steps": ${OPENCODE_AGENT_MAX_STEPS}', script)
+        self.assertNotIn('"steps": 75', script)
+
+    def test_script_header_exports_opencode_agent_max_steps(self):
+        """`script_header` must emit `OPENCODE_AGENT_MAX_STEPS="N"` and
+        include the new var in the export list — both modes consume
+        the same env var."""
+        header = script_header(
+            mode="autonomous",
+            repo="owner/repo",
+            issue_number=42,
+            opencode_model="minimax-coding-plan/MiniMax-M3",
+            opencode_max_steps=500,
+            s3_bucket="gwc-blitzlog-agent-logs",
+            s3_archive_prefix="owner/repo/issue/42",
+            local_llm_env="",
+            opencode_prompt="Work on issue #42.",
+        )
+        self.assertIn('OPENCODE_AGENT_MAX_STEPS="500"', header)
+        # The export line must list the new var so downstream commands
+        # (and bash functions like switch_to_cloud_fallback) see it.
+        self.assertRegex(
+            header,
+            r"export\s+ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS ",
+        )
+
+    def test_script_header_custom_cap_value_round_trips(self):
+        header = script_header(
+            mode="assisted",
+            repo="owner/repo",
+            issue_number=42,
+            opencode_model="minimax-coding-plan/MiniMax-M3",
+            opencode_max_steps=250,
+            s3_bucket="gwc-blitzlog-agent-logs",
+            s3_archive_prefix="owner/repo/issue/42",
+            local_llm_env="",
+            opencode_prompt=None,
+        )
+        self.assertIn('OPENCODE_AGENT_MAX_STEPS="250"', header)
 
 
 if __name__ == "__main__":

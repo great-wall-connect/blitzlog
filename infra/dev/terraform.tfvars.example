@@ -42,6 +42,7 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # ssh_allowed_cidrs         = ["1.2.3.4/32"]                     # CIDRs allowed SSH ingress to dev instances
 # alert_email               = "dev-team@example.com"             # CloudWatch alarm email
 # opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the dev OpenCode CLI
+# opencode_agent_max_steps  = 500                                # Max opencode iterations per session before forcing summarization. Raise for large multi-file tasks; lower for cost-sensitive runs.
 # stt_api_url               = "http://127.0.0.1:7878/v1"
 # stt_api_key               = "any-non-empty-string"
 # stt_model                 = "base.en"                          # Whisper model name; model already in the shared bucket if you ran `upload_stt_model = true` against prod or dev
