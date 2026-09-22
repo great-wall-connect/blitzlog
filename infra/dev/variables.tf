@@ -122,3 +122,16 @@ variable "aws_profile" {
   type        = string
   default     = ""
 }
+
+variable "github_webhook_check_token" {
+  description = "GitHub token used by the post-apply drift check to verify the configured webhook secret matches what GitHub has. Empty (default) disables the check. See infra/modules/core/variables.tf for token scope requirements."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "github_webhook_check_repos" {
+  description = "List of <owner>/<repo> pairs whose webhooks the drift check should verify. Empty list (default) disables the check. Must be set together with github_webhook_check_token."
+  type        = list(string)
+  default     = []
+}
