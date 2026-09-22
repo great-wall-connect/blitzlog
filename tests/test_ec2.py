@@ -251,6 +251,67 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "S3_LOGS_BUCKET": "test-bucket",
         },
     )
+    def test_instance_has_environment_tag(
+        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
+    ):
+        """Regression for issue #62 (Issue 1).
+
+        ec2_agent_policy in infra/modules/core/iam.tf gates
+        ec2:TerminateInstances on `ec2:ResourceTag/Environment =
+        var.environment`. If the EC2 instance is launched without that tag,
+        AWS silently denies the watchdog's `aws ec2 terminate-instances`
+        call (the IAM policy is correct — the runtime tag emission was
+        missing), the `|| true` in the user-data swallows the error, and
+        the spot instance waits the full 2-hour EC2 lifecycle timeout.
+        """
+        mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+        mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+
+        from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
+
+        launch_ec2_spot_instance(
+            "org/repo",
+            42,
+            "ghp_testtoken",
+            "autonomous",
+            build_autonomous_user_data,
+            sender_login="octocat",
+            sender_id="12345",
+        )
+
+        tags = mock_ec2.run_instances.call_args[1]["TagSpecifications"][0]["Tags"]
+        env_tag = next((t for t in tags if t["Key"] == "Environment"), None)
+        self.assertIsNotNone(
+            env_tag,
+            "EC2 instance must carry an `Environment` tag — ec2:TerminateInstances "
+            "is gated on `ec2:ResourceTag/Environment = var.environment` and AWS "
+            "silently denies the call when the tag is absent",
+        )
+        self.assertEqual(
+            env_tag["Value"],
+            "prod",
+            "EC2 Environment tag must match BLITZLOG_ENV (default 'prod' in tests) "
+            "so the IAM policy's var.environment condition matches at TerminateInstances time",
+        )
+
+    @patch(
+        "ec2.get_instance_profile_arn",
+        return_value="arn:aws:iam::123:instance-profile/test",
+    )
+    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.s3")
+    @patch("ec2.boto3")
+    @patch("ec2.ec2")
+    @patch.dict(
+        os.environ,
+        {
+            "EC2_SECURITY_GROUP_ID": "sg-123",
+            "EC2_SUBNET_ID": "subnet-123",
+            "VPC_ID": "vpc-123",
+            "S3_LOGS_BUCKET": "test-bucket",
+        },
+    )
     def test_uploads_userdata_to_s3(
         self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
     ):

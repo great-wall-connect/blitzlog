@@ -1,5 +1,14 @@
 [tools]
 python = "3.12"
+terraform = "1.9.8"
+
+[tasks.bootstrap]
+description = "Install Python test/lint dependencies and expose `python` as a global shim"
+run = """
+set -euo pipefail
+python -m pip install -q -r requirements.txt
+ln -sf "$(command -v python3)" /usr/local/bin/python
+"""
 
 [tasks.test]
 description = "Run Python unit tests"

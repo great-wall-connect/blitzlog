@@ -321,6 +321,7 @@ OPENCODE_SERVER_USERNAME=$OPENCODE_SERVER_USERNAME
 OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_USER_ID=$TELEGRAM_USER_ID
+BLITZLOG_ENV=$BLITZLOG_ENV
 ENVEOF
 cat > /usr/local/bin/assisted-shutdown.sh << 'SHUTDOWN_SCRIPT'
 #!/bin/bash
@@ -359,7 +360,7 @@ log "Shutdown reason: $SHUTDOWN_REASON"
 {_session_export_to_s3_script()}
 
 # Upload logs to S3
-LOG_KEY="{s3_archive_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
+LOG_KEY="${{BLITZLOG_ENV}}/{s3_archive_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
 aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --region "$REGION" || true
 log "Logs uploaded to S3"
 

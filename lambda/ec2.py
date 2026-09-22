@@ -148,6 +148,7 @@ def launch_ec2_spot_instance(
                 "ResourceType": "instance",
                 "Tags": [
                     {"Key": "Purpose", "Value": "autonomous-agent"},
+                    {"Key": "Environment", "Value": BLITZLOG_ENV},
                     {"Key": "Mode", "Value": mode},
                     {"Key": "Issue", "Value": str(issue_number)},
                     {

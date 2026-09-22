@@ -9,7 +9,8 @@ Tests in this file:
     - `TestLambdaHandlerBotPool`: webhook → launch flow (entrypoint)
     - `TestLambdaBuildConfiguration`: infra/modules/core/lambda.tf content
     - `TestLambdaRuntimeImportPath`: AWS Lambda sys.path layout regression
-    - `TestMiseToml`: top-level mise.toml Node/Terraform pinning regressions
+    - `TestMiseToml`: top-level mise.toml Node-pinning regression (terraform pinning
+       and the `[tasks.bootstrap]` task live in test_mise_bootstrap.py)
 """
 
 import importlib
@@ -324,12 +325,6 @@ class TestMiseToml(unittest.TestCase):
         # refuse to start with "requires Node.js 22.14+, 23.6+, or 24+".
         content = self._read_mise_toml()
         self.assertNotRegex(content, r"^\s*node\s*=", msg=content)
-
-    def test_mise_toml_does_not_pin_terraform(self):
-        # The bootstrap doesn't invoke the Terraform CLI; pinning it just
-        # adds a needless install on the EC2 instance.
-        content = self._read_mise_toml()
-        self.assertNotRegex(content, r"^\s*terraform\s*=", msg=content)
 
 
 if __name__ == "__main__":
