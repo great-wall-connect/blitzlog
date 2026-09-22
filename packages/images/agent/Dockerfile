@@ -5,13 +5,13 @@
 # container has NO AWS credentials; the host does all SSM/S3 work and passes
 # results via env vars and mounted files.
 #
-# Multi-stage: build stage compiles Python deps + Node deps + downloads the
-# whisper.cpp prebuilt, then the runtime stage copies only the artifacts.
+# Multi-stage: build stage compiles Python deps + Node deps + builds the
+# whisper.cpp CLI from source, then the runtime stage copies only the
+# artifacts.
 
 ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=24
 ARG WHISPER_CPP_VERSION=v1.7.6
-ARG WHISPER_CPP_RELEASE_URL=https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_CPP_VERSION}/whisper-bin-aarch64-linux-gnu.zip
 ARG OPENCODE_AI_VERSION=latest
 ARG OPENCODE_TELEGRAM_BOT_VERSION=latest
 
@@ -22,20 +22,31 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
-# Build deps for whisper.cpp (none on debian-slim — we use the prebuilt).
-# We do need wget for the whisper.cpp zip download (curl is in the runtime stage).
+# Build deps for whisper.cpp: cmake + a C/C++ toolchain (whisper.cpp no
+# longer publishes prebuilt `whisper-bin-*-linux-gnu.zip` archives on its
+# GitHub releases — they only ship xcframework / Docker images now). We
+# build from source instead, which adds ~3 min to the Docker build but
+# avoids the 404s we hit trying to fetch the prebuilt zip.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        wget ca-certificates unzip \
+        build-essential cmake curl git ca-certificates unzip libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Download whisper.cpp prebuilt binary (aarch64-linux-gnu)
+# Build whisper.cpp from source for the arm64 / linux-gnu target.
 WORKDIR /tmp
-RUN wget -q "${WHISPER_CPP_RELEASE_URL}" -O whisper-prebuilt.zip \
-    && unzip -q whisper-prebuilt.zip -d whisper-prebuilt \
-    && find whisper-prebuilt -name whisper-cli -type f -exec cp {} /usr/local/bin/whisper-cli \; \
+RUN WHISPER_CPP_SRC="https://github.com/ggml-org/whisper.cpp/archive/refs/tags/${WHISPER_CPP_VERSION}.tar.gz" \
+    && curl --retry 3 --retry-delay 5 --retry-connrefused -fsSL -o whisper.cpp.tar.gz "$WHISPER_CPP_SRC" \
+    && mkdir -p whisper.cpp \
+    && tar -xzf whisper.cpp.tar.gz --strip-components=1 -C whisper.cpp \
+    && cmake -S whisper.cpp -B whisper.cpp/build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DWHISPER_BUILD_TESTS=OFF \
+              -DWHISPER_BUILD_EXAMPLES=OFF \
+    && cmake --build whisper.cpp/build --config Release -j"$(nproc)" \
+    && cp whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli \
     && chmod +x /usr/local/bin/whisper-cli \
-    && rm -rf whisper-prebuilt whisper-prebuilt.zip \
+    && rm -rf whisper.cpp whisper.cpp.tar.gz \
     && /usr/local/bin/whisper-cli --help >/dev/null
 
 # Python deps (pywhispercpp for the shim's in-memory inference; python-multipart
