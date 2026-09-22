@@ -43,4 +43,7 @@ module "core" {
   stt_models_bucket_name = var.stt_models_bucket_name
 
   aws_profile = var.aws_profile
+
+  github_webhook_check_token  = var.github_webhook_check_token
+  github_webhook_check_repos  = var.github_webhook_check_repos
 }
