@@ -681,6 +681,8 @@ aws ssm get-parameter \
 
 In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present: True` followed by the invalid-signature path.
 
+**Pre-flight (opt-in):** To catch this drift *before* a 401 lands in production, set `github_webhook_check_token` and `github_webhook_check_repos` in `infra/prod/terraform.tfvars` (see the commented block at the bottom of that file). On every subsequent `terraform apply`, the core module POSTs a signed probe to every active webhook on each listed repo; if the configured SSM secret no longer matches what GitHub has, the apply prints a `WARNING:` line naming the webhook and the exact `gh api` invocation to fix it. The check is non-fatal — drift does not block the apply, it just shouts at you in the terminal.
+
 **Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/prod/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/prod/`, and pasting the new secret into GitHub.
 
 ### Label added but no instance launched
@@ -791,6 +793,7 @@ aws sqs receive-message \
 - Agent run logs (per-issue): uploaded to `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/logs/...` (env prefix keeps prod and dev logs separated).
 - OpenCode session exports (audit trail): `s3://<agent_logs_bucket>/<env>/<repo>/issue/<N>/sessions/...`.
 - **Per-session step ceiling**: the opencode CLI stops a session after `opencode_agent_max_steps` agentic iterations and forces a summarization (the "Maximum steps reached" message in `/var/log/backend-bootstrap.log`). Default 500 — sized well above a typical multi-file task but a safety net against runaway loops. Tune per env via the Terraform variable (see `infra/{dev,prod}/terraform.tfvars.example`).
+- **Webhook secret drift warnings (opt-in)**: when `github_webhook_check_token` and `github_webhook_check_repos` are set, every `terraform apply` prints a `WARNING: webhook #N on <repo> rejected the probe with HTTP 401` line for each webhook whose stored secret has drifted from SSM. The warning is local to the apply output (not emitted to CloudWatch) — capture it in CI logs if you want to alert on drift programmatically.
 
 ---
 

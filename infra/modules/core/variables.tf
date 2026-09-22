@@ -137,3 +137,16 @@ variable "aws_profile" {
   type        = string
   default     = ""
 }
+
+variable "github_webhook_check_token" {
+  description = "GitHub token used by the post-apply drift check to verify the configured webhook secret matches what GitHub has stored on the repo's webhook. Accepts a fine-grained PAT with repository webhooks: read, or a classic PAT with repo scope. Empty (default) disables the check entirely — the drift check is opt-in to avoid leaving a token footprint for operators who don't need it."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "github_webhook_check_repos" {
+  description = "List of <owner>/<repo> pairs whose webhooks the drift check should verify. The check lists each repo's active webhooks via the GitHub API and POSTs a signed probe to each one; a non-2xx response means the configured SSM secret no longer matches what GitHub has. Empty list (default) disables the check — set github_webhook_check_token AND this variable together to enable."
+  type        = list(string)
+  default     = []
+}

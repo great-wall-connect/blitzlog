@@ -52,6 +52,17 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # stt_models_bucket_name    = "gwc-blitzlog-stt-models"          # SAME bucket as prod by default; override only if you provisioned a separate one via infra/bootstrap/
 # aws_profile               = "terraform"                        # Pin the AWS profile used by the upload provisioner
 
+# Webhook secret drift check (opt-in, post-apply)
+# ------------------------------------------------------------------------------
+# After `terraform apply`, the drift check POSTs a signed probe to every active
+# webhook on each repo listed below. If the configured secret doesn't match the
+# secret stored on GitHub, the apply emits a WARNING naming the webhook so you
+# can fix it before any 401s start hitting the Lambda. Both variables must be set
+# together — leaving either empty disables the check entirely.
+#   github_webhook_check_token  = "ghp_..."                       # fine-grained PAT with repository webhooks: read on each repo below
+#   github_webhook_check_repos  = ["acme/sandbox"]                # repos whose webhooks should be verified
+#
+
 # Per-user Telegram bot pools (assisted mode)
 # ------------------------------------------------------------------------------
 # Each user provisions their own pool by running the user-pool sub-module of
