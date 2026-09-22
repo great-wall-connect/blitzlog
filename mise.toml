@@ -1,5 +1,14 @@
 [tools]
 python = "3.12"
+terraform = "1.9.8"
+
+[tasks.bootstrap]
+description = "Install runtime + dev Python dependencies and symlink /usr/local/bin/python"
+run = """
+python3 -m pip install --quiet -r requirements.txt -r requirements-dev.in && \
+python3 -m pip install --quiet -r requirements-dev.txt && \
+ln -sf "$(command -v python3)" /usr/local/bin/python
+"""
 
 [tasks.test]
 description = "Run Python unit tests"

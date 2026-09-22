@@ -732,6 +732,27 @@ List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recu
 
 **Fix:** Switch `aws_region` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to a region with Arm spot inventory, or adjust `SPOT_INSTANCE_TYPES` in `lambda/handler.py` if you need different instance families, then redeploy.
 
+### `ec2:TerminateInstances` `UnauthorizedOperation` from the agent watchdog
+
+**Symptom:** CloudWatch logs show
+```
+An error occurred (UnauthorizedOperation) when calling the TerminateInstances operation: ...
+no identity-based policy allows the ec2:TerminateInstances action
+```
+The EC2 instance then sits idle for the full 2-hour EC2 lifecycle before self-terminating. (The `aws ec2 terminate-instances` line in the watchdog wraps the call in `|| true`, so the failure is silent in the bootstrap log.)
+
+**Diagnose:** The EC2 agent role's `ec2:TerminateInstances` grant in `infra/modules/core/iam.tf` is gated on the instance carrying the matching `ec2:ResourceTag/Environment` tag. If the launch path missed that tag, the IAM condition never matches and the call is denied. Inspect the instance's tags from the EC2 console or `aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].Tags'`.
+
+**Fix:** Confirm `lambda/ec2.py:launch_ec2_spot_instance` emits an `Environment` tag whose value equals `BLITZLOG_ENV` (set by `infra/modules/core/lambda.tf`). Re-deploy the Lambda zip (`mise run build`) and terminate any orphaned instances manually with an admin role.
+
+### Log upload silently failing (`AccessDenied` on `s3:PutObject`)
+
+**Symptom:** No run logs appear at `s3://<agent_logs_bucket>/<repo>/issue/<n>/logs/...` after an agent run, even though the bootstrap log contains a `[…] Logs uploaded to S3` line. (The `aws s3 cp …` line wraps the upload in `|| true`, so the failure is silent.)
+
+**Diagnose:** The EC2 agent role grants `s3:PutObject` only on `${var.environment}/*` keys (`infra/modules/core/iam.tf:191-200`). The bootstrap user-data (`lambda/scripts/autonomous.py:_upload_logs_and_terminate_script`, `lambda/scripts/assisted.py:362`) must therefore prefix log-upload keys with `$BLITZLOG_ENV/`. If the prefix is missing, the destination falls outside the IAM grant and the call is denied. Check the watchdog's `aws s3 cp` invocation in `/var/log/backend-bootstrap.log` and look for `LOG_KEY="$BLITZLOG_ENV/…` — not `LOG_KEY="<repo>/…`.
+
+**Fix:** Re-deploy the Lambda zip with the env-prefixed `LOG_KEY` (`mise run build`) and `terraform apply` so the IAM is current. Already-orphaned log lines are not recoverable.
+
 ### Voice notes not transcribing
 
 **Symptom:** Voice notes are silently ignored by the bot, or the bot replies "couldn't transcribe audio, please type your message."
