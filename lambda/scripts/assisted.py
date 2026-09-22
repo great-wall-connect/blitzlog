@@ -362,7 +362,7 @@ log "Shutdown reason: $SHUTDOWN_REASON"
 {_session_export_to_s3_script()}
 
 # Upload logs to S3
-LOG_KEY="{s3_archive_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
+LOG_KEY="$BLITZLOG_ENV/{s3_archive_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
 aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --region "$REGION" || true
 log "Logs uploaded to S3"
 

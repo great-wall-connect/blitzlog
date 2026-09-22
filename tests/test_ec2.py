@@ -360,6 +360,61 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertEqual(block_device[0]["Ebs"]["VolumeType"], "gp3")
         self.assertTrue(block_device[0]["Ebs"]["DeleteOnTermination"])
 
+    @patch(
+        "ec2.get_instance_profile_arn",
+        return_value="arn:aws:iam::123:instance-profile/test",
+    )
+    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.s3")
+    @patch("ec2.boto3")
+    @patch("ec2.ec2")
+    @patch.dict(
+        os.environ,
+        {
+            "EC2_SECURITY_GROUP_ID": "sg-123",
+            "EC2_SUBNET_ID": "subnet-123",
+            "VPC_ID": "vpc-123",
+            "S3_LOGS_BUCKET": "test-bucket",
+            "BLITZLOG_ENV": "prod",
+        },
+    )
+    def test_instance_has_environment_tag(
+        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
+    ):
+        """EC2 instances must carry an `Environment` tag matching the
+        Lambda's BLITZLOG_ENV. The ec2_agent_role's `ec2:TerminateInstances`
+        IAM condition (infra/modules/core/iam.tf:178-190) keys on
+        `ec2:ResourceTag/Environment = var.environment`; without this tag
+        the watchdog's `aws ec2 terminate-instances` fails with
+        `UnauthorizedOperation` and the instance waits the full 2-hour EC2
+        lifecycle timeout.
+        """
+        mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+        mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+
+        from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
+
+        launch_ec2_spot_instance(
+            "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data
+        )
+
+        tags = mock_ec2.run_instances.call_args[1]["TagSpecifications"][0]["Tags"]
+        env_tag = next((t for t in tags if t["Key"] == "Environment"), None)
+        self.assertIsNotNone(
+            env_tag,
+            "EC2 instance must be tagged with `Environment` so the EC2 role's "
+            "ec2:TerminateInstances IAM condition can match. Without it the "
+            "watchdog's terminate call is denied and the instance waits 2h.",
+        )
+        self.assertEqual(
+            env_tag["Value"],
+            "prod",
+            "Environment tag value must equal BLITZLOG_ENV (set in the Lambda "
+            "env by infra/modules/core/lambda.tf:95) so prod and dev resources "
+            "are isolated in IAM conditions.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

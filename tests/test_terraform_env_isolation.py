@@ -443,6 +443,55 @@ class TestEnvNamespacing(unittest.TestCase):
                 f"infra/bootstrap/main.tf must configure {required} on the shared buckets",
             )
 
+    def test_log_upload_path_is_env_prefixed(self):
+        """The bootstrap user-data's `aws s3 cp` log-upload path must include
+        `$BLITZLOG_ENV/` as the first key segment.
+
+        Without the env prefix, the upload lands at
+        `s3://<bucket>/<repo>/issue/<n>/logs/...`, which is outside the EC2
+        agent role's `s3:PutObject` grant at iam.tf:191-200 (scoped to
+        `${var.environment}/*`). The `|| true` on the `aws s3 cp` line then
+        swallows the resulting `AccessDenied` and the bash log line
+        `Logs uploaded to S3` lies — no log is persisted.
+        """
+        autonomous = (REPO_ROOT / "lambda" / "scripts" / "autonomous.py").read_text()
+        assisted = (REPO_ROOT / "lambda" / "scripts" / "assisted.py").read_text()
+        for label, src in (("autonomous", autonomous), ("assisted", assisted)):
+            self.assertRegex(
+                src,
+                r'LOG_KEY="\$BLITZLOG_ENV/',
+                f"{label}/log-upload must prefix LOG_KEY with $BLITZLOG_ENV/ "
+                "so the destination falls inside the EC2 agent role's "
+                "s3:PutObject grant (iam.tf:191-200, scoped to ${var.environment}/*).",
+            )
+
+    def test_ec2_agent_policy_grants_put_object_for_its_own_env_prefix(self):
+        """The EC2 agent role must allow `s3:PutObject` on `${var.environment}/*`.
+
+        This is the IAM half of the log-upload contract: the upload code
+        (autonomous.py + assisted.py) prefixes keys with `$BLITZLOG_ENV/`,
+        and this grant must match that prefix. If a future refactor narrows
+        the resource pattern to e.g. a hard-coded `prod/*` literal or adds a
+        `StringEquals` condition that excludes log-upload keys, the upload
+        silently fails (swallowed by `|| true`).
+        """
+        body = _policy_body_for_role("ec2_agent_policy", self.iam_tf)
+        self.assertIn(
+            "s3:PutObject",
+            body,
+            "ec2_agent_policy must include s3:PutObject — without it, the "
+            "watchdog's `aws s3 cp /var/log/backend-bootstrap.log ...` upload "
+            "fails with AccessDenied and is silently swallowed by `|| true`.",
+        )
+        self.assertIn(
+            "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*",
+            body,
+            "ec2_agent_policy must grant on "
+            "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/* — the "
+            "log-upload code (autonomous.py + assisted.py) prefixes keys with "
+            "$BLITZLOG_ENV/, so this is the path the runtime actually uses.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
