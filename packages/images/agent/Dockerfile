@@ -18,6 +18,13 @@ ARG OPENCODE_TELEGRAM_BOT_VERSION=latest
 # ===== Stage 1: build (discarded) =====
 FROM python:${PYTHON_VERSION}-slim AS build
 
+# Re-declare ARGs inside the build stage so they can be referenced by
+# subsequent RUN instructions. ARGs declared before FROM are only
+# available in the FROM line itself — not in stage-level instructions.
+ARG WHISPER_CPP_VERSION
+ARG OPENCODE_AI_VERSION
+ARG OPENCODE_TELEGRAM_BOT_VERSION
+
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
@@ -42,8 +49,7 @@ RUN WHISPER_CPP_SRC="https://github.com/ggml-org/whisper.cpp/archive/refs/tags/$
               -DCMAKE_BUILD_TYPE=Release \
               -DBUILD_SHARED_LIBS=OFF \
               -DWHISPER_BUILD_TESTS=OFF \
-              -DWHISPER_BUILD_EXAMPLES=OFF \
-    && cmake --build whisper.cpp/build --config Release -j"$(nproc)" \
+    && cmake --build whisper.cpp/build --config Release -j"$(nproc)" --target whisper-cli \
     && cp whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli \
     && chmod +x /usr/local/bin/whisper-cli \
     && rm -rf whisper.cpp whisper.cpp.tar.gz \
@@ -57,10 +63,22 @@ RUN pip install --no-cache-dir \
     python-multipart \
     imageio-ffmpeg
 
-# Node deps (opencode CLI + telegram-bot package)
+# Node deps (opencode CLI + telegram-bot package).
+# We install opencode and the bot into a temp prefix, then merge them
+# into /usr/local. The bot's transitive `better-sqlite3` dep ships
+# prebuilt native binaries via prebuild-install for arm64-linux; if
+# prebuild-install finds a matching binary, no native compilation is
+# attempted and the Python gyp toolchain isn't needed. We install
+# python3 + make + g++ as a defensive fallback for the build-from-
+# source path; the runtime container doesn't need them.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
+    && apt-get install -y --no-install-recommends \
+        nodejs npm python3 python3-dev make g++ \
     && rm -rf /var/lib/apt/lists/* \
+    && npm config set fund false \
+    && npm config set audit false \
+    && export npm_config_target_arch=arm64 \
+    && export npm_config_target_platform=linux \
     && npm install -g \
         opencode-ai@${OPENCODE_AI_VERSION} \
         @grinev/opencode-telegram-bot@${OPENCODE_TELEGRAM_BOT_VERSION} \
