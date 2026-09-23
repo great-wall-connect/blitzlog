@@ -10,7 +10,10 @@
 # artifacts.
 
 ARG PYTHON_VERSION=3.12
-ARG NODE_VERSION=24
+# NODE_VERSION must be a full semver (e.g. 24.4.1) — nodejs.org/dist only
+# serves versioned dirs like v24.4.1/, not the floating v24/. Update
+# both the Dockerfile and any workflow callers when bumping Node.
+ARG NODE_VERSION=24.4.1
 ARG WHISPER_CPP_VERSION=v1.7.6
 ARG OPENCODE_AI_VERSION=latest
 ARG OPENCODE_TELEGRAM_BOT_VERSION=latest
