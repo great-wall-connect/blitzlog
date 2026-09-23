@@ -101,8 +101,17 @@ RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
 
 # Install opencode + bot globally. `npm install` will pick up the
 # better-sqlite3 prebuilt for our platform (arm64-linux + node ${NODE_VERSION}).
+#
+# `npm config set prefix /usr/local` is critical: the tarball-installed
+# npm (at /usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm) computes
+# its global prefix from its own install location by default, which puts
+# new binaries in /usr/local/node-${NODE_VERSION}-linux-arm64/bin/. That
+# directory isn't on the default $PATH, so `opencode --version` below
+# would fail with `opencode: not found`. Pinning the prefix to /usr/local
+# makes `npm install -g` write binaries to /usr/local/bin/.
 RUN npm config set fund false \
     && npm config set audit false \
+    && npm config set prefix /usr/local \
     && npm install -g \
         opencode-ai@${OPENCODE_AI_VERSION} \
         @grinev/opencode-telegram-bot@${OPENCODE_TELEGRAM_BOT_VERSION} \
@@ -139,7 +148,8 @@ RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
     && rm "/tmp/${NODE_TARBALL}" \
     && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/node" /usr/local/bin/node \
     && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm" /usr/local/bin/npm \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx \
+    && npm config set prefix /usr/local
 
 # Copy built artifacts from stage 1
 COPY --from=build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
