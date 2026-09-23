@@ -156,7 +156,7 @@ COPY --from=build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=build /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
-COPY --from=build /usr/local/bin/opencode-telegram-bot /usr/local/bin/opencode-telegram-bot
+COPY --from=build /usr/local/bin/opencode-telegram /usr/local/bin/opencode-telegram
 
 # Shim + entrypoint
 COPY server.py /opt/whisper-stt/server.py
