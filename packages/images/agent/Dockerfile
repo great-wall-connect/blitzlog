@@ -21,6 +21,7 @@ FROM python:${PYTHON_VERSION}-slim AS build
 # Re-declare ARGs inside the build stage so they can be referenced by
 # subsequent RUN instructions. ARGs declared before FROM are only
 # available in the FROM line itself — not in stage-level instructions.
+ARG NODE_VERSION
 ARG WHISPER_CPP_VERSION
 ARG OPENCODE_AI_VERSION
 ARG OPENCODE_TELEGRAM_BOT_VERSION
@@ -64,48 +65,82 @@ RUN pip install --no-cache-dir \
     imageio-ffmpeg
 
 # Node deps (opencode CLI + telegram-bot package).
-# We install opencode and the bot into a temp prefix, then merge them
-# into /usr/local. The bot's transitive `better-sqlite3` dep ships
-# prebuilt native binaries via prebuild-install for arm64-linux; if
-# prebuild-install finds a matching binary, no native compilation is
-# attempted and the Python gyp toolchain isn't needed. We install
-# python3 + make + g++ as a defensive fallback for the build-from-
-# source path; the runtime container doesn't need them.
+#
+# Debian trixie ships nodejs 20.x, but `@grinev/opencode-telegram-bot`
+# and `better-sqlite3` require node >=22. Install node from the official
+# tarball (matching the original bootstrap's approach) at build time
+# so the bot's engines check passes.
+#
+# `better-sqlite3` ships N-API prebuilt binaries at
+# `prebuilds/linux-arm64.node` inside its npm tarball — prebuild-install
+# fetches them at install time without invoking node-gyp, so no Python
+# gyp toolchain is needed for the happy path.
+#
+# We still install python3 + make + g++ as a defensive fallback for the
+# build-from-source path (extremely unlikely on arm64 with our node version).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        nodejs npm python3 python3-dev make g++ \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm config set fund false \
+        npm python3 python3-dev make g++ xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node ${NODE_VERSION} from the official tarball
+RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
+    && curl --retry 3 --retry-delay 5 --retry-connrefused -fsSL \
+        -o "/tmp/${NODE_TARBALL}" \
+        "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+    && tar -xJ -C /usr/local -f "/tmp/${NODE_TARBALL}" \
+    && rm "/tmp/${NODE_TARBALL}" \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/node" /usr/local/bin/node \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm" /usr/local/bin/npm \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx \
+    && node --version \
+    && npm --version
+
+# Install opencode + bot globally. `npm install` will pick up the
+# better-sqlite3 prebuilt for our platform (arm64-linux + node ${NODE_VERSION}).
+RUN npm config set fund false \
     && npm config set audit false \
-    && export npm_config_target_arch=arm64 \
-    && export npm_config_target_platform=linux \
     && npm install -g \
         opencode-ai@${OPENCODE_AI_VERSION} \
         @grinev/opencode-telegram-bot@${OPENCODE_TELEGRAM_BOT_VERSION} \
     && npm cache clean --force \
-    && node --version \
-    && npm --version \
     && opencode --version
 
 # ===== Stage 2: runtime =====
 FROM python:${PYTHON_VERSION}-slim
+
+ARG NODE_VERSION
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH=/usr/local/bin:/usr/bin:/bin
 
 # Runtime deps only. libgomp1 is required by whisper.cpp's matrix multiplications.
+# nodejs is re-installed via tarball in this stage too (symlinked via
+# /usr/local/bin/node), so we don't pull Debian's older nodejs here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git ca-certificates curl wget jq libgomp1 openssl \
+        git ca-certificates curl wget jq libgomp1 openssl xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
+
+# Re-install Node ${NODE_VERSION} in the runtime layer (the COPY below
+# only takes the symlinks and /usr/local/lib/node_modules; the rest of
+# the node tree is built from tarball here so the runtime image is
+# self-contained).
+RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
+    && curl --retry 3 --retry-delay 5 --retry-connrefused -fsSL \
+        -o "/tmp/${NODE_TARBALL}" \
+        "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+    && tar -xJ -C /usr/local -f "/tmp/${NODE_TARBALL}" \
+    && rm "/tmp/${NODE_TARBALL}" \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/node" /usr/local/bin/node \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm" /usr/local/bin/npm \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx
 
 # Copy built artifacts from stage 1
 COPY --from=build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=build /usr/local/bin /usr/local/bin
-COPY --from=build /usr/lib /usr/lib
 COPY --from=build /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=build /usr/local/bin/opencode-telegram-bot /usr/local/bin/opencode-telegram-bot
