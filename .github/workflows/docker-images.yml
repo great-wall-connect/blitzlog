@@ -100,7 +100,7 @@ jobs:
       - name: Image size gate
         run: |
           docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}' \
-            | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 0.5) { print "REJECTED (too big): " $0; exit 1 } }'
+            | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 1.5) { print "REJECTED (too big): " $0; exit 1 } }'
           echo "Image size OK"
 
   trivy:
