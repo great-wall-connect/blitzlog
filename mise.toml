@@ -41,3 +41,54 @@ run = "terraform plan"
 description = "Terraform apply"
 dir = "infra"
 run = "terraform apply"
+
+[tasks.image-build]
+description = "Build the blitzlog-agent image locally (arm64 via buildx, using the default builder so the cache is reused)"
+run = """
+docker buildx build \
+  --builder default \
+  --platform linux/arm64 \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+"""
+
+[tasks.image-test]
+description = "Build the image and run the Tier-1 smoke test (no env vars, no network)"
+run = """
+docker buildx build \
+  --builder default \
+  --platform linux/arm64 \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm --platform linux/arm64 --entrypoint="" \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  blitzlog-agent:local \
+  sh /smoke-test.sh
+"""
+
+[tasks.image-run-test]
+description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.test"
+run = """
+docker buildx build \
+  --builder default \
+  --platform linux/arm64 \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm --platform linux/arm64 --entrypoint="" \
+  --env-file ./packages/images/agent/.env.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo "==> entrypoint (may fail without real GitHub/LLM access — that is expected)" && timeout 30 /usr/local/bin/entrypoint.sh || echo "(exited $? — expected without network/auth)"'
+"""
+
+[tasks.preflight]
+description = "Run all pre-PR checks: lint, test, image-test"
+run = """
+mise run lint
+mise run test
+mise run image-test
+"""
