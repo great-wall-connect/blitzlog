@@ -120,3 +120,11 @@ mise run lint
 mise run test
 mise run image-test
 """
+
+[tasks.fetch-whisper]
+description = "Download ggml-tiny.en.bin to /tmp/whisper-models (needed by image-telegram-live / image-telegram; the Packer image bakes the model into the AMI for production)"
+run = """
+mkdir -p /tmp/whisper-models
+curl -L --fail -o /tmp/whisper-models/ggml-tiny.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+"""
