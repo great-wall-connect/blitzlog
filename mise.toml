@@ -43,11 +43,10 @@ dir = "infra"
 run = "terraform apply"
 
 [tasks.image-build]
-description = "Build the blitzlog-agent image locally (arm64 via buildx, using the default builder so the cache is reused)"
+description = "Build the blitzlog-agent image locally (buildx auto-detects the host arch; CI builds arm64 via ubuntu-26.04-arm)"
 run = """
 docker buildx build \
   --builder default \
-  --platform linux/arm64 \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
@@ -58,7 +57,6 @@ description = "Build the image and run the Tier-1 smoke test (no env vars, no ne
 run = """
 docker buildx build \
   --builder default \
-  --platform linux/arm64 \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
@@ -73,7 +71,6 @@ description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.test"
 run = """
 docker buildx build \
   --builder default \
-  --platform linux/arm64 \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
@@ -90,7 +87,6 @@ description = "Build the image and run the Tier-2 Telegram bot boot smoke (60s t
 run = """
 docker buildx build \
   --builder default \
-  --platform linux/arm64 \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
@@ -107,7 +103,6 @@ description = "Build the image and start the agent for real Telegram interaction
 run = """
 docker buildx build \
   --builder default \
-  --platform linux/arm64 \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
