@@ -85,6 +85,40 @@ docker run --rm --platform linux/arm64 --entrypoint="" \
   sh -c 'sh /smoke-test.sh && echo "==> entrypoint (may fail without real GitHub/LLM access — that is expected)" && timeout 30 /usr/local/bin/entrypoint.sh || echo "(exited $? — expected without network/auth)"'
 """
 
+[tasks.image-telegram]
+description = "Build the image and run the Tier-2 Telegram bot boot smoke (60s timeout — boots the bot, doesn't talk to Telegram)"
+run = """
+docker buildx build \
+  --builder default \
+  --platform linux/arm64 \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm --platform linux/arm64 --entrypoint="" \
+  --env-file ./packages/images/agent/.env.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo \"==> entrypoint (bot boot may take up to 60s)\" && timeout 60 /usr/local/bin/entrypoint.sh || echo \"(exited $? — expected without LLM auth)\"'
+"""
+
+[tasks.image-telegram-live]
+description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop)"
+run = """
+docker buildx build \
+  --builder default \
+  --platform linux/arm64 \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm -it \
+  --platform linux/arm64 \
+  --env-file ./packages/images/agent/.env.test \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  --name blitzlog-tg-test \
+  blitzlog-agent:local
+"""
+
 [tasks.preflight]
 description = "Run all pre-PR checks: lint, test, image-test"
 run = """
