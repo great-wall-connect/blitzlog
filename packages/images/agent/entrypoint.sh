@@ -113,33 +113,57 @@ else
     # --- Assisted: long-running opencode serve + telegram-bot ---
     log "Assisted mode: starting opencode serve"
 
+    # Generate server-side auth credentials. The bot uses these to
+    # authenticate against opencode serve's /v1/* endpoints. Note the
+    # ordering: export FIRST, then run opencode serve (which inherits
+    # the env). The env vars do NOT need to be inlined on the opencode
+    # serve command line because the shell already has them exported.
     OPENCODE_SERVER_USERNAME=agent
     OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-$(openssl rand -hex 16)}"
     export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
 
-    opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/opencode-serve.log 2>&1 &
+    # Model config (required by the bot to avoid the setup wizard).
+    # Default to the same model the lambda uses if not set.
+    export OPENCODE_MODEL_PROVIDER="${OPENCODE_MODEL_PROVIDER:-opencode}"
+    export OPENCODE_MODEL_ID="${OPENCODE_MODEL_ID:-big-pickle}"
+    # If the user has the older combined OPENCODE_MODEL, parse it
+    if [ -n "${OPENCODE_MODEL:-}" ] && [ -z "${OPENCODE_MODEL_ID:-}" ]; then
+        OPENCODE_MODEL_PROVIDER="${OPENCODE_MODEL%%/*}"
+        OPENCODE_MODEL_ID="${OPENCODE_MODEL#*/}"
+        export OPENCODE_MODEL_PROVIDER OPENCODE_MODEL_ID
+    fi
+
+    # Start opencode serve via setsid so it gets its own process group
+    # (independent of the entrypoint shell's controlling terminal).
+    # This is the systemd-style daemonization the test was missing.
+    setsid opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/opencode-serve.log 2>&1 &
     SERVE_PID=$!
+    # Wait only for the port to be listening, not for /health (which
+    # can take 30s+ if opencode is doing a real LLM-API connectivity
+    # check). 5s is plenty for the Go binary to bind to port 4096.
     i=0
-    while [ "$i" -lt 30 ]; do
-        if wget -q -O - http://127.0.0.1:4096/health >/dev/null 2>&1 \
-            || curl -fs http://127.0.0.1:4096/health >/dev/null 2>&1; then
+    while [ "$i" -lt 5 ]; do
+        if wget -q -O - http://127.0.0.1:4096/ >/dev/null 2>&1 \
+            || curl -fs http://127.0.0.1:4096/ >/dev/null 2>&1; then
             break
         fi
         i=$((i + 1))
         sleep 1
     done
-    log "opencode serve ready (after ${i}s)"
+    log "opencode serve port ready (after ${i}s, /health may still be initialising)"
 
-    # --- Telegram bot ---
+    # --- Telegram bot (setsid + uses the env vars set above) ---
     log "Starting telegram bot"
-    # The bot is fetched by npx from the registry at first start. The host
-    # passes all env vars (TELEGRAM_BOT_TOKEN, etc.). See packages/opencode-
-    # telegram-bot upstream for the full env list.
-    OPENCODE_API_URL=http://127.0.0.1:4096 \
-    OPENCODE_SERVER_USERNAME=agent \
-    OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
-    STT_API_URL="http://127.0.0.1:7878/v1" \
-    npx -y @grinev/opencode-telegram-bot@latest start >>/var/log/telegram-bot.log 2>&1 &
+    setsid env \
+        OPENCODE_API_URL=http://127.0.0.1:4096 \
+        STT_API_URL="http://127.0.0.1:7878/v1" \
+        TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" \
+        TELEGRAM_ALLOWED_USER_ID="${TELEGRAM_USER_ID}" \
+        OPENCODE_SERVER_USERNAME=agent \
+        OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
+        OPENCODE_MODEL_PROVIDER="$OPENCODE_MODEL_PROVIDER" \
+        OPENCODE_MODEL_ID="$OPENCODE_MODEL_ID" \
+        npx -y @grinev/opencode-telegram-bot@latest start >>/var/log/telegram-bot.log 2>&1 &
     BOT_PID=$!
 
     log "All services running; idle until SIGTERM"

@@ -74,7 +74,7 @@ docker buildx build \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
-docker run --rm --platform linux/arm64 --entrypoint="" \
+docker run --rm --entrypoint="" \
   --env-file ./packages/images/agent/.env.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
@@ -90,7 +90,7 @@ docker buildx build \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
-docker run --rm --platform linux/arm64 --entrypoint="" \
+docker run --rm --entrypoint="" \
   --env-file ./packages/images/agent/.env.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
@@ -106,8 +106,7 @@ docker buildx build \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
-docker run --rm -it \
-  --platform linux/arm64 \
+docker run --rm -i \
   --env-file ./packages/images/agent/.env.test \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   --name blitzlog-tg-test \

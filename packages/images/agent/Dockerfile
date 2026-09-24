@@ -21,6 +21,12 @@ ARG OPENCODE_TELEGRAM_BOT_VERSION=latest
 # ===== Stage 1: build (discarded) =====
 FROM python:${PYTHON_VERSION}-slim AS build
 
+# Use the Hong Kong Debian mirror (~50MB/s, 50-100x faster than the
+# default deb.debian.org from this region). The default `debian.sources`
+# is moved aside so apt only uses sources.list.hk.
+COPY sources.list.hk /etc/apt/sources.list.d/99-hk.list
+RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.disabled
+
 # Re-declare ARGs inside the build stage so they can be referenced by
 # subsequent RUN instructions. ARGs declared before FROM are only
 # available in the FROM line itself — not in stage-level instructions.
@@ -86,29 +92,40 @@ RUN apt-get update \
         npm python3 python3-dev make g++ xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node ${NODE_VERSION} from the official tarball
-RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
+# Install Node ${NODE_VERSION} from the official tarball. We detect the
+# host arch at build time via uname (no Dockerfile ARG indirection,
+# which doesn't work for ARGs without defaults). The default
+# buildx target arch (used for arm64 CI) gets re-mapped to arm64;
+# amd64 hosts get x64. This keeps the Dockerfile portable across
+# architectures without needing --platform= on the buildx command.
+RUN NODE_ARCH=$(uname -m) \
+    && case "$NODE_ARCH" in \
+         x86_64) NODE_ARCH=x64 ;; \
+         aarch64) NODE_ARCH=arm64 ;; \
+       esac \
+    && NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     && curl --retry 3 --retry-delay 5 --retry-connrefused -fsSL \
         -o "/tmp/${NODE_TARBALL}" \
         "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
     && tar -xJ -C /usr/local -f "/tmp/${NODE_TARBALL}" \
     && rm "/tmp/${NODE_TARBALL}" \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/node" /usr/local/bin/node \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm" /usr/local/bin/npm \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node" /usr/local/bin/node \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/npm" /usr/local/bin/npm \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/npx" /usr/local/bin/npx \
     && node --version \
     && npm --version
 
 # Install opencode + bot globally. `npm install` will pick up the
-# better-sqlite3 prebuilt for our platform (arm64-linux + node ${NODE_VERSION}).
+# better-sqlite3 prebuilt for our platform (${NODE_ARCH}-linux + node ${NODE_VERSION}).
 #
 # `npm config set prefix /usr/local` is critical: the tarball-installed
-# npm (at /usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm) computes
-# its global prefix from its own install location by default, which puts
-# new binaries in /usr/local/node-${NODE_VERSION}-linux-arm64/bin/. That
-# directory isn't on the default $PATH, so `opencode --version` below
-# would fail with `opencode: not found`. Pinning the prefix to /usr/local
-# makes `npm install -g` write binaries to /usr/local/bin/.
+# npm (at /usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/npm)
+# computes its global prefix from its own install location by default,
+# which puts new binaries in
+# /usr/local/node-${NODE_VERSION}-linux-${NODE_ARCH}/bin/. That directory
+# isn't on the default $PATH, so `opencode --version` below would fail
+# with `opencode: not found`. Pinning the prefix to /usr/local makes
+# `npm install -g` write binaries to /usr/local/bin/.
 RUN npm config set fund false \
     && npm config set audit false \
     && npm config set prefix /usr/local \
@@ -120,6 +137,10 @@ RUN npm config set fund false \
 
 # ===== Stage 2: runtime =====
 FROM python:${PYTHON_VERSION}-slim
+
+# Use the Hong Kong Debian mirror — see the build stage above.
+COPY sources.list.hk /etc/apt/sources.list.d/99-hk.list
+RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.disabled
 
 ARG NODE_VERSION
 
@@ -139,16 +160,22 @@ RUN apt-get update \
 # Re-install Node ${NODE_VERSION} in the runtime layer (the COPY below
 # only takes the symlinks and /usr/local/lib/node_modules; the rest of
 # the node tree is built from tarball here so the runtime image is
-# self-contained).
-RUN NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz" \
+# self-contained). Same arch detection as the build stage.
+ARG NODE_VERSION
+RUN NODE_ARCH=$(uname -m) \
+    && case "$NODE_ARCH" in \
+         x86_64) NODE_ARCH=x64 ;; \
+         aarch64) NODE_ARCH=arm64 ;; \
+       esac \
+    && NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     && curl --retry 3 --retry-delay 5 --retry-connrefused -fsSL \
         -o "/tmp/${NODE_TARBALL}" \
         "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
     && tar -xJ -C /usr/local -f "/tmp/${NODE_TARBALL}" \
     && rm "/tmp/${NODE_TARBALL}" \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/node" /usr/local/bin/node \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npm" /usr/local/bin/npm \
-    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-arm64/bin/npx" /usr/local/bin/npx \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node" /usr/local/bin/node \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/npm" /usr/local/bin/npm \
+    && ln -sf "/usr/local/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/npx" /usr/local/bin/npx \
     && npm config set prefix /usr/local
 
 # Copy built artifacts from stage 1
