@@ -79,7 +79,7 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
         env_section = user_data[env_start : env_start + 500]
         self.assertIn("minimax-coding-plan", env_section)
         # The slash-form model id is what the container receives.
-        self.assertIn('OPENCODE_MODEL=minimax-coding-plan/MiniMax-M3', env_section)
+        self.assertIn("OPENCODE_MODEL=minimax-coding-plan/MiniMax-M3", env_section)
 
     @patch.dict(
         os.environ,
@@ -101,8 +101,6 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
                     "owner/repo", 1, bot_name="b", bot_token="t", telegram_user_id="9"
                 ),
             )
-
-
 
 
 if __name__ == "__main__":

@@ -96,24 +96,8 @@ def build_assisted_user_data(
     base_opencode_model = os.environ.get(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
-    if local_llm:
-        opencode_model = local_llm["model"]
-        opencode_model_provider = "local"
-        opencode_model_id = local_llm["model"]
-    else:
-        opencode_model = base_opencode_model
-        opencode_model_provider = "minimax-coding-plan"
-        _, opencode_model_id = (
-            base_opencode_model.split("/", 1)
-            if "/" in base_opencode_model
-            else ("", base_opencode_model)
-        )
+    opencode_model = local_llm["model"] if local_llm else base_opencode_model
     s3_archive_prefix = f"{repo}/issue/{issue_number}"
-
-    git_user_name = sender_login or ""
-    git_user_email = (
-        f"{sender_id}+{sender_login}@users.noreply.github.com" if sender_login else ""
-    )
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)

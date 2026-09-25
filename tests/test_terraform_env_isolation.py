@@ -454,10 +454,12 @@ class TestEnvNamespacing(unittest.TestCase):
         swallows the resulting `AccessDenied` and the bash log line
         `Logs uploaded to S3` lies — no log is persisted.
         """
-        watchdog = (REPO_ROOT / "infra" / "packer" / "scripts-docker-ubuntu" / "watchdog.sh").read_text()
+        watchdog = (
+            REPO_ROOT / "infra" / "packer" / "scripts-docker-ubuntu" / "watchdog.sh"
+        ).read_text()
         self.assertRegex(
             watchdog,
-            r's3://\$\{S3_LOGS_BUCKET\}/\$\{BLITZLOG_ENV\}/logs/',
+            r"s3://\$\{S3_LOGS_BUCKET\}/\$\{BLITZLOG_ENV\}/logs/",
             "watchdog.sh log-upload must prefix the S3 key with $BLITZLOG_ENV/ "
             "so the destination falls inside the EC2 agent role's "
             "s3:PutObject grant (iam.tf:191-200, scoped to ${var.environment}/*).",
