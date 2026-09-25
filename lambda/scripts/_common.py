@@ -5,7 +5,6 @@ function + env exports) and a long tail of mostly-identical install/config
 helpers. Centralizing the prologue eliminates a class of "fix the bug in
 autonomous but forget to mirror it in assisted" drift, and centralizing
 the shared builders (`_read_secrets_from_ssm_script`,
-`_install_system_packages_script`, `_configure_git_script`,
 `_install_opencode_script`, `_install_tailscale_script`,
 `_install_whisper_stt_script`, `_install_toolchain_script`,
 `_write_opencode_config_script`, `_session_export_to_s3_script`,
@@ -196,36 +195,6 @@ if [ -f "$LOG_FILE" ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?reques
     log "ACTIONABLE: LLM provider returned a rate-limit / quota error (HTTP 429)."
     log "ACTIONABLE: Wait for the quota window to reset or upgrade the plan, then re-trigger."
 fi
-"""
-
-
-def _install_system_packages_script() -> str:
-    return """
-dnf install -y spal-release
-dnf install -y git ripgrep amazon-ssm-agent
-dnf install -y 'dnf-command(config-manager)'
-dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
-dnf install -y gh
-systemctl start amazon-ssm-agent || true
-hash -r
-"""
-
-
-def _configure_git_script(git_user_name: str = "", git_user_email: str = "") -> str:
-    identity = ""
-    if git_user_name:
-        identity = f"""
-git config --global user.name "{git_user_name}"
-git config --global user.email "{git_user_email}"
-"""
-    return f"""
-mkdir -p /root/.git-credentials.d
-echo "https://x-access-token:${{_CC_GITHUB_TOKEN}}@github.com" > /root/.git-credentials.d/github
-chmod 600 /root/.git-credentials.d/github
-git config --global credential.helper 'store --file /root/.git-credentials.d/github'
-{identity}
-echo "${{_CC_GITHUB_TOKEN}}" | gh auth login --with-token
-export GITHUB_TOKEN="${{_CC_GITHUB_TOKEN}}"
 """
 
 
@@ -517,8 +486,8 @@ def _write_opencode_config_script(
         """
 mkdir -p /root/.config/opencode
 cat > /root/.config/opencode/opencode.json <<OPENCODECFG
-{
-  "$schema": "https://opencode.ai/config.json",
+{{
+  "{'$'}schema": "https://opencode.ai/config.json",
   "model": "{env:OPENCODE_MODEL}",
   "default_agent": "build",
   "compaction": {
@@ -751,7 +720,7 @@ switch_to_cloud_fallback() {{
   mkdir -p /root/.config/opencode
   cat > /root/.config/opencode/opencode.json <<OPENCODECFG
 {{
-  "$schema": "https://opencode.ai/config.json",
+  "{'$'}schema": "https://opencode.ai/config.json",
   "model": "${{OPENCODE_MODEL}}",
   "default_agent": "build",
   "compaction": {{

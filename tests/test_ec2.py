@@ -277,8 +277,10 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertTrue(call_args[1]["Key"].startswith("user-data/assisted-issue-42-"))
         body = call_args[1]["Body"].decode()
         self.assertNotIn("ghp_testtoken", body)
-        self.assertIn('user.name "octocat"', body)
-        self.assertIn('user.email "12345+octocat@users.noreply.github.com"', body)
+        # Git identity is configured inside the agent container via
+        # entrypoint.sh (consuming the GITHUB_TOKEN env var). The host
+        # bootstrap only writes the env-var plumbing.
+        self.assertIn("GITHUB_TOKEN=", body)
 
     @patch(
         "ec2.get_instance_profile_arn",
@@ -418,29 +420,12 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
 
 
 class TestGetAgentAmi(unittest.TestCase):
-    """Tests for get_agent_ami() and the family dispatcher (issue #55)."""
+    """Tests for get_agent_ami() (Ubuntu 26.04 only — issue #55)."""
 
     @patch("ec2.ec2")
     @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
-    def test_al2023_reads_docker_al2023_param(self, mock_boto3, mock_ec2):
-        from ec2 import get_agent_ami
-
-        mock_ssm = MagicMock()
-        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-custom"}}
-        mock_boto3.client.return_value = mock_ssm
-        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-custom"}]}
-
-        result = get_agent_ami()
-        self.assertEqual(result, "ami-custom")
-        mock_ssm.get_parameter.assert_called_once_with(
-            Name="/blitzlog/prod/agent-ami-id-docker-al2023"
-        )
-
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "ubuntu", "BLITZLOG_ENV": "dev"})
-    def test_ubuntu_reads_docker_ubuntu_param(self, mock_boto3, mock_ec2):
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "dev"})
+    def test_reads_docker_ubuntu_param(self, mock_boto3, mock_ec2):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
@@ -456,34 +441,15 @@ class TestGetAgentAmi(unittest.TestCase):
 
     @patch("ec2.ec2")
     @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
-    def test_falls_back_to_upstream_al2023_when_param_missing(
-        self, mock_boto3, mock_ec2
-    ):
-        from ec2 import get_agent_ami
-
-        mock_ssm = MagicMock()
-        # First call (primary): SSM param missing. Second call
-        # (fallback via get_latest_al2023_ami): returns upstream AMI.
-        mock_ssm.get_parameter.side_effect = [
-            ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
-            {"Parameter": {"Value": "ami-upstream-al2023"}},
-        ]
-        mock_boto3.client.return_value = mock_ssm
-
-        result = get_agent_ami()
-        self.assertEqual(result, "ami-upstream-al2023")
-        self.assertEqual(mock_ssm.get_parameter.call_count, 2)
-
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "ubuntu", "BLITZLOG_ENV": "prod"})
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
     def test_falls_back_to_upstream_ubuntu_when_param_missing(
         self, mock_boto3, mock_ec2
     ):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
+        # First call (primary): SSM param missing. Second call
+        # (fallback via get_latest_ubuntu_ami): returns upstream AMI.
         mock_ssm.get_parameter.side_effect = [
             ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
             {"Parameter": {"Value": "ami-upstream-ubuntu"}},
@@ -492,17 +458,18 @@ class TestGetAgentAmi(unittest.TestCase):
 
         result = get_agent_ami()
         self.assertEqual(result, "ami-upstream-ubuntu")
+        self.assertEqual(mock_ssm.get_parameter.call_count, 2)
 
     @patch("ec2.ec2")
     @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
     def test_clears_param_and_falls_back_when_ami_retired(self, mock_boto3, mock_ec2):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
         mock_ssm.get_parameter.side_effect = [
             {"Parameter": {"Value": "ami-stale"}},
-            {"Parameter": {"Value": "ami-upstream-al2023"}},
+            {"Parameter": {"Value": "ami-upstream-ubuntu"}},
         ]
         mock_boto3.client.return_value = mock_ssm
         mock_ec2.describe_images.side_effect = ClientError(
@@ -510,14 +477,14 @@ class TestGetAgentAmi(unittest.TestCase):
         )
 
         result = get_agent_ami()
-        self.assertEqual(result, "ami-upstream-al2023")
+        self.assertEqual(result, "ami-upstream-ubuntu")
         mock_ssm.delete_parameter.assert_called_once_with(
-            Name="/blitzlog/prod/agent-ami-id-docker-al2023"
+            Name="/blitzlog/prod/agent-ami-id-docker-ubuntu"
         )
 
     @patch("ec2.ec2")
     @patch("ec2.boto3")
-    @patch.dict(os.environ, {"AGENT_OS_FAMILY": "al2023", "BLITZLOG_ENV": "prod"})
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
     def test_propagates_unexpected_client_error(self, mock_boto3, mock_ec2):
         from ec2 import get_agent_ami
 

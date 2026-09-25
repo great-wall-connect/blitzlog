@@ -1,28 +1,30 @@
 #!/bin/bash
-# scripts-docker-ubuntu/02-systemd.sh — Ubuntu 24.04 systemd setup.
+# scripts-docker-ubuntu/02-systemd.sh — Ubuntu 26.04 systemd setup.
 #
 # Enables docker.service, writes the host-side watchdog + load-image scripts.
-# Watchdog is identical to the AL2023 one (the same `docker stop --time=120`
-# flow works on either OS family).
+# The watchdog sends SIGTERM to the blitzlog-agent container on spot
+# interruption with a 120s grace period (matching AWS's reclamation
+# notice). All commands run with sudo because Packer SSHs in as the
+# unprivileged `ubuntu` user.
 
 set -euo pipefail
 
-systemctl enable docker
+sudo systemctl enable docker
 
-mkdir -p /opt/blitzlog/images /opt/whisper-stt/models
+sudo mkdir -p /opt/blitzlog/images /opt/whisper-stt/models
 
-cat > /usr/local/bin/load-image.sh <<'LOAD_IMAGE_EOF'
+sudo tee /usr/local/bin/load-image.sh >/dev/null <<'LOAD_IMAGE_EOF'
 #!/bin/bash
 set -euo pipefail
 for img in /opt/blitzlog/images/*.tar.gz; do
     [ -e "$img" ] || continue
     echo "[$(date '+%T')] docker load -i $img"
-    docker load -i "$img"
+    sudo docker load -i "$img"
 done
 LOAD_IMAGE_EOF
-chmod +x /usr/local/bin/load-image.sh
+sudo chmod +x /usr/local/bin/load-image.sh
 
-cat > /usr/local/bin/watchdog.sh <<'WATCHDOG_EOF'
+sudo tee /usr/local/bin/watchdog.sh >/dev/null <<'WATCHDOG_EOF'
 #!/bin/bash
 set -euo pipefail
 source /etc/blitzlog.env
@@ -34,12 +36,12 @@ TIMEOUT=7200
 
 for img in /opt/blitzlog/images/*.tar.gz; do
     [ -e "$img" ] || continue
-    docker load -i "$img"
+    sudo docker load -i "$img"
 done
 
 AGENT_TAG="${AGENT_TAG:-2.0.0}"
 
-timeout "$TIMEOUT" docker run --rm \
+sudo timeout "$TIMEOUT" docker run --rm \
     --name "$CONTAINER_NAME" \
     -e MODE=autonomous \
     -e ISSUE_NUMBER="${ISSUE_NUMBER:-}" \
@@ -64,19 +66,19 @@ DOCKER_PID=$!
 
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' \
     -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-while kill -0 "$DOCKER_PID" 2>/dev/null; do
+while sudo kill -0 "$DOCKER_PID" 2>/dev/null; do
     SPOT_ACTION=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
         http://169.254.169.254/latest/meta-data/spot/instance-action 2>/dev/null || echo "")
     if [ -n "$SPOT_ACTION" ]; then
         echo "[$(date '+%T')] Spot interruption detected: $SPOT_ACTION"
         echo "[$(date '+%T')] Stopping container with 120s grace period"
-        docker stop --time=120 "$CONTAINER_NAME" || true
+        sudo docker stop --time=120 "$CONTAINER_NAME" || true
         break
     fi
     sleep 5
 done
 
-wait "$DOCKER_PID" 2>/dev/null || true
+sudo wait "$DOCKER_PID" 2>/dev/null || true
 EXIT=$?
 
 LOG_KEY="${REPO}/issue/${ISSUE_NUMBER}/logs/$(hostname)-$(date +%Y%m%d-%H%M%S).log"
@@ -98,6 +100,6 @@ aws ec2 terminate-instances --instance-id "$INSTANCE_ID" \
 
 exit "$EXIT"
 WATCHDOG_EOF
-chmod +x /usr/local/bin/watchdog.sh
+sudo chmod +x /usr/local/bin/watchdog.sh
 
 echo "Systemd setup complete"

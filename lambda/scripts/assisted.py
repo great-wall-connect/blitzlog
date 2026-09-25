@@ -27,7 +27,6 @@ script. Helpers shared with autonomous mode live in `_common.py`.
 import os
 
 from _common import (
-    _configure_git_script,
     _local_llm_env_block,
     _local_llm_log_line,
     _preflight_block,
@@ -144,9 +143,6 @@ TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 {tailscale_block}{preflight_defs}{preflight_call}
 
-log "Setting up git credentials..."
-{_configure_git_script(git_user_name, git_user_email)}
-
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
 if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
@@ -173,23 +169,54 @@ log "Writing shutdown tool..."
 log "Writing idle watchdog plugin..."
 {_write_idle_watchdog_plugin_script()}
 
-log "Starting opencode server on port 4096..."
-cd /workspace/repo
-export PATH=/root/.opencode/bin:$PATH
-export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
-OPENCODE_SERVER_USERNAME=agent
-OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
-export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
-opencode serve --hostname 127.0.0.1 --port 4096 &
-OPENCODE_PID=$!
+log "Starting opencode-telegram-bot via docker run..."
+# Load the pre-baked agent image (Packer-baked at AMI build time, see
+# infra/packer/scripts-docker-ubuntu/03-bake-images.sh). The container
+# runs opencode serve internally; we just mount the bootstrap-written
+# configs and the whisper model, then wait for the server to be ready.
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
 
+# Random opencode server password — written to the container env so the
+# bot (also running inside the container, via the entrypoint) can
+# authenticate to opencode serve with HTTP basic auth.
+OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
+export OPENCODE_SERVER_PASSWORD
+
+sudo docker run -d --name blitzlog-agent \
+    --restart unless-stopped \
+    -e MODE=assisted \
+    -e ISSUE_NUMBER="${{ISSUE_NUMBER}}" \
+    -e REPO="${{REPO}}" \
+    -e OPENCODE_MODEL="${{OPENCODE_MODEL}}" \
+    -e OPENCODE_API_KEY="${{OPENCODE_API_KEY}}" \
+    -e OPENCODE_SERVER_USERNAME=agent \
+    -e OPENCODE_SERVER_PASSWORD="${{OPENCODE_SERVER_PASSWORD}}" \
+    -e BLITZLOG_ENV="${{BLITZLOG_ENV}}" \
+    -e S3_LOGS_BUCKET="${{S3_LOGS_BUCKET}}" \
+    -e SESSION_ARCHIVE_BUCKET="${{SESSION_ARCHIVE_BUCKET}}" \
+    -e SESSION_ARCHIVE_PREFIX="${{SESSION_ARCHIVE_PREFIX}}" \
+    -e STT_MODEL="${{STT_MODEL}}" \
+    -e STT_LANGUAGE="${{STT_LANGUAGE}}" \
+    -e TELEGRAM_BOT_TOKEN="${{TELEGRAM_BOT_TOKEN}}" \
+    -e TELEGRAM_USER_ID="${{TELEGRAM_USER_ID}}" \
+    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
+    -v /root/.config/opencode:/root/.config/opencode \
+    -v /root/.config/opencode-telegram-bot:/root/.config/opencode-telegram-bot \
+    -v /root/.git-credentials.d:/root/.git-credentials.d \
+    -v /workspace:/workspace \
+    ghcr.io/great-wall-connect/blitzlog-agent:latest
+
+# Wait for the opencode server (running inside the container) to come up.
 for i in $(seq 1 30); do
     if curl -s http://localhost:4096/health > /dev/null 2>&1; then
         log "OpenCode server is healthy"
         break
     fi
-    if ! kill -0 $OPENCODE_PID 2>/dev/null; then
-        log "ERROR: OpenCode server process died"
+    if ! sudo docker ps --filter name=blitzlog-agent --filter status=running -q | grep -q .; then
+        log "ERROR: blitzlog-agent container died"
+        sudo docker logs blitzlog-agent --tail 50 || true
         exit 1
     fi
     log "Waiting for opencode server... ($i/30)"
@@ -258,14 +285,11 @@ else
     log "WARNING: Could not auto-select project, user will need /projects"
 fi
 
-log "Fetching issue title..."
-ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq .title 2>/dev/null || echo "unknown")
-RESUME_STATUS=""
-
 log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
 # (no pre-warm; the bot image in the AMI has the package pre-installed)
 
 log "Sending Telegram notification..."
+RESUME_STATUS=""
 if [ "$RESUMED" = "true" ]; then
     RESTORED_TITLE=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
     RESUME_STATUS="
@@ -278,7 +302,7 @@ curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage
     -d text="Assisted agent ready [Bot: {bot_name}]
 
 Repo: ${{REPO}}
-[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
+[Issue #${{ISSUE_NUMBER}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
 Mode: Assisted (interactive via Telegram)$RESUME_STATUS
 
 Connect to this bot to start working on the task." || true
@@ -376,7 +400,11 @@ CLEANUP_UNIT
 systemctl enable blitzlog-cleanup.service
 systemctl start blitzlog-cleanup.service
 
-log "Starting opencode-telegram-bot (foreground)..."
-cd /workspace/repo
-npx -y @grinev/opencode-telegram-bot@latest start 2>&1 | tee -a "$LOG_FILE"
+# The blitzlog-agent container runs opencode serve + the Telegram bot
+# internally via its entrypoint. The host bootstrap has set up configs,
+# env vars, and volume mounts; from here on we just wait for the
+# instance to terminate (via the blitzlog-cleanup systemd unit).
+log "Bootstrap complete. Container is running opencode serve + telegram bot."
+log "Tailing container logs (Ctrl-C to stop tailing)..."
+sudo docker logs -f blitzlog-agent 2>&1 | tee -a "$LOG_FILE"
 """

@@ -6,7 +6,6 @@ rendering for both cloud and local providers."""
 import unittest
 
 from _common import (
-    _configure_git_script,
     _decode_api_errors_script,
     _install_toolchain_script,
     _install_whisper_stt_script,
@@ -259,33 +258,6 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         self.assertIn("ACTIONABLE", user_data)
         self.assertIn("insufficient_balance", user_data)
         self.assertIn("platform.minimax.io", user_data)
-
-
-class TestConfigureGitScript(unittest.TestCase):
-    def test_uses_env_var_not_literal(self):
-        script = _configure_git_script()
-        self.assertIn("${_CC_GITHUB_TOKEN}", script)
-        self.assertNotIn("x-access-token:ghp_", script)
-
-    def test_no_identity_when_no_sender(self):
-        script = _configure_git_script()
-        self.assertNotIn("user.name", script)
-        self.assertNotIn("user.email", script)
-
-    def test_sets_identity_with_sender_info(self):
-        script = _configure_git_script(
-            "octocat", "12345+octocat@users.noreply.github.com"
-        )
-        self.assertIn('git config --global user.name "octocat"', script)
-        self.assertIn(
-            'git config --global user.email "12345+octocat@users.noreply.github.com"',
-            script,
-        )
-
-    def test_no_identity_with_empty_login(self):
-        script = _configure_git_script("", "12345")
-        self.assertNotIn("user.name", script)
-        self.assertNotIn("user.email", script)
 
 
 class TestToolchainBootstrapScript(unittest.TestCase):

@@ -14,14 +14,12 @@ Builds the bash script that EC2 runs at first boot for an autonomous
 
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with assisted mode (`_decode_api_errors_script`,
-`_read_secrets_from_ssm_script`, `_install_system_packages_script`, ...)
-live in `_common.py`.
+`_read_secrets_from_ssm_script`, ...) live in `_common.py`.
 """
 
 import os
 
 from _common import (
-    _configure_git_script,
     _decode_api_errors_script,
     _local_llm_env_block,
     _local_llm_log_line,
@@ -103,9 +101,6 @@ def build_autonomous_user_data(
     return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
 {tailscale_block}{preflight_defs}{preflight_call}
 
-log "Setting up git credentials..."
-{_configure_git_script(git_user_name, git_user_email)}
-
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
 if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
@@ -164,7 +159,34 @@ aws ec2 terminate-instances --instance-id "$INSTANCE_ID" --region "$REGION" || t
 WDOG_SCRIPT
 chmod +x /usr/local/bin/watchdog.sh
 
-log "Launching opencode agent..."
-cd /workspace/repo
-OPENCODE_NONINTERACTIVE=1 /usr/local/bin/watchdog.sh opencode run --agent build "$OPENCODE_PROMPT" 2>&1 | tee -a "$LOG_FILE"
+log "Launching opencode agent via docker run..."
+# Load the pre-baked agent image and run the autonomous agent in a
+# container. The container's entrypoint runs the opencode build agent;
+# the watchdog (host-side) terminates the EC2 instance when the agent
+# exits.
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
+
+OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
+export OPENCODE_SERVER_PASSWORD
+
+sudo docker run --rm --name blitzlog-agent \
+    -e MODE=autonomous \
+    -e ISSUE_NUMBER="${{ISSUE_NUMBER}}" \
+    -e REPO="${{REPO}}" \
+    -e OPENCODE_MODEL="${{OPENCODE_MODEL}}" \
+    -e OPENCODE_PROMPT="$OPENCODE_PROMPT" \
+    -e OPENCODE_API_KEY="${{OPENCODE_API_KEY}}" \
+    -e OPENCODE_SERVER_USERNAME=agent \
+    -e OPENCODE_SERVER_PASSWORD="${{OPENCODE_SERVER_PASSWORD}}" \
+    -e BLITZLOG_ENV="${{BLITZLOG_ENV}}" \
+    -e S3_LOGS_BUCKET="${{S3_LOGS_BUCKET}}" \
+    -e SESSION_ARCHIVE_BUCKET="${{SESSION_ARCHIVE_BUCKET}}" \
+    -e SESSION_ARCHIVE_PREFIX="${{SESSION_ARCHIVE_PREFIX}}" \
+    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
+    -v /workspace:/workspace \
+    -v /root/.config/opencode:/root/.config/opencode \
+    -v /root/.git-credentials.d:/root/.git-credentials.d \
+    ghcr.io/great-wall-connect/blitzlog-agent:latest 2>&1 | tee -a "$LOG_FILE"
 """

@@ -48,27 +48,22 @@ switching models doesn't require an image rebuild.
 agent_image_tag = "2.0.0"
 ```
 
-Both Packer pipelines (AL2023 + Ubuntu) read this. Bump the version:
-edit the file, commit, push. CI rebuilds the image and the monthly Packer
-cron rebuilds both AMIs with the new tag baked in.
+The Packer pipeline reads this. Bump the version: edit the file, commit,
+push. CI rebuilds the image and the monthly Packer cron rebuilds the
+AMI with the new tag baked in.
 
 ## AMI
 
-Two AMIs per env (`prod` / `dev`), published to:
+One AMI per env (`prod` / `dev`), published to:
 
-- `/blitzlog/<env>/agent-ami-id-docker-al2023` (ECS-optimized AL2023 base)
-- `/blitzlog/<env>/agent-ami-id-docker-ubuntu` (Canonical Ubuntu 24.04 LTS)
+- `/blitzlog/<env>/agent-ami-id-docker-ubuntu` (Canonical Ubuntu 26.04 LTS arm64)
 
-The Lambda reads these SSM parameters via `get_agent_ami()` in
-`lambda/handler.py`, with fallback to the corresponding upstream minimal
-AMI (the same one Packer uses as `source_ami_filter`).
+The Lambda reads this SSM parameter via `get_agent_ami()` in
+`lambda/ec2.py`, with fallback to the Canonical-published Ubuntu 26.04
+LTS arm64 minimal AMI (the same one Packer uses as `source_ami_filter`).
 
-Build pipelines:
-- `infra/packer/agent-docker.pkr.hcl` (AL2023)
-- `infra/packer/agent-docker-ubuntu.pkr.hcl` (Ubuntu)
-
-Per-env selection via the `agent_os_family` Terraform variable
-(`al2023` | `ubuntu`, default `al2023`).
+Build pipeline:
+- `infra/packer/agent-docker-ubuntu.pkr.hcl`
 
 ## Spot interruption handling
 
@@ -95,7 +90,7 @@ runtime, it shrinks to ~30 lines:
 
 ```bash
 # SSM reads
-# Tailscale install (apt-get on Ubuntu, dnf on AL2023)
+# Tailscale install (apt-get)
 # Configure git credentials on host (mounted into container)
 # Download whisper model from S3
 # Write opencode.json (mounted into container)
@@ -125,13 +120,6 @@ runtime, it shrinks to ~30 lines:
   monthly and on workflow_dispatch.
 
 ## Operational notes
-
-### Switching OS families
-
-1. Trigger the Packer build for the new family via workflow_dispatch.
-2. Confirm the new SSM parameter is populated.
-3. Update `infra/<env>/terraform.tfvars`: `agent_os_family = "ubuntu"`.
-4. `terraform apply` (no Lambda code change — the env var drives the dispatch).
 
 ### Rolling out a new image version
 

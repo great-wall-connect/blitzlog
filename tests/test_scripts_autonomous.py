@@ -23,9 +23,10 @@ class TestAutonomousNoSecrets(unittest.TestCase):
         script = build_autonomous_user_data("org/repo", 42, "octocat", "12345")
         self.assertNotIn("ghp_", script)
         self.assertNotIn("x-access-token:ghp_", script)
-        self.assertIn("${_CC_GITHUB_TOKEN}", script)
-        self.assertIn('user.name "octocat"', script)
-        self.assertIn('user.email "12345+octocat@users.noreply.github.com"', script)
+        # The GitHub token is set via SSM and passed to the container via
+        # the GITHUB_TOKEN env var; the host bootstrap doesn't configure
+        # git identity (the container does, in entrypoint.sh).
+        self.assertIn("GITHUB_TOKEN=", script)
 
     def test_no_identity_without_sender(self):
         script = build_autonomous_user_data("org/repo", 42)

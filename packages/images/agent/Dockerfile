@@ -153,7 +153,7 @@ ENV PIP_NO_CACHE_DIR=1 \
 # /usr/local/bin/node), so we don't pull Debian's older nodejs here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git ca-certificates curl wget jq libgomp1 openssl xz-utils \
+        git ca-certificates curl wget jq libgomp1 openssl xz-utils gh \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
