@@ -31,7 +31,6 @@ module "core" {
   opencode_model           = var.opencode_model
   opencode_agent_max_steps = var.opencode_agent_max_steps
   opencode_api_key         = var.opencode_api_key
-  agent_os_family          = var.agent_os_family
 
   agent_logs_bucket_name = var.agent_logs_bucket_name
 

@@ -63,7 +63,6 @@ resource "aws_iam_role_policy" "lambda_policy" {
           # is already permitted above. The DeleteParameter grant is
           # for the self-heal-on-stale code path
           # (_read_custom_agent_ami in lambda/handler.py).
-          "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/agent-ami-id-docker-al2023",
           "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/agent-ami-id-docker-ubuntu",
         ]
       },

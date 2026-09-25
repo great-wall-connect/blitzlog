@@ -1,7 +1,7 @@
 # Packer build role for blitzlog-agent AMIs. The Packer pipeline
 # (infra/packer/agent-docker*.pkr.hcl) runs in GitHub Actions via OIDC and
 # assumes this role to:
-#   1. Read the source AMI (ECS-optimized AL2023 or Canonical Ubuntu)
+#   1. Read the source AMI (Canonical Ubuntu 26.04 LTS arm64)
 #   2. Create the blitzlog agent AMI (ec2:CreateImage)
 #   3. Write the resulting AMI id to /blitzlog/<env>/agent-ami-id-docker-*
 #   4. Read STT model files from the shared S3 bucket during image baking
@@ -29,21 +29,36 @@ resource "aws_iam_role" "packer_build" {
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = {
-        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
-      }
-      Action = "sts:AssumeRoleWithWebIdentity"
-      Condition = {
-        StringEquals = {
-          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
         }
-        StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:${local.github_org}/${local.github_repo}:ref:refs/heads/*"
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${local.github_org}/${local.github_repo}:ref:refs/heads/*"
+          }
         }
-      }
-    }]
+      },
+      {
+        # Allow the Packer-launched EC2 build VM to assume this role via
+        # its instance profile (infra/packer/agent-docker-ubuntu.pkr.hcl
+        # sets iam_instance_profile = "blitzlog-packer-build-instance-profile").
+        # Without this, the build VM has no AWS credentials and the
+        # `aws s3 cp` of the whisper model fails with
+        # "Unable to locate credentials".
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      },
+    ]
   })
 }
 
@@ -89,7 +104,6 @@ resource "aws_iam_role_policy" "packer_build" {
           "ssm:DeleteParameter",
         ]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-al2023",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu",
         ]
       },
@@ -121,7 +135,21 @@ resource "aws_iam_role_policy" "packer_build" {
   })
 }
 
+resource "aws_iam_instance_profile" "packer_build" {
+  # Instance profile the Packer build VM assumes at launch. Provides
+  # the S3 + SSM credentials that the bake-images.sh and publish.sh
+  # provisioners need (instance role credentials via IMDS).
+  # terraform fmt will realign `name`/`role` to the same column.
+  name = "blitzlog-packer-build-instance-profile"
+  role = aws_iam_role.packer_build.name
+}
+
 output "packer_build_role_arn" {
   description = "ARN of the blitzlog-packer-build-role. Configure the GitHub OIDC trust in the actions workflow with this ARN."
   value       = aws_iam_role.packer_build.arn
+}
+
+output "packer_build_instance_profile_arn" {
+  description = "ARN of the blitzlog-packer-build-instance-profile. Packer sources reference this by name (iam_instance_profile)."
+  value       = aws_iam_instance_profile.packer_build.arn
 }

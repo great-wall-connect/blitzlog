@@ -27,30 +27,16 @@ s3 = boto3.client("s3")
 SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
 
 
-def get_latest_al2023_ami() -> str:
-    """Fallback source for the AL2023 arm64 agent AMI when no Packer build
-    has populated /blitzlog/<env>/agent-ami-id-docker-al2023 yet.
-
-    Reads the ECS-optimized AL2023 arm64 AMI id from the AWS-managed
-    parameter store namespace; matches the source_ami_filter used by
-    infra/packer/agent-docker.pkr.hcl.
-    """
-    resp = boto3.client("ssm").get_parameter(
-        Name="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
-    )
-    return resp["Parameter"]["Value"]
-
-
 def get_latest_ubuntu_ami() -> str:
-    """Fallback source for the Ubuntu 24.04 LTS arm64 agent AMI when no
+    """Fallback source for the Ubuntu 26.04 LTS arm64 agent AMI when no
     Packer build has populated /blitzlog/<env>/agent-ami-id-docker-ubuntu.
 
-    Reads the Canonical-published Ubuntu 24.04 LTS arm64 minimal AMI id
+    Reads the Canonical-published Ubuntu 26.04 LTS arm64 minimal AMI id
     from the AWS-managed parameter store namespace; matches the
     source_ami_filter used by infra/packer/agent-docker-ubuntu.pkr.hcl.
     """
     resp = boto3.client("ssm").get_parameter(
-        Name="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+        Name="/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
     )
     return resp["Parameter"]["Value"]
 
@@ -108,20 +94,15 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
 
 
 def get_agent_ami() -> str:
-    """Dispatch by AGENT_OS_FAMILY env var to the family-specific SSM param.
+    """Read the Packer-built Ubuntu 26.04 arm64 agent AMI id from SSM.
 
-    Defaults to 'al2023' so an unset env var preserves existing behavior.
-    Both families share the same self-heal-on-stale logic via
-    _read_custom_agent_ami; only the SSM param suffix and the fallback
-    SSM source differ. The Docker runtime (Packer-baked images) is the
-    only supported runtime — the SSM param suffixes end in -docker-*.
+    Packer publishes the AMI id to /blitzlog/<env>/agent-ami-id-docker-ubuntu
+    via infra/packer/agent-docker-ubuntu.pkr.hcl. If the SSM param is
+    missing or the AMI is retired, fall back to the Canonical-published
+    Ubuntu 26.04 LTS arm64 minimal AMI (the same one Packer uses as
+    source_ami_filter).
     """
-    family = os.environ.get("AGENT_OS_FAMILY", "al2023")
-    fallback = get_latest_ubuntu_ami if family == "ubuntu" else get_latest_al2023_ami
-
-    if family == "ubuntu":
-        return _read_custom_agent_ami("agent-ami-id-docker-ubuntu", fallback)
-    return _read_custom_agent_ami("agent-ami-id-docker-al2023", fallback)
+    return _read_custom_agent_ami("agent-ami-id-docker-ubuntu", get_latest_ubuntu_ami)
 
 
 def get_instance_profile_arn() -> str:
@@ -212,7 +193,7 @@ def launch_ec2_spot_instance(
     downloader = _build_s3_downloader_script(s3_bucket, s3_key)
     user_data_b64 = base64.b64encode(downloader.encode()).decode()
 
-    image_id = get_latest_al2023_ami()
+    image_id = get_agent_ami()
     instance_profile_arn = get_instance_profile_arn()
 
     common_params = {
