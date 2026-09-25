@@ -1,0 +1,3 @@
+deb http://ftp.hk.debian.org/debian trixie main
+deb http://ftp.hk.debian.org/debian trixie-updates main
+deb http://ftp.hk.debian.org/debian-security trixie-security main

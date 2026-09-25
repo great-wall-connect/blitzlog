@@ -41,3 +41,105 @@ run = "terraform plan"
 description = "Terraform apply"
 dir = "infra"
 run = "terraform apply"
+
+[tasks.image-build]
+description = "Build the blitzlog-agent image locally (buildx auto-detects the host arch; CI builds arm64 via ubuntu-26.04-arm)"
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+"""
+
+[tasks.image-test]
+description = "Build the image and run the Tier-1 smoke test (no env vars, no network)"
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm --platform linux/arm64 --entrypoint="" \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  blitzlog-agent:local \
+  sh /smoke-test.sh
+"""
+
+[tasks.image-run-test]
+description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.test. The container's entrypoint (a) writes logs to /var/log/blitzlog/opencode.log and (b) writes session artifacts + signal files under /workspace/.blitzlog, /workspace/.idle, /workspace/.shutdown. We mirror the production watchdog.sh: pre-create those host paths in /tmp/blitzlog-{logs,workspace}/ and bind-mount them in so the entrypoint output + signal state are inspectable from the host after the 30s timeout."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+docker run --rm --entrypoint="" \
+  --env-file ./packages/images/agent/.env.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo "==> entrypoint (may fail without real GitHub/LLM access — that is expected)" && timeout 30 /usr/local/bin/entrypoint.sh || echo "(exited $? — expected without network/auth)"'
+"""
+
+[tasks.image-telegram]
+description = "Build the image and run the Tier-2 Telegram bot boot smoke (60s timeout — boots the bot, doesn't talk to Telegram). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in so entrypoint logs + signal files (.idle, .shutdown, .blitzlog/) are inspectable from the host after the 60s timeout."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+docker run --rm --entrypoint="" \
+  --env-file ./packages/images/agent/.env.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo \"==> entrypoint (bot boot may take up to 60s)\" && timeout 60 /usr/local/bin/entrypoint.sh || echo \"(exited $? — expected without LLM auth)\"'
+"""
+
+[tasks.image-telegram-live]
+description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+docker run --rm -i \
+  --env-file ./packages/images/agent/.env.test \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  --name blitzlog-tg-test \
+  blitzlog-agent:local
+"""
+
+[tasks.preflight]
+description = "Run all pre-PR checks: lint, test, image-test"
+run = """
+mise run lint
+mise run test
+mise run image-test
+"""
+
+[tasks.fetch-whisper]
+description = "Download ggml-tiny.en.bin to /tmp/whisper-models (needed by image-telegram-live / image-telegram; the Packer image bakes the model into the AMI for production)"
+run = """
+mkdir -p /tmp/whisper-models
+curl -L --fail -o /tmp/whisper-models/ggml-tiny.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+"""

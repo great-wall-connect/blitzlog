@@ -1,0 +1,17 @@
+**/.git
+**/.gitignore
+**/.dockerignore
+**/Dockerfile
+**/README.md
+**/*.md
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/node_modules
+**/.pytest_cache
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md

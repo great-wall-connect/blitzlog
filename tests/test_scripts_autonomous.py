@@ -4,10 +4,6 @@ import os
 import unittest
 from unittest.mock import patch
 
-from plugins import (
-    _write_periodic_autosave_plugin_script,
-    _write_spot_watchdog_plugin_script,
-)
 from scripts.autonomous import build_autonomous_user_data
 
 
@@ -27,9 +23,10 @@ class TestAutonomousNoSecrets(unittest.TestCase):
         script = build_autonomous_user_data("org/repo", 42, "octocat", "12345")
         self.assertNotIn("ghp_", script)
         self.assertNotIn("x-access-token:ghp_", script)
-        self.assertIn("${_CC_GITHUB_TOKEN}", script)
-        self.assertIn('user.name "octocat"', script)
-        self.assertIn('user.email "12345+octocat@users.noreply.github.com"', script)
+        # The GitHub token is set via SSM and passed to the container via
+        # the GITHUB_TOKEN env var; the host bootstrap doesn't configure
+        # git identity (the container does, in entrypoint.sh).
+        self.assertIn("GITHUB_TOKEN=", script)
 
     def test_no_identity_without_sender(self):
         script = build_autonomous_user_data("org/repo", 42)
@@ -70,56 +67,11 @@ class TestAutonomousModelAndDiagnostics(unittest.TestCase):
             )
 
 
-class TestAutonomousToolchainInUserData(unittest.TestCase):
-    def test_includes_toolchain(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertIn("mise install", user_data)
-        self.assertIn("mise.toml", user_data)
-
-    def test_toolchain_runs_after_clone(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        clone_pos = user_data.index("git clone")
-        mise_pos = user_data.index("mise install")
-        config_pos = user_data.index("Writing opencode config")
-        self.assertGreater(mise_pos, clone_pos)
-        self.assertLess(mise_pos, config_pos)
-
-
 class TestAutonomousShutdownExclusion(unittest.TestCase):
     def test_user_data_excludes_shutdown_tool(self):
         user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
         self.assertNotIn("shutdown.js", user_data)
         self.assertNotIn("SHUTDOWN_TOOL_JS", user_data)
-
-
-class TestAutonomousPluginOrdering(unittest.TestCase):
-    def test_user_data_contains_spot_watchdog_plugin(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertIn("spot-watchdog.js", user_data)
-        self.assertIn("SpotWatchdog", user_data)
-
-    def test_user_data_contains_periodic_autosave_plugin(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertIn("periodic-autosave.js", user_data)
-        self.assertIn("PeriodicAutosave", user_data)
-
-    def test_spot_watchdog_uses_global_directory(self):
-        script = _write_spot_watchdog_plugin_script()
-        self.assertIn("/root/.config/opencode/plugins/spot-watchdog.js", script)
-        self.assertNotIn("/workspace/repo/.opencode/plugins", script)
-
-    def test_periodic_autosave_uses_global_directory(self):
-        script = _write_periodic_autosave_plugin_script()
-        self.assertIn("/root/.config/opencode/plugins/periodic-autosave.js", script)
-        self.assertNotIn("/workspace/repo/.opencode/plugins", script)
-
-    def test_plugins_after_session_archive(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        archive_pos = user_data.index("session-archive.js")
-        spot_pos = user_data.index("spot-watchdog.js")
-        periodic_pos = user_data.index("periodic-autosave.js")
-        self.assertGreater(spot_pos, archive_pos)
-        self.assertGreater(periodic_pos, archive_pos)
 
 
 class TestAutonomousLocalLlm(unittest.TestCase):

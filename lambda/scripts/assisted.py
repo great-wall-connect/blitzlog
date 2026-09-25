@@ -27,17 +27,11 @@ script. Helpers shared with autonomous mode live in `_common.py`.
 import os
 
 from _common import (
-    _configure_git_script,
-    _install_opencode_script,
-    _install_system_packages_script,
-    _install_toolchain_script,
-    _install_whisper_stt_script,
     _local_llm_env_block,
     _local_llm_log_line,
     _preflight_block,
     _preflight_definitions,
     _read_secrets_from_ssm_script,
-    _session_export_to_s3_script,
     _tailscale_install_block,
     _write_opencode_config_script,
     script_header,
@@ -47,7 +41,6 @@ from plugins import (
     _write_periodic_autosave_plugin_script,
     _write_session_archive_plugin_script,
     _write_shutdown_tool_script,
-    _write_spot_watchdog_plugin_script,
 )
 
 
@@ -103,24 +96,8 @@ def build_assisted_user_data(
     base_opencode_model = os.environ.get(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
-    if local_llm:
-        opencode_model = local_llm["model"]
-        opencode_model_provider = "local"
-        opencode_model_id = local_llm["model"]
-    else:
-        opencode_model = base_opencode_model
-        opencode_model_provider = "minimax-coding-plan"
-        _, opencode_model_id = (
-            base_opencode_model.split("/", 1)
-            if "/" in base_opencode_model
-            else ("", base_opencode_model)
-        )
+    opencode_model = local_llm["model"] if local_llm else base_opencode_model
     s3_archive_prefix = f"{repo}/issue/{issue_number}"
-
-    git_user_name = sender_login or ""
-    git_user_email = (
-        f"{sender_id}+{sender_login}@users.noreply.github.com" if sender_login else ""
-    )
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
@@ -149,27 +126,13 @@ TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 {tailscale_block}{preflight_defs}{preflight_call}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
-
-log "Installing Node.js 24 via dnf..."
-dnf install -y nodejs24 nodejs24-npm 2>&1 | tail -5
-alternatives --set node /usr/bin/node-24
-node --version
-npm --version
-
-log "Setting up git credentials..."
-{_configure_git_script(git_user_name, git_user_email)}
-
-log "Installing opencode..."
-{_install_opencode_script()}
-
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        --region "$REGION"
+fi
 
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
@@ -180,8 +143,7 @@ log "Writing opencode config and session archive plugin..."
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
+log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
 
 log "Writing shutdown tool..."
@@ -190,223 +152,42 @@ log "Writing shutdown tool..."
 log "Writing idle watchdog plugin..."
 {_write_idle_watchdog_plugin_script()}
 
-log "Starting opencode server on port 4096..."
-cd /workspace/repo
-export PATH=/root/.opencode/bin:$PATH
-export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
-OPENCODE_SERVER_USERNAME=agent
-OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
-export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
-opencode serve --hostname 127.0.0.1 --port 4096 &
-OPENCODE_PID=$!
-
-for i in $(seq 1 30); do
-    if curl -s http://localhost:4096/health > /dev/null 2>&1; then
-        log "OpenCode server is healthy"
-        break
-    fi
-    if ! kill -0 $OPENCODE_PID 2>/dev/null; then
-        log "ERROR: OpenCode server process died"
-        exit 1
-    fi
-    log "Waiting for opencode server... ($i/30)"
-    sleep 2
-done
-
-log "Importing previous session if available..."
-if [ "$RESUMED" = "true" ] && [ -f /tmp/session-import.json ]; then
-    opencode import /tmp/session-import.json 2>&1 || log "WARNING: Session import failed"
-    log "Session imported from S3"
-fi
-
-log "Configuring opencode-telegram-bot..."
-mkdir -p /root/.config/opencode-telegram-bot
-cat > /root/.config/opencode-telegram-bot/.env <<TELEGRAMCFG
+log "Starting blitzlog-agent via systemd watchdog..."
+# The watchdog (Packer-baked to /usr/local/bin/watchdog.sh and registered
+# via 02-systemd.sh as the blitzlog-agent.service unit) is the host's
+# lifecycle manager. It loads the baked container image, runs it with
+# the right env vars + mounts, waits for it to exit, uploads host +
+# container logs and session artifacts to S3, releases the bot pool
+# lock, and terminates the EC2 instance. The container itself has NO
+# AWS credentials — all S3 ops happen on the host.
+#
+# Write the env file the watchdog reads.
+mkdir -p /workspace/.blitzlog
+cat > /etc/blitzlog.env <<ENVEOF
+MODE=assisted
+ISSUE_NUMBER={issue_number}
+REPO={repo}
+BLITZLOG_ENV=${{BLITZLOG_ENV}}
+S3_LOGS_BUCKET={s3_bucket}
+SESSION_ARCHIVE_BUCKET={s3_bucket}
+SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
+OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
+OPENCODE_MODEL={opencode_model}
+OPENCODE_PROMPT=
 TELEGRAM_BOT_TOKEN=${{TELEGRAM_BOT_TOKEN}}
-TELEGRAM_ALLOWED_USER_ID=${{TELEGRAM_USER_ID}}
-OPENCODE_API_URL=http://localhost:4096
-OPENCODE_SERVER_USERNAME=agent
-OPENCODE_SERVER_PASSWORD=${{OPENCODE_SERVER_PASSWORD}}
-OPENCODE_MODEL_PROVIDER={opencode_model_provider}
-OPENCODE_MODEL_ID={opencode_model_id}
-BOT_LOCALE=en
-TELEGRAM_FORCE_IPV4=true
+TELEGRAM_USER_ID=${{TELEGRAM_USER_ID}}
+TELEGRAM_BOT_NAME={bot_name}
+TELEGRAM_SENDER_LOGIN={sender_login}
 STT_API_URL=${{STT_API_URL}}
 STT_API_KEY=${{STT_API_KEY}}
 STT_MODEL=${{STT_MODEL}}
 STT_LANGUAGE=${{STT_LANGUAGE}}
-STT_REQUEST_FORMAT=multipart
-TELEGRAMCFG
-
-log "Auto-selecting project and session in bot settings..."
-PROJECT_JSON=$(curl -sf -u agent:$OPENCODE_SERVER_PASSWORD http://localhost:4096/project 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for p in data if isinstance(data, list) else [data]:
-    if p.get('worktree','').startswith('/workspace'):
-        print(json.dumps({{'id': p['id'], 'worktree': p['worktree'], 'name': p.get('name', p['worktree'])}}))
-        break
-" 2>/dev/null || echo "")
-
-SESSION_JSON=""
-if [ "$RESUMED" = "true" ] && [ -f /tmp/session-import.json ]; then
-    RESTORE_SESSION_ID=$(python3 -c "import json; d=json.load(open('/tmp/session-import.json')); print(d.get('id',''))" 2>/dev/null || echo "")
-    if [ -n "$RESTORE_SESSION_ID" ]; then
-        SESSION_TITLE=$(curl -sf -u agent:$OPENCODE_SERVER_PASSWORD "http://localhost:4096/session/${{RESTORE_SESSION_ID}}" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({{'id': d['id'], 'title': d.get('title',''), 'directory': d.get('directory','')}}))" 2>/dev/null || echo "")
-        if [ -n "$SESSION_TITLE" ]; then
-            SESSION_JSON=$SESSION_TITLE
-        fi
-    fi
-fi
-
-if [ -n "$PROJECT_JSON" ]; then
-    if [ -n "$SESSION_JSON" ]; then
-        cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{{"currentProject": $PROJECT_JSON, "currentSession": $SESSION_JSON}}
-SETTINGS_EOF
-        log "Project and session pre-selected (resumed)"
-    else
-        cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{{"currentProject": $PROJECT_JSON}}
-SETTINGS_EOF
-        log "Project pre-selected (new session)"
-    fi
-else
-    log "WARNING: Could not auto-select project, user will need /projects"
-fi
-
-log "Fetching issue title..."
-ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "${{REPO}}" --json title --jq .title 2>/dev/null || echo "unknown")
-RESUME_STATUS=""
-
-log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
-{_install_whisper_stt_script()}
-npx -y @grinev/opencode-telegram-bot@latest status > /var/log/pre-warm.log 2>&1
-PRE_WARM_EXIT=$?
-if [ "$PRE_WARM_EXIT" -ne 0 ]; then
-    log "WARNING: Pre-warm failed with exit code $PRE_WARM_EXIT; will attempt bot start anyway and notify user"
-    curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
-        -d chat_id="${{TELEGRAM_USER_ID}}" \\
-        -d parse_mode="Markdown" \\
-        -d text="Assisted agent cannot be started [Bot: {bot_name}]
-
-Repo: ${{REPO}}
-[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
-Mode: Assisted (interactive via Telegram)$RESUME_STATUS" || true
-fi
-
-log "Sending Telegram notification..."
-if [ "$RESUMED" = "true" ]; then
-    RESTORED_TITLE=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
-    RESUME_STATUS="
-
-Resumed session: ${{RESTORED_TITLE}}"
-fi
-curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
-    -d chat_id="${{TELEGRAM_USER_ID}}" \\
-    -d parse_mode="Markdown" \\
-    -d text="Assisted agent ready [Bot: {bot_name}]
-
-Repo: ${{REPO}}
-[Issue #${{ISSUE_NUMBER}}: ${{ISSUE_TITLE}}](https://github.com/${{REPO}}/issues/${{ISSUE_NUMBER}})
-Mode: Assisted (interactive via Telegram)$RESUME_STATUS
-
-Connect to this bot to start working on the task." || true
-
-log "Installing shutdown helper..."
-cat > /etc/blitzlog.env <<ENVEOF
-ISSUE_NUMBER={issue_number}
-S3_LOGS_BUCKET={s3_bucket}
-REPO={repo}
-SESSION_ARCHIVE_BUCKET={s3_bucket}
-SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
-OPENCODE_SERVER_USERNAME=$OPENCODE_SERVER_USERNAME
-OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD
-TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-TELEGRAM_USER_ID=$TELEGRAM_USER_ID
+OPENCODE_SERVER_USERNAME=agent
+GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
 ENVEOF
-cat > /usr/local/bin/assisted-shutdown.sh << 'SHUTDOWN_SCRIPT'
-#!/bin/bash
-set -euo pipefail
-source /etc/blitzlog.env
-export HOME=/root
-export PATH=/root/.opencode/bin:$PATH
-export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
-export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
-LOG_FILE="/var/log/backend-bootstrap.log"
-log() {{
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}}
 
-log "=== Assisted shutdown initiated ==="
-
-TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
-
-# Detect shutdown reason
-SHUTDOWN_REASON="${{_SHUTDOWN_REASON:-}}"
-if [ -z "$SHUTDOWN_REASON" ]; then
-    SPOT_ACTION=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/spot/instance-action 2>/dev/null || echo "")
-    if [ -n "$SPOT_ACTION" ]; then
-        SHUTDOWN_REASON="spot_interruption"
-    elif [ "${{_SKIP_SHUTDOWN:-}}" = "1" ]; then
-        SHUTDOWN_REASON="system_shutdown"
-    else
-        SHUTDOWN_REASON="unknown"
-    fi
-fi
-log "Shutdown reason: $SHUTDOWN_REASON"
-
-# Export session to S3
-{_session_export_to_s3_script()}
-
-# Upload logs to S3
-LOG_KEY="$BLITZLOG_ENV/{s3_archive_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
-aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --region "$REGION" || true
-log "Logs uploaded to S3"
-
-# Release bot pool lock
-S3_LOGS_BUCKET="{s3_bucket}"
-if [ -n "{bot_name}" ]; then
-    aws s3 rm "s3://${{S3_LOGS_BUCKET}}/bot-pool-locks/{sender_login}/{bot_name}.json" --region "$REGION" 2>/dev/null || true
-    log "Released bot pool lock for {sender_login}/{bot_name}"
-fi
-
-# Notify via Telegram
-curl -s -X POST "https://api.telegram.org/bot${{TELEGRAM_BOT_TOKEN}}/sendMessage" \\
-    -d chat_id="${{TELEGRAM_USER_ID}}" \\
-    -d text="Assisted agent shutting down [Bot: {bot_name}] (reason: ${{SHUTDOWN_REASON}}). Session archived to S3. Logs uploaded." || true
-
-if [ "${{_SKIP_SHUTDOWN:-}}" != "1" ]; then
-    log "Shutting down..."
-    shutdown -h now
-fi
-SHUTDOWN_SCRIPT
-chmod +x /usr/local/bin/assisted-shutdown.sh
-
-log "Installing systemd shutdown service..."
-cat > /etc/systemd/system/blitzlog-cleanup.service << 'CLEANUP_UNIT'
-[Unit]
-Description=Cloud Coder Assisted Cleanup
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/true
-Environment=_SKIP_SHUTDOWN=1
-ExecStop=/usr/local/bin/assisted-shutdown.sh
-TimeoutStopSec=120
-
-[Install]
-WantedBy=multi-user.target
-CLEANUP_UNIT
-systemctl enable blitzlog-cleanup.service
-systemctl start blitzlog-cleanup.service
-
-log "Starting opencode-telegram-bot (foreground)..."
-cd /workspace/repo
-npx -y @grinev/opencode-telegram-bot@latest start 2>&1 | tee -a "$LOG_FILE"
+# The unit is already enabled (Packer 02-systemd.sh). Just start it; the
+# watchdog will `docker run` the agent, wait for it to exit, then do all
+# AWS-dependent cleanup + terminate the instance.
+sudo systemctl start blitzlog-agent.service
 """

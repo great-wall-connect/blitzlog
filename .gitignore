@@ -22,3 +22,14 @@ __pycache__/
 # Node
 node_modules/
 out/
+
+# Local image-smoke-test config (see packages/images/agent/.env.test sample)
+packages/images/agent/.env.test
+
+# typescript recordings of interactive shell sessions (created by `script`)
+typescript
+
+# Packer local-build artifacts
+infra/packer/.env
+infra/packer/manifest.json
+typescript.*

@@ -444,26 +444,26 @@ class TestEnvNamespacing(unittest.TestCase):
             )
 
     def test_log_upload_path_is_env_prefixed(self):
-        """The bootstrap user-data's `aws s3 cp` log-upload path must include
+        """The host's watchdog.sh log-upload path must include
         `$BLITZLOG_ENV/` as the first key segment.
 
         Without the env prefix, the upload lands at
-        `s3://<bucket>/<repo>/issue/<n>/logs/...`, which is outside the EC2
+        `s3://<bucket>/logs/...`, which is outside the EC2
         agent role's `s3:PutObject` grant at iam.tf:191-200 (scoped to
         `${var.environment}/*`). The `|| true` on the `aws s3 cp` line then
         swallows the resulting `AccessDenied` and the bash log line
         `Logs uploaded to S3` lies — no log is persisted.
         """
-        autonomous = (REPO_ROOT / "lambda" / "scripts" / "autonomous.py").read_text()
-        assisted = (REPO_ROOT / "lambda" / "scripts" / "assisted.py").read_text()
-        for label, src in (("autonomous", autonomous), ("assisted", assisted)):
-            self.assertRegex(
-                src,
-                r'LOG_KEY="\$BLITZLOG_ENV/',
-                f"{label}/log-upload must prefix LOG_KEY with $BLITZLOG_ENV/ "
-                "so the destination falls inside the EC2 agent role's "
-                "s3:PutObject grant (iam.tf:191-200, scoped to ${var.environment}/*).",
-            )
+        watchdog = (
+            REPO_ROOT / "infra" / "packer" / "scripts-docker-ubuntu" / "watchdog.sh"
+        ).read_text()
+        self.assertRegex(
+            watchdog,
+            r"s3://\$\{S3_LOGS_BUCKET\}/\$\{BLITZLOG_ENV\}/logs/",
+            "watchdog.sh log-upload must prefix the S3 key with $BLITZLOG_ENV/ "
+            "so the destination falls inside the EC2 agent role's "
+            "s3:PutObject grant (iam.tf:191-200, scoped to ${var.environment}/*).",
+        )
 
     def test_ec2_agent_policy_grants_put_object_for_its_own_env_prefix(self):
         """The EC2 agent role must allow `s3:PutObject` on `${var.environment}/*`.
