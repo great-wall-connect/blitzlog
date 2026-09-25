@@ -93,23 +93,38 @@ echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> /etc/blitzlog.env
 mkdir -p /var/log/blitzlog
 mkdir -p /workspace
 
+# Common env vars (passed to every container launch).
+COMMON_ARGS=(
+    -e "MODE=$MODE"
+    -e "ISSUE_NUMBER=$ISSUE_NUMBER"
+    -e "REPO=$REPO"
+    -e "OPENCODE_MODEL=$OPENCODE_MODEL"
+    -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
+    -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    -e "OPENCODE_SERVER_USERNAME=$OPENCODE_SERVER_USERNAME"
+    -e "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD"
+    -e "BLITZLOG_ENV=$BLITZLOG_ENV"
+    -e "S3_LOGS_BUCKET=$S3_LOGS_BUCKET"
+    -e "SESSION_ARCHIVE_BUCKET=$SESSION_ARCHIVE_BUCKET"
+    -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
+)
+
+# Mode-specific env vars. We don't reference these outside the
+# matching branch — `set -u` would otherwise kill the script when a
+# var that isn't declared in /etc/blitzlog.env for the current mode
+# is read. This is intentional: a future contributor adding a var the
+# watchdog should pass gets a loud failure, not a silent empty value.
+if [ "$MODE" = "assisted" ]; then
+    COMMON_ARGS+=(
+        -e "STT_MODEL=$STT_MODEL"
+        -e "STT_LANGUAGE=$STT_LANGUAGE"
+        -e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+        -e "TELEGRAM_USER_ID=$TELEGRAM_USER_ID"
+    )
+fi
+
 sudo docker run --name blitzlog-agent \
-    -e MODE="$MODE" \
-    -e ISSUE_NUMBER="$ISSUE_NUMBER" \
-    -e REPO="$REPO" \
-    -e OPENCODE_MODEL="$OPENCODE_MODEL" \
-    -e OPENCODE_PROMPT="$OPENCODE_PROMPT" \
-    -e OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-    -e OPENCODE_SERVER_USERNAME="$OPENCODE_SERVER_USERNAME" \
-    -e OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
-    -e BLITZLOG_ENV="$BLITZLOG_ENV" \
-    -e S3_LOGS_BUCKET="$S3_LOGS_BUCKET" \
-    -e SESSION_ARCHIVE_BUCKET="$SESSION_ARCHIVE_BUCKET" \
-    -e SESSION_ARCHIVE_PREFIX="$SESSION_ARCHIVE_PREFIX" \
-    -e STT_MODEL="$STT_MODEL" \
-    -e STT_LANGUAGE="$STT_LANGUAGE" \
-    -e TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
-    -e TELEGRAM_USER_ID="$TELEGRAM_USER_ID" \
+    "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
     -v /root/.config/opencode:/root/.config/opencode \
     -v /root/.config/opencode-telegram-bot:/root/.config/opencode-telegram-bot \
