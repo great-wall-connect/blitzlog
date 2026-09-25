@@ -111,6 +111,16 @@ build {
   }
 
   # 3. systemd setup
+  provisioner "file" {
+    # Packer's `shell` provisioner uploads only the `script` file, not
+    # its sibling files. 02-systemd.sh installs watchdog.sh, so we
+    # upload it separately first. cp + chmod on the receiving end
+    # avoids the `install` binary (not reliably present on Ubuntu 26.04
+    # minimal arm64 base).
+    source      = "${path.root}/scripts-docker-ubuntu/watchdog.sh"
+    destination = "/tmp/blitzlog-watchdog.sh"
+  }
+
   provisioner "shell" {
     script = "${path.root}/scripts-docker-ubuntu/02-systemd.sh"
   }

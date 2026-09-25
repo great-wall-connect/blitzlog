@@ -26,11 +26,13 @@ done
 LOAD_IMAGE_EOF
 sudo chmod +x /usr/local/bin/load-image.sh
 
-# Install the watchdog (copied from infra/packer/scripts-docker-ubuntu/watchdog.sh
-# at Packer build time).
-sudo install -m 0755 \
-    "${PACKER_DIR:-$(dirname "$0")}/watchdog.sh" \
-    /usr/local/bin/watchdog.sh
+# Install the watchdog (uploaded to /tmp/blitzlog-watchdog.sh by the
+# preceding `file` provisioner; Packer only uploads the shell script
+# itself, not sibling files). Use cp + chmod rather than `install` —
+# the `install` binary isn't reliably present on the Ubuntu 26.04
+# minimal arm64 base.
+sudo cp /tmp/blitzlog-watchdog.sh /usr/local/bin/watchdog.sh
+sudo chmod 0755 /usr/local/bin/watchdog.sh
 
 # systemd unit that runs the watchdog on instance start. The watchdog
 # runs the blitzlog-agent container, waits for it to exit, then does
