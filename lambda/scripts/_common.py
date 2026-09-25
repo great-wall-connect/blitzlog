@@ -7,7 +7,7 @@ autonomous but forget to mirror it in assisted" drift, and centralizing
 the shared builders (`_read_secrets_from_ssm_script`,
 `_install_opencode_script`, `_install_tailscale_script`,
 `_install_whisper_stt_script`, `_install_toolchain_script`,
-`_write_opencode_config_script`, `_session_export_to_s3_script`,
+`_write_opencode_config_script`,
 `_preflight_local_llm_script`, `_decode_api_errors_script`) means a
 change to e.g. the opencode install steps is one edit instead of two.
 """
@@ -509,28 +509,6 @@ cat > /root/.config/opencode/opencode.json <<OPENCODECFG
 OPENCODECFG
 """
     )
-
-
-def _session_export_to_s3_script() -> str:
-    return """
-log "Exporting session to S3..."
-cd /workspace/repo
-SESSION_ID=$(opencode session list --format json -n 1 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
-if [ -n "$SESSION_ID" ]; then
-    TMP_SESSION="/tmp/session-export-${SESSION_ID}.json"
-    opencode export "$SESSION_ID" > "$TMP_SESSION" 2>/dev/null || true
-    if [ -s "$TMP_SESSION" ]; then
-        aws s3 cp "$TMP_SESSION" "s3://${SESSION_ARCHIVE_BUCKET}/${SESSION_ARCHIVE_PREFIX}/sessions/${SESSION_ID}.json" --region "$REGION" 2>/dev/null || true
-        BRANCH=$(git -C /workspace/repo branch --show-current 2>/dev/null || echo "")
-        COMMIT=$(git -C /workspace/repo rev-parse HEAD 2>/dev/null || echo "")
-        python3 -c "import json; print(json.dumps({'sessionId': '${SESSION_ID}', 'branch': '${BRANCH}', 'commit': '${COMMIT}', 'timestamp': $(date +%s000)}))" > /tmp/session-export-metadata.json 2>/dev/null || true
-        aws s3 cp /tmp/session-export-metadata.json "s3://${SESSION_ARCHIVE_BUCKET}/${SESSION_ARCHIVE_PREFIX}/metadata.json" --region "$REGION" 2>/dev/null || true
-        log "Session exported to S3: $SESSION_ID"
-    fi
-else
-    log "WARNING: No session found to export"
-fi
-"""
 
 
 def _preflight_local_llm_script(mode: str) -> str:

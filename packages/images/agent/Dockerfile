@@ -185,13 +185,14 @@ COPY --from=build /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=build /usr/local/bin/opencode-telegram /usr/local/bin/opencode-telegram
 
-# Shim + entrypoint
+# Shim + entrypoint + container-side shutdown helper
 COPY server.py /opt/whisper-stt/server.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
 
 # Layout that the entrypoint expects
-RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/plugins /workspace /var/log \
-    && chmod +x /usr/local/bin/entrypoint.sh
+RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/plugins /workspace /var/log/blitzlog \
+    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh
 
 # Sanity checks
 RUN /usr/local/bin/whisper-cli --help >/dev/null \

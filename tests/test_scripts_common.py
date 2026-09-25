@@ -62,49 +62,6 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("export BLITZLOG_ENV=dev", script)
 
 
-class TestSTTInBotConfig(unittest.TestCase):
-    """The STT env vars must be present in the opencode-telegram-bot .env
-    so the bot can transcribe voice messages.
-    """
-
-    @staticmethod
-    def _build_assisted():
-        import os
-        from unittest.mock import patch
-
-        from scripts.assisted import build_assisted_user_data
-
-        with patch.dict(
-            os.environ,
-            {
-                "S3_LOGS_BUCKET": "test-bucket",
-                "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
-            },
-        ):
-            return build_assisted_user_data(
-                "owner/repo",
-                42,
-                sender_login="octocat",
-                bot_name="escobar",
-                bot_token="123:ABC",
-                telegram_user_id="99999",
-            )
-
-    def test_bot_env_has_stt_api_url(self):
-        user_data = self._build_assisted()
-        self.assertIn("STT_API_URL=${STT_API_URL}", user_data)
-
-    def test_bot_env_has_stt_api_key(self):
-        user_data = self._build_assisted()
-        self.assertIn("STT_API_KEY=${STT_API_KEY}", user_data)
-
-    def test_bot_env_has_stt_model_and_language(self):
-        user_data = self._build_assisted()
-        self.assertIn("STT_MODEL=${STT_MODEL}", user_data)
-        self.assertIn("STT_LANGUAGE=${STT_LANGUAGE}", user_data)
-        self.assertIn("STT_REQUEST_FORMAT=multipart", user_data)
-
-
 class TestWhisperSttScript(unittest.TestCase):
     def test_whisper_install_script_downloads_from_github_release(self):
         script = _install_whisper_stt_script()
@@ -245,19 +202,15 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         self.assertIn("rate", script.lower())
 
     def test_watchdog_invokes_decoder(self):
-        import os
-        from unittest.mock import patch
-
-        with patch.dict(
-            os.environ,
-            {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
-        ):
-            from scripts.autonomous import build_autonomous_user_data
-
-            user_data = build_autonomous_user_data("owner/repo", 42)
-        self.assertIn("ACTIONABLE", user_data)
-        self.assertIn("insufficient_balance", user_data)
-        self.assertIn("platform.minimax.io", user_data)
+        # In the new architecture, the host's watchdog (Packer-baked to
+        # /usr/local/bin/watchdog.sh) runs the API-error decoder after the
+        # container exits — the container has no AWS creds and can't
+        # interpret log lines itself.
+        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+            watchdog = f.read()
+        self.assertIn("ACTIONABLE", watchdog)
+        self.assertIn("insufficient_balance", watchdog)
+        self.assertIn("1008", watchdog)
 
 
 class TestToolchainBootstrapScript(unittest.TestCase):

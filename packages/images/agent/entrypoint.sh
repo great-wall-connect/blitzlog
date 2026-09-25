@@ -16,7 +16,25 @@
 # signals and exit cleanly.
 set -eu
 
-log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+# We do NOT globally redirect stdout/stderr — `docker logs` and the
+# foreground terminal must see the entrypoint's progress. The watchdog's
+# pickup file (/var/log/blitzlog/opencode.log) is written by log()
+# below, which dual-writes to stderr and that file. Service processes
+# (whisper-stt-shim, opencode serve, telegram-bot) have their own
+# per-file redirects and are unaffected.
+mkdir -p /var/log/blitzlog
+
+# Pre-create the signal files so the container's touch won't fail with
+# permission denied (the host owns /workspace, not the container user).
+mkdir -p /workspace/.blitzlog
+touch /workspace/.idle /workspace/.shutdown
+
+log() {
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    printf '%s\n' "$msg" >&2
+    printf '%s\n' "$msg" >> /var/log/blitzlog/opencode.log
+}
 
 MODE="${MODE:-autonomous}"
 

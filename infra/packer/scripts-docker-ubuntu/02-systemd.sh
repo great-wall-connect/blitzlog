@@ -1,11 +1,12 @@
 #!/bin/bash
 # scripts-docker-ubuntu/02-systemd.sh — Ubuntu 26.04 systemd setup.
 #
-# Enables docker.service, writes the host-side watchdog + load-image scripts.
-# The watchdog sends SIGTERM to the blitzlog-agent container on spot
-# interruption with a 120s grace period (matching AWS's reclamation
-# notice). All commands run with sudo because Packer SSHs in as the
-# unprivileged `ubuntu` user.
+# Enables docker.service, installs the host-side watchdog systemd unit,
+# and writes the load-image helper. The watchdog (watchdog.sh) runs the
+# blitzlog-agent container, waits for it to exit, and does all
+# AWS-dependent cleanup (S3 upload + EC2 terminate + bot lock release).
+# All commands run with sudo because Packer SSHs in as the unprivileged
+# `ubuntu` user.
 
 set -euo pipefail
 
@@ -13,6 +14,7 @@ sudo systemctl enable docker
 
 sudo mkdir -p /opt/blitzlog/images /opt/whisper-stt/models
 
+# load-image.sh — small helper for manual `docker load` of all baked images.
 sudo tee /usr/local/bin/load-image.sh >/dev/null <<'LOAD_IMAGE_EOF'
 #!/bin/bash
 set -euo pipefail
@@ -24,82 +26,33 @@ done
 LOAD_IMAGE_EOF
 sudo chmod +x /usr/local/bin/load-image.sh
 
-sudo tee /usr/local/bin/watchdog.sh >/dev/null <<'WATCHDOG_EOF'
-#!/bin/bash
-set -euo pipefail
-source /etc/blitzlog.env
-export HOME=/root
+# Install the watchdog (copied from infra/packer/scripts-docker-ubuntu/watchdog.sh
+# at Packer build time).
+sudo install -m 0755 \
+    "${PACKER_DIR:-$(dirname "$0")}/watchdog.sh" \
+    /usr/local/bin/watchdog.sh
 
-LOG_FILE="/var/log/backend-bootstrap.log"
-CONTAINER_NAME=blitzlog-agent
-TIMEOUT=7200
+# systemd unit that runs the watchdog on instance start. The watchdog
+# runs the blitzlog-agent container, waits for it to exit, then does
+# all AWS cleanup (S3 upload + EC2 terminate + bot-lock release).
+sudo tee /etc/systemd/system/blitzlog-agent.service >/dev/null <<'UNIT_EOF'
+[Unit]
+Description=Blitzlog agent (runs blitzlog-agent container + handles cleanup)
+After=docker.service network-online.target
+Wants=network-online.target
 
-for img in /opt/blitzlog/images/*.tar.gz; do
-    [ -e "$img" ] || continue
-    sudo docker load -i "$img"
-done
+[Service]
+Type=simple
+EnvironmentFile=/etc/blitzlog.env
+ExecStart=/usr/local/bin/watchdog.sh
+Restart=no
+TimeoutStopSec=7200
+StandardOutput=append:/var/log/backend-bootstrap.log
+StandardError=append:/var/log/backend-bootstrap.log
 
-AGENT_TAG="${AGENT_TAG:-2.0.0}"
-
-sudo timeout "$TIMEOUT" docker run --rm \
-    --name "$CONTAINER_NAME" \
-    -e MODE=autonomous \
-    -e ISSUE_NUMBER="${ISSUE_NUMBER:-}" \
-    -e REPO="${REPO:-}" \
-    -e OPENCODE_MODEL="${OPENCODE_MODEL:-}" \
-    -e OPENCODE_PROMPT="${OPENCODE_PROMPT:-}" \
-    -e OPENCODE_CONFIG_JSON="${OPENCODE_CONFIG_JSON:-}" \
-    -e AWS_REGION="${REGION:-ap-east-1}" \
-    -e BLITZLOG_ENV="${BLITZLOG_ENV:-prod}" \
-    -e STT_MODEL="${STT_MODEL:-base.en}" \
-    -e STT_LANGUAGE="${STT_LANGUAGE:-en}" \
-    -e GITHUB_TOKEN="${_CC_GITHUB_TOKEN:-}" \
-    -e GIT_USER_NAME="${GIT_USER_NAME:-}" \
-    -e GIT_USER_EMAIL="${GIT_USER_EMAIL:-}" \
-    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v /root/.git-credentials.d:/root/.git-credentials.d \
-    -v /workspace:/workspace \
-    -v /root/.config/opencode:/root/.config/opencode \
-    "ghcr.io/great-wall-connect/blitzlog-agent:${AGENT_TAG}" \
-    > "$LOG_FILE" 2>&1 &
-DOCKER_PID=$!
-
-TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' \
-    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-while sudo kill -0 "$DOCKER_PID" 2>/dev/null; do
-    SPOT_ACTION=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
-        http://169.254.169.254/latest/meta-data/spot/instance-action 2>/dev/null || echo "")
-    if [ -n "$SPOT_ACTION" ]; then
-        echo "[$(date '+%T')] Spot interruption detected: $SPOT_ACTION"
-        echo "[$(date '+%T')] Stopping container with 120s grace period"
-        sudo docker stop --time=120 "$CONTAINER_NAME" || true
-        break
-    fi
-    sleep 5
-done
-
-sudo wait "$DOCKER_PID" 2>/dev/null || true
-EXIT=$?
-
-LOG_KEY="${REPO}/issue/${ISSUE_NUMBER}/logs/$(hostname)-$(date +%Y%m%d-%H%M%S).log"
-aws s3 cp "$LOG_FILE" "s3://${S3_LOGS_BUCKET}/${LOG_KEY}" --region "${REGION:-ap-east-1}" 2>/dev/null || true
-
-if [ -f /workspace/session-export.json ]; then
-    SESSION_ID=$(python3 -c "import json; print(json.load(open('/workspace/session-export.json')).get('id',''))" 2>/dev/null || echo "")
-    if [ -n "$SESSION_ID" ]; then
-        aws s3 cp /workspace/session-export.json \
-            "s3://${S3_LOGS_BUCKET}/${SESSION_ARCHIVE_PREFIX:-${REPO}/issue/${ISSUE_NUMBER}}/sessions/${SESSION_ID}.json" \
-            --region "${REGION:-ap-east-1}" 2>/dev/null || true
-    fi
-fi
-
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
-    http://169.254.169.254/latest/meta-data/instance-id)
-aws ec2 terminate-instances --instance-id "$INSTANCE_ID" \
-    --region "${REGION:-ap-east-1}" 2>/dev/null || true
-
-exit "$EXIT"
-WATCHDOG_EOF
-sudo chmod +x /usr/local/bin/watchdog.sh
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+sudo systemctl enable blitzlog-agent.service
 
 echo "Systemd setup complete"

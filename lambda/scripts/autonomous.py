@@ -26,7 +26,6 @@ from _common import (
     _preflight_block,
     _preflight_definitions,
     _read_secrets_from_ssm_script,
-    _session_export_to_s3_script,
     _tailscale_install_block,
     _write_opencode_config_script,
     script_header,
@@ -35,18 +34,6 @@ from plugins import (
     _write_periodic_autosave_plugin_script,
     _write_session_archive_plugin_script,
 )
-
-
-def _upload_logs_and_terminate_script(repo: str, issue_number: int) -> str:
-    s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
-    s3_prefix = f"{repo}/issue/{issue_number}"
-    return f"""
-TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
-LOG_KEY="$BLITZLOG_ENV/{s3_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
-aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --region "$REGION" || true
-"""
 
 
 def build_autonomous_user_data(
@@ -126,67 +113,37 @@ REPO={repo}
 SESSION_ARCHIVE_BUCKET={s3_bucket}
 SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
 ENVEOF
-cat > /usr/local/bin/watchdog.sh << 'WDOG_SCRIPT'
-#!/bin/bash
-set -euo pipefail
-source /etc/blitzlog.env
-export HOME=/root
-export PATH=/root/.opencode/bin:$PATH
-export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
-LOG_FILE="/var/log/backend-bootstrap.log"
-log() {{
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}}
-TIMEOUT=7200
-COMMAND="$@"
-timeout $TIMEOUT $COMMAND 2>&1
-EXIT_CODE=$?
 
-# Upload logs to S3 before terminating
-{_upload_logs_and_terminate_script(repo, issue_number)}
-log "Logs uploaded to S3"
+log "Starting autonomous opencode agent via systemd watchdog..."
+# The watchdog (Packer-baked to /usr/local/bin/watchdog.sh, registered
+# via 02-systemd.sh as the blitzlog-agent.service unit) is the host's
+# lifecycle manager. It loads the baked container image, runs the agent
+# (the container's entrypoint invokes opencode run for the autonomous
+# mode), waits for it to exit, uploads host + container logs and
+# session artifacts to S3, releases the bot pool lock, and terminates
+# the EC2 instance.
+#
+# Write the env file the watchdog reads.
+mkdir -p /workspace/.blitzlog
+cat > /etc/blitzlog.env <<ENVEOF
+MODE=autonomous
+ISSUE_NUMBER={issue_number}
+REPO={repo}
+BLITZLOG_ENV=${{BLITZLOG_ENV}}
+S3_LOGS_BUCKET={s3_bucket}
+SESSION_ARCHIVE_BUCKET={s3_bucket}
+SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
+OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
+OPENCODE_MODEL=${{OPENCODE_MODEL}}
+OPENCODE_PROMPT=${{OPENCODE_PROMPT:-}}
+STT_API_URL=${{STT_API_URL}}
+STT_API_KEY=${{STT_API_KEY}}
+STT_MODEL=${{STT_MODEL}}
+STT_LANGUAGE=${{STT_LANGUAGE}}
+GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
+ENVEOF
 
-{_decode_api_errors_script()}
-
-# Export session to S3
-{_session_export_to_s3_script()}
-
-# Terminate instance
-if [ $EXIT_CODE -eq 124 ]; then
-    echo "Watchdog triggered: command exceeded ${{TIMEOUT}}s"
-fi
-aws ec2 terminate-instances --instance-id "$INSTANCE_ID" --region "$REGION" || true
-WDOG_SCRIPT
-chmod +x /usr/local/bin/watchdog.sh
-
-log "Launching opencode agent via docker run..."
-# Load the pre-baked agent image and run the autonomous agent in a
-# container. The container's entrypoint runs the opencode build agent;
-# the watchdog (host-side) terminates the EC2 instance when the agent
-# exits.
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
-
-OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
-export OPENCODE_SERVER_PASSWORD
-
-sudo docker run --rm --name blitzlog-agent \
-    -e MODE=autonomous \
-    -e ISSUE_NUMBER="${{ISSUE_NUMBER}}" \
-    -e REPO="${{REPO}}" \
-    -e OPENCODE_MODEL="${{OPENCODE_MODEL}}" \
-    -e OPENCODE_PROMPT="$OPENCODE_PROMPT" \
-    -e OPENCODE_API_KEY="${{OPENCODE_API_KEY}}" \
-    -e OPENCODE_SERVER_USERNAME=agent \
-    -e OPENCODE_SERVER_PASSWORD="${{OPENCODE_SERVER_PASSWORD}}" \
-    -e BLITZLOG_ENV="${{BLITZLOG_ENV}}" \
-    -e S3_LOGS_BUCKET="${{S3_LOGS_BUCKET}}" \
-    -e SESSION_ARCHIVE_BUCKET="${{SESSION_ARCHIVE_BUCKET}}" \
-    -e SESSION_ARCHIVE_PREFIX="${{SESSION_ARCHIVE_PREFIX}}" \
-    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v /workspace:/workspace \
-    -v /root/.config/opencode:/root/.config/opencode \
-    -v /root/.git-credentials.d:/root/.git-credentials.d \
-    ghcr.io/great-wall-connect/blitzlog-agent:latest 2>&1 | tee -a "$LOG_FILE"
+# Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog
+# runs the agent container, waits for exit, then does AWS cleanup.
+sudo systemctl start blitzlog-agent.service
 """

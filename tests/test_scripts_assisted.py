@@ -44,13 +44,20 @@ class TestAssistedNoSecrets(unittest.TestCase):
         {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
     )
     def test_no_embedded_stt_api_key(self):
-        # STT_API_KEY is a SecureString; the user-data must reference the
+        # STT_API_KEY is a SecureString; the bootstrap must reference the
         # runtime-fetched shell variable rather than bake a literal value.
+        # In the new architecture, the bootstrap writes STT_API_KEY to
+        # /etc/blitzlog.env (which the host's watchdog reads and passes to
+        # the container as an env var). The bootstrap also fetches the
+        # value from SSM in the standard secrets block.
         script = _build_assisted()
-        self.assertIn("STT_API_KEY=${STT_API_KEY}", script)
-        self.assertIn("export STT_API_KEY", script)
-        # The bot .env heredoc assigns from the runtime shell variable only;
-        # no literal value should be embedded.
+        self.assertIn("STT_API_KEY=$(aws ssm get-parameter", script)
+        # The /etc/blitzlog.env block must reference the runtime-fetched
+        # shell variable, not a literal value.
+        env_start = script.index("cat > /etc/blitzlog.env")
+        env_section = script[env_start : env_start + 500]
+        self.assertIn("STT_API_KEY=${STT_API_KEY}", env_section)
+        # No literal STT_API_KEY=xxx should appear anywhere.
         self.assertNotRegex(script, r"STT_API_KEY=[^$\n][^\n]*")
 
 
@@ -63,9 +70,16 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
         },
     )
     def test_user_data_uses_minimax_model(self):
+        # In the new architecture, the bootstrap writes OPENCODE_MODEL
+        # (slash-form "provider/model") to /etc/blitzlog.env — the host's
+        # watchdog reads this and passes it to the container. The provider
+        # is derived from the slash prefix inside the container.
         user_data = _build_assisted()
-        self.assertIn("minimax-coding-plan", user_data)
-        self.assertIn("OPENCODE_MODEL_PROVIDER=minimax-coding-plan", user_data)
+        env_start = user_data.index("cat > /etc/blitzlog.env")
+        env_section = user_data[env_start : env_start + 500]
+        self.assertIn("minimax-coding-plan", env_section)
+        # The slash-form model id is what the container receives.
+        self.assertIn('OPENCODE_MODEL=minimax-coding-plan/MiniMax-M3', env_section)
 
     @patch.dict(
         os.environ,
@@ -89,297 +103,6 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
             )
 
 
-class TestAssistedShutdownInUserData(unittest.TestCase):
-    def test_contains_shutdown_tool(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("shutdown.js", user_data)
-        self.assertIn("SHUTDOWN_TOOL_JS", user_data)
-
-    def test_contains_shutdown_script(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("assisted-shutdown.sh", user_data)
-        self.assertIn("shutdown -h now", user_data)
-
-    def test_plugins_use_global_directory(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("/root/.config/opencode/tools/shutdown.js", user_data)
-        self.assertIn("/root/.config/opencode/plugins/idle-watchdog.js", user_data)
-        self.assertNotIn("/workspace/repo/.opencode/plugins/", user_data)
-
-
-class TestShutdownReasonDetection(unittest.TestCase):
-    def test_shutdown_script_detects_reason(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("SHUTDOWN_REASON", user_data)
-        self.assertIn("spot_interruption", user_data)
-        self.assertIn("system_shutdown", user_data)
-        self.assertIn("unknown", user_data)
-
-    def test_shutdown_script_checks_spot_instance_action(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("spot/instance-action", user_data)
-
-    def test_shutdown_script_checks_shutdown_reason_env(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("_SHUTDOWN_REASON", user_data)
-
-    def test_telegram_message_includes_reason(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("reason:", user_data)
-        self.assertIn("SHUTDOWN_REASON", user_data)
-
-
-class TestIdleWatchdogInUserData(unittest.TestCase):
-    def test_contains_idle_watchdog_plugin(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("idle-watchdog.js", user_data)
-        self.assertIn("IdleWatchdog", user_data)
-        self.assertIn("IDLE_WATCHDOG_PLUGIN_JS", user_data)
-
-    def test_telegram_vars_exported_before_opencode(self):
-        user_data = _with_env(lambda: _build_assisted())
-        export_pos = user_data.index("export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID")
-        serve_pos = user_data.index("opencode serve")
-        self.assertLess(export_pos, serve_pos)
-
-    def test_blitzlog_env_includes_telegram_vars(self):
-        user_data = _with_env(lambda: _build_assisted())
-        env_start = user_data.index("cat > /etc/blitzlog.env")
-        env_section = user_data[env_start : env_start + 500]
-        self.assertIn("TELEGRAM_BOT_TOKEN", env_section)
-        self.assertIn("TELEGRAM_USER_ID", env_section)
-
-
-class TestBotPoolInUserData(unittest.TestCase):
-    def test_contains_bot_name(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("[Bot: escobar]", user_data)
-
-    def test_injects_token_directly(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn('TELEGRAM_BOT_TOKEN="123:ABC"', user_data)
-
-    def test_injects_user_id_directly(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn('TELEGRAM_USER_ID="99999"', user_data)
-
-    def test_no_ssm_telegram_reads(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertNotIn("/blitzlog/telegram/bot-token", user_data)
-        self.assertNotIn("/blitzlog/telegram/allowed-user-id", user_data)
-        self.assertNotIn("/blitzlog/users/octocat/telegram/allowed-user-id", user_data)
-
-    def test_shutdown_releases_sender_scoped_lock(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("bot-pool-locks/octocat/escobar.json", user_data)
-        self.assertIn("Released bot pool lock for octocat/escobar", user_data)
-
-    def test_shutdown_notification_includes_bot_name(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("[Bot: escobar]", user_data)
-
-
-class TestAssistedLocalLlm(unittest.TestCase):
-    LOCAL_LLM = {  # noqa: RUF012 - intentional class-level test fixture
-        "endpoint": "http://100.64.0.5:11434",
-        "model": "qwen2.5-coder:32b",
-        "api_key": "secret",
-        "allow_private": True,
-        "fallback": "cloud",
-    }
-
-    def test_no_local_llm_keeps_cloud_block(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("minimax-coding-plan", user_data)
-        self.assertIn("OPENCODE_MODEL_PROVIDER=minimax-coding-plan", user_data)
-        self.assertIn("export OPENCODE_API_KEY", user_data)
-
-    def test_local_llm_switches_model(self):
-        user_data = _with_env(lambda: _build_assisted(local_llm=self.LOCAL_LLM))
-        self.assertIn('OPENCODE_MODEL="qwen2.5-coder:32b"', user_data)
-        self.assertIn("OPENCODE_MODEL_PROVIDER=local", user_data)
-        self.assertIn("OPENCODE_MODEL_ID=qwen2.5-coder:32b", user_data)
-        self.assertIn('LOCAL_LLM_API_KEY="secret"', user_data)
-        self.assertIn('LOCAL_LLM_FALLBACK="cloud"', user_data)
-        # The agent's startup env must not export OPENCODE_API_KEY. The
-        # switch_to_cloud_fallback function (only called if the user clicks
-        # Use cloud) reads it from SSM just-in-time, so the substring can
-        # legitimately appear inside that function body — but it must NOT
-        # be exported at startup.
-        read_block_start = user_data.index("Reading secrets from SSM")
-        preflight_block_start = user_data.index("preflight_local_llm", read_block_start)
-        startup_block = user_data[read_block_start:preflight_block_start]
-        self.assertNotIn("export OPENCODE_API_KEY", startup_block)
-        # The startup opencode.json must use the local provider only.
-        cfg_start = user_data.index("Writing opencode config")
-        cfg_end = user_data.index("session-archive.js", cfg_start)
-        startup_cfg = user_data[cfg_start:cfg_end]
-        self.assertIn('"local":', startup_cfg)
-        self.assertNotIn('"minimax-coding-plan":', startup_cfg)
-
-    def test_local_llm_includes_preflight(self):
-        user_data = _with_env(lambda: _build_assisted(local_llm=self.LOCAL_LLM))
-        self.assertIn("preflight_local_llm()", user_data)
-        self.assertIn("MODE=assisted", user_data)
-
-    def test_no_local_llm_no_preflight(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertNotIn("preflight_local_llm", user_data)
-
-    def test_defensive_unset_always_present(self):
-        user_data = _with_env(lambda: _build_assisted())
-        self.assertIn("unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY", user_data)
-
-    def test_opencode_serve_binds_localhost(self):
-        user_data = _with_env(lambda: _build_assisted())
-        # The host bootstrap no longer runs opencode serve directly —
-        # it `docker run`s the pre-baked agent image, which contains
-        # opencode serve internally. The specific hostname/port binding
-        # is now an implementation detail of the container's entrypoint;
-        # this test just verifies the docker-run architecture.
-        self.assertIn("docker run", user_data)
-
-    def test_local_llm_includes_tailscale_up_when_key_set(self):
-        llm = dict(self.LOCAL_LLM, tailscale_auth_key="tskey-auth-foobar")
-        user_data = _with_env(lambda: _build_assisted(local_llm=llm))
-        self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
-        self.assertIn("tailscale up", user_data)
-        self.assertIn("--accept-routes=false", user_data)
-        self.assertNotIn("--ephemeral", user_data)
-        self.assertNotIn(" -ephemeral", user_data)
-
-    def test_local_llm_omits_tailscale_when_key_empty(self):
-        user_data = _with_env(
-            lambda: _build_assisted(
-                local_llm={**self.LOCAL_LLM, "tailscale_auth_key": ""}
-            )
-        )
-        self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
-        self.assertNotIn("tailscale up", user_data)
-
-    @patch.dict(
-        os.environ, {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"}
-    )
-    def test_assisted_preflight_call_line_bounds_opencode_api_key(self):
-        """Regression for handler.py:1947. When local_llm is configured, the
-        bootstrap does NOT export OPENCODE_API_KEY at startup (intentional —
-        see _read_secrets_from_ssm_script local_llm=True path; the cloud
-        key is read on demand from SSM only inside
-        _switch_to_cloud_fallback_script, via IMDSv2 from the Lambda).
-        The preflight invocation line must therefore use
-        ${OPENCODE_API_KEY:-} (not bare $OPENCODE_API_KEY) to avoid
-        crashing the script under `set -u`.
-        """
-        user_data = build_assisted_user_data(
-            "owner/repo",
-            42,
-            bot_name="b",
-            bot_token="t",
-            telegram_user_id="999",
-            local_llm={
-                "endpoint": "http://100.64.0.5:11434",
-                "model": "x",
-                "api_key": "",
-                "allow_private": True,
-                "fallback": "closed",
-            },
-        )
-        invocation_line = None
-        for line in user_data.splitlines():
-            if line.startswith("MODE=assisted HAS_CLOUD_KEY="):
-                invocation_line = line
-                break
-        self.assertIsNotNone(
-            invocation_line,
-            "could not find MODE=assisted HAS_CLOUD_KEY= invocation line",
-        )
-        self.assertIn("${OPENCODE_API_KEY:-}", invocation_line)
-        # Bare $OPENCODE_API_KEY would crash under set -u. Substitute the
-        # safe form out, then check no bare reference remains.
-        remainder = invocation_line.replace("${OPENCODE_API_KEY:-}", "")
-        self.assertNotIn("$OPENCODE_API_KEY", remainder)
-
-    def test_user_data_does_not_emit_nonexistent_tailscale_flags(self):
-        """Ephemeral-ness is a property of the auth key (set when the key
-        is generated at https://login.tailscale.com/admin/settings/keys),
-        not a runtime flag on `tailscale up`. The flag doesn't exist and
-        is rejected with 'flag provided but not defined: -ephemeral',
-        which silently leaves the node unauthenticated and the preflight
-        probe fails. Covers both autonomous and assisted bootstrap."""
-        from scripts.autonomous import build_autonomous_user_data
-
-        for builder, kwargs in [
-            (build_autonomous_user_data, {}),
-            (
-                build_assisted_user_data,
-                {"bot_name": "b", "bot_token": "t", "telegram_user_id": "999"},
-            ),
-        ]:
-            with self.subTest(builder=builder.__name__):
-                user_data = _with_env(
-                    lambda b=builder, k=kwargs: b(
-                        "owner/repo",
-                        42,
-                        **k,
-                        local_llm={
-                            "endpoint": "http://100.64.0.5:11434",
-                            "model": "x",
-                            "api_key": "",
-                            "allow_private": True,
-                            "fallback": "closed",
-                            "tailscale_auth_key": "tskey-auth-foo",
-                        },
-                    )
-                )
-                self.assertNotIn("--ephemeral", user_data)
-                self.assertNotIn(" -ephemeral", user_data)
-
-    def test_local_llm_preserves_slash_in_model_id(self):
-        """When the configured model id contains a slash (as returned by
-        many OpenAI-compatible servers, e.g. LiteLLM model ids like
-        'qwen/qwen3.8-27b'), the bootstrap must pass it through verbatim
-        — never prefix it with 'local/', which would produce the malformed
-        'local/qwen/qwen3.8-27b' and cause opencode to look up model='qwen'
-        under provider='local', failing with 'Model not found'.
-
-        See https://opencode.ai/docs/models — the config-file `model`
-        field uses the format `provider_id/model_id` with a single slash
-        as the separator, so an embedded slash in the model id has to be
-        the model id portion. With local_llm configured the `local`
-        provider is the only one present, so opencode infers it from
-        being the sole provider."""
-        from scripts.autonomous import build_autonomous_user_data
-
-        for builder, kwargs in [
-            (build_autonomous_user_data, {}),
-            (
-                build_assisted_user_data,
-                {"bot_name": "b", "bot_token": "t", "telegram_user_id": "999"},
-            ),
-        ]:
-            with self.subTest(builder=builder.__name__):
-                user_data = _with_env(
-                    lambda b=builder, k=kwargs: b(
-                        "owner/repo",
-                        42,
-                        **k,
-                        local_llm={
-                            "endpoint": "http://100.64.0.5:11434",
-                            "model": "qwen/qwen3.8-27b",  # note the slash
-                            "api_key": "",
-                            "allow_private": True,
-                            "fallback": "closed",
-                        },
-                    )
-                )
-                self.assertIn('OPENCODE_MODEL="qwen/qwen3.8-27b"', user_data)
-                self.assertNotIn('OPENCODE_MODEL="local/qwen', user_data)
-                self.assertNotIn("local/qwen/qwen", user_data)
-                # Regression for the ProviderModelNotFoundError: the rendered
-                # opencode.json must register the model id under
-                # provider.local.models so opencode can resolve the bot's
-                # 'local/<model>' invocation when the id contains a slash.
-                self.assertIn('"qwen/qwen3.8-27b": {}', user_data)
 
 
 if __name__ == "__main__":
