@@ -74,6 +74,11 @@ source "amazon-ebs" "ubuntu" {
     OsFamily    = "ubuntu"
     Runtime     = "docker"
     AgentTag    = var.agent_image_tag
+    # Combined image reference — what the runtime watchdog sources from
+    # /root/blitzlog.env to launch the baked-in container. Pairs with
+    # AgentTag (build identifier) so operators have both human and
+    # machine views.
+    AgentImage  = "ghcr.io/great-wall-connect/blitzlog-agent:${var.agent_image_tag}"
   }
 
   launch_block_device_mappings {

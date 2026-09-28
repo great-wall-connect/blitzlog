@@ -55,6 +55,21 @@ sudo docker logout ghcr.io >/dev/null 2>&1 || true
 echo "Saving image to /opt/blitzlog/images/blitzlog-agent.tar.gz"
 sudo sh -c "docker save 'ghcr.io/great-wall-connect/blitzlog-agent:${AGENT_IMAGE_TAG}' | gzip > /opt/blitzlog/images/blitzlog-agent.tar.gz"
 
+# Write the agent-image signature. Each AMI ships with exactly one
+# baked-in image; /root/blitzlog.env is the runtime source of truth
+# for which one. The watchdog sources it at boot rather than parsing
+# docker images output (which is brittle when multiple images exist).
+# /root/blitzlog.env (not /etc/blitzlog.env) because the lambda's
+# bootstrap script overwrites /etc/blitzlog.env at runtime — the
+# agent-image spec must survive that. Read-only, root-only.
+sudo mkdir -p /root
+sudo tee /root/blitzlog.env >/dev/null <<SPEC_EOF
+AGENT_IMAGE_REPO="ghcr.io/great-wall-connect/blitzlog-agent"
+AGENT_IMAGE_TAG="${AGENT_IMAGE_TAG}"
+SPEC_EOF
+sudo chmod 400 /root/blitzlog.env
+sudo chown root:root /root/blitzlog.env
+
 MODEL_FILE="ggml-${STT_MODEL}.bin"
 echo "Downloading whisper model ${MODEL_FILE}"
 sudo aws s3 cp "s3://${STT_MODELS_BUCKET}/models/${MODEL_FILE}" \

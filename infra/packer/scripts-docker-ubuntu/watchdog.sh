@@ -17,6 +17,12 @@
 # host, which has the EC2 instance role.
 
 set -euo pipefail
+# Packer-baked signature: identifies the single agent image loaded
+# into dockerd. /root/blitzlog.env is written by the Packer build
+# alongside the image save step, with chmod 400 root:root. We source
+# it BEFORE /etc/blitzlog.env so AGENT_IMAGE_REPO / AGENT_IMAGE_TAG
+# are available when we build the docker run command.
+source /root/blitzlog.env
 source /etc/blitzlog.env
 export HOME=/root
 
@@ -131,7 +137,7 @@ sudo docker run --name blitzlog-agent \
     -v /root/.git-credentials.d:/root/.git-credentials.d \
     -v /workspace:/workspace \
     -v /var/log/blitzlog:/var/log/blitzlog \
-    ghcr.io/great-wall-connect/blitzlog-agent:latest
+    "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
 
 CONTAINER_EXIT=$?
 

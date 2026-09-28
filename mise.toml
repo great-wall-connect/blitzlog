@@ -1,6 +1,7 @@
 [tools]
 python = "3.12"
 terraform = "1.9.8"
+packer = "1.16.1"
 
 [tasks.bootstrap]
 description = "Install runtime + dev Python dependencies and symlink /usr/local/bin/python"
