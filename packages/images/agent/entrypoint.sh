@@ -101,7 +101,7 @@ fi
 # _write_opencode_config_script in lambda/scripts/_common.py:455.
 if [ "${MODE:-autonomous}" = "assisted" ]; then
     agent_prompt=',
-      "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."'
+      "prompt": "You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
 else
     agent_prompt=""
 fi

@@ -438,7 +438,7 @@ def _write_opencode_config_script(
     agent_prompt = (
         ""
         if autonomous
-        else ',\n      "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."'
+        else ',\n      "prompt": "You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
     )
 
     if local_provider is None:
@@ -707,7 +707,7 @@ switch_to_cloud_fallback() {{
   "agent": {{
     "build": {{
       "steps": ${{OPENCODE_AGENT_MAX_STEPS}},
-      "prompt": "You have a `shutdown` tool available. Use it when the user asks to shut down or terminate the instance."
+      "prompt": "You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."
     }}
   }},
   "provider": {{
