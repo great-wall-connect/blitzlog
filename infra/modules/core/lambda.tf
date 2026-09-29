@@ -58,6 +58,23 @@ resource "null_resource" "lambda_build" {
   provisioner "local-exec" {
     command = <<-EOT
       set -e
+      # The lambda runtime is python3.12 (see `runtime = "python3.12"` above).
+      # The build MUST use the same version — otherwise C extensions
+      # (e.g., cryptography's `_cffi_backend.cpython-312-*.so`) link against
+      # the wrong Python ABI and fail to import at lambda runtime. Resolve
+      # Python 3.12 from the first source we find:
+      #   1. system python3.12 (apt install python3.12)
+      #   2. mise's Python 3.12 install (the project pins python = "3.12" in
+      #      mise.toml, so this is the common case)
+      #   3. fail loudly
+      PYTHON_BIN="$(command -v python3.12 || true)"
+      if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+        PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+      fi
+      if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+        echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
+        exit 1
+      fi
       rm -rf ${path.module}/build ${path.module}/.build-venv
       mkdir -p ${path.module}/build
       # Copy the whole lambda/ source dir as a package; the AWS Lambda
@@ -69,7 +86,7 @@ resource "null_resource" "lambda_build" {
       mkdir -p ${path.module}/build/lambda/packages/whisper-stt-shim
       cp ${path.module}/../../../packages/whisper-stt-shim/server.py \
          ${path.module}/build/lambda/packages/whisper-stt-shim/
-      python3 -m venv ${path.module}/.build-venv
+      "$PYTHON_BIN" -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
       ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../lambda/requirements.txt -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv

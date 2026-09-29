@@ -69,6 +69,7 @@ Two modes:
 - An existing VPC and subnet (Blitzlog needs to launch into one)
 - An S3 bucket for Terraform state
 - A GitHub App installed on the target repo
+- **Python 3.12 on the deploy host.** `terraform apply` runs `python3 -m venv` and `pip install -r lambda/requirements.txt` in a `local-exec` provisioner (`infra/modules/core/lambda.tf`). The lambda runtime is `python3.12`. The local-exec resolves Python 3.12 from the first available source: `command -v python3.12` first (macOS's `python3.12` works), then `~/.local/share/mise/installs/python/3.12.*/bin/python3` (the project's `mise.toml` pins `python = "3.12"`; `mise install` puts it there). If your deploy host has a different `python3` default (e.g., Ubuntu Desktop's `python3.14`), the local-exec still picks the mise install — as long as `mise install` has been run once. If neither Python 3.12 source exists, the local-exec fails loudly with instructions to install it.
 
 ---
 
