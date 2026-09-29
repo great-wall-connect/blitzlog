@@ -5,16 +5,22 @@ function + env exports) and a long tail of mostly-identical install/config
 helpers. Centralizing the prologue eliminates a class of "fix the bug in
 autonomous but forget to mirror it in assisted" drift, and centralizing
 the shared builders (`_read_secrets_from_ssm_script`,
-`_install_opencode_script`, `_install_tailscale_script`,
-`_install_whisper_stt_script`, `_install_toolchain_script`,
+`_install_tailscale_script`,
 `_write_opencode_config_script`,
 `_preflight_local_llm_script`, `_decode_api_errors_script`) means a
-change to e.g. the opencode install steps is one edit instead of two.
+change to e.g. the opencode config is one edit instead of two.
+
+Note: the previous `_install_opencode_script`, `_install_whisper_stt_script`,
+and `_install_toolchain_script` helpers were removed when the docker
+refactor moved those concerns into the container image (opencode,
+whisper-stt) and entrypoint.sh (mise install, git clone). The host
+bootstrap no longer needs to install the agent runtime — that's the
+container's job now.
 """
 
 import json
 
-from _env import WHISPER_STT_SHIM_SOURCE, _blitzlog_env, _ssm_root
+from _env import _blitzlog_env, _ssm_root
 
 
 def _git_identity_block(sender_login: str, sender_id: str) -> str:
@@ -198,15 +204,6 @@ fi
 """
 
 
-def _install_opencode_script() -> str:
-    return """
-curl -fsSL https://opencode.ai/install | bash
-export PATH=/root/.opencode/bin:$PATH
-hash -r
-opencode --version
-"""
-
-
 def _install_tailscale_script() -> str:
     """Install Tailscale and enroll the EC2 instance into the user's Tailnet.
 
@@ -250,179 +247,8 @@ fi
 """
 
 
-_WHISPER_CPP_VERSION = "v1.7.6"
-_WHISPER_CPP_RELEASE_URL = (
-    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
-    f"/whisper-bin-aarch64-linux-gnu.zip"
-)
-_WHISPER_CPP_RELEASE_FALLBACK_URL = (
-    f"https://github.com/ggml-org/whisper.cpp/releases/download/{_WHISPER_CPP_VERSION}"
-    f"/whisper-bin-aarch64-linux-gnu.tar.gz"
-)
-_WHISPER_CPP_SOURCE_TARBALL_URL = f"https://github.com/ggml-org/whisper.cpp/archive/refs/tags/{_WHISPER_CPP_VERSION}.tar.gz"
-
-
-def _install_whisper_stt_script() -> str:
-    shim_source = WHISPER_STT_SHIM_SOURCE
-    systemd_unit = (
-        "[Unit]\n"
-        "Description=Blitzlog whisper.cpp STT shim\n"
-        "After=network.target\n"
-        "\n"
-        "[Service]\n"
-        "Type=simple\n"
-        "User=root\n"
-        "WorkingDirectory=/opt/whisper-stt\n"
-        "Environment=HOST=127.0.0.1\n"
-        "Environment=PORT=7878\n"
-        "Environment=WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli\n"
-        "EnvironmentFile=-/etc/blitzlog/whisper-stt.env\n"
-        "ExecStart=/root/.local/share/mise/shims/python3 /opt/whisper-stt/server.py\n"
-        "Restart=on-failure\n"
-        "RestartSec=5\n"
-        "StandardOutput=append:/var/log/whisper-stt-shim.log\n"
-        "StandardError=append:/var/log/whisper-stt-shim.log\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-    return f"""
-log "Installing whisper.cpp STT backend..."
-
-mkdir -p /opt/whisper-stt/bin /opt/whisper-stt/models /opt/whisper-stt/runtime
-cd /opt/whisper-stt
-
-# 1. Acquire whisper.cpp CLI binary.
-#    Prefer prebuilt release; fall back to building from source if the
-#    prebuilt asset is unavailable for the current release tag.
-WHISPER_CLI=/opt/whisper-stt/bin/whisper-cli
-if [ ! -x "$WHISPER_CLI" ]; then
-    log "Downloading whisper.cpp {_WHISPER_CPP_VERSION} prebuilt (aarch64-linux-gnu)..."
-    if curl -fsSL "{_WHISPER_CPP_RELEASE_URL}" -o /tmp/whisper-prebuilt.zip; then
-        dnf install -y unzip || true
-        unzip -q -o /tmp/whisper-prebuilt.zip -d /tmp/whisper-prebuilt
-        find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
-        chmod +x "$WHISPER_CLI"
-    elif curl -fsSL "{_WHISPER_CPP_RELEASE_FALLBACK_URL}" -o /tmp/whisper-prebuilt.tar.gz; then
-        tar -xzf /tmp/whisper-prebuilt.tar.gz -C /tmp/whisper-prebuilt
-        find /tmp/whisper-prebuilt -name whisper-cli -type f -exec cp {{}} "$WHISPER_CLI" \\;
-        chmod +x "$WHISPER_CLI"
-    else
-        log "Prebuilt download failed; building whisper.cpp from source (this takes a few minutes)..."
-        dnf install -y cmake gcc gcc-c++ make
-        curl -fsSL "{_WHISPER_CPP_SOURCE_TARBALL_URL}" -o /tmp/whisper-src.tar.gz
-        tar -xzf /tmp/whisper-src.tar.gz -C /opt
-        cmake -S /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')} -B /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build -DCMAKE_BUILD_TYPE=Release
-        cmake --build /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build --config Release -j$(nproc)
-        cp /opt/whisper.cpp-{_WHISPER_CPP_VERSION.lstrip('v')}/build/bin/whisper-cli "$WHISPER_CLI"
-    fi
-fi
-"$WHISPER_CLI" --help > /dev/null && log "whisper-cli ready: $("$WHISPER_CLI" --help 2>&1 | head -1)"
-
-# 2. Download the configured model from the blitzlog-stt-models S3 bucket.
-MODEL_FILE="ggml-${{STT_MODEL}}.bin"
-MODEL_DEST="/opt/whisper-stt/models/${{MODEL_FILE}}"
-if [ ! -f "$MODEL_DEST" ]; then
-    log "Downloading whisper model ${{MODEL_FILE}} from s3://${{STT_MODELS_BUCKET}}/models/..."
-    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/${{MODEL_FILE}}" "$MODEL_DEST" --region "${{AWS_DEFAULT_REGION}}"
-fi
-test -s "$MODEL_DEST" && log "Whisper model ready: $MODEL_DEST ($(du -h "$MODEL_DEST" | cut -f1))"
-
-# 3. Install pywhispercpp and write the Python shim.
-#    Use the Python that mise installed (in `_install_toolchain_script`),
-#    bind the global shim so the systemd service can find it, then
-#    install pywhispercpp into that interpreter. System `python3` on
-#    AL2023 is 3.9; pywhispercpp's PEP 604 syntax requires Python 3.10+.
-log "Binding Python shim globally and installing pywhispercpp..."
-mise use -g python
-PIP_LOG=$(mktemp)
-if ! python3 -m pip install pywhispercpp python-multipart imageio-ffmpeg >"$PIP_LOG" 2>&1; then
-    log "ERROR: pywhispercpp install failed; last 30 lines:"
-    tail -30 "$PIP_LOG"
-    log "See $PIP_LOG for full output"
-    exit 1
-fi
-rm -f "$PIP_LOG"
-
-# Verify the install actually works (catches "installed but broken").
-if ! python3 -c "import pywhispercpp; from pywhispercpp.model import Model" 2>&1; then
-    log "ERROR: pywhispercpp installed but not importable"
-    exit 1
-fi
-
-cat > /opt/whisper-stt/server.py <<'__WHISPER_SHIM_PY__'
-{shim_source}
-__WHISPER_SHIM_PY__
-chmod +x /opt/whisper-stt/server.py
-
-# 4. Write systemd unit and start the shim.
-cat > /etc/systemd/system/whisper-stt-shim.service <<'__WHISPER_SHIM_UNIT__'
-{systemd_unit}
-__WHISPER_SHIM_UNIT__
-
-mkdir -p /etc/blitzlog
-cat > /etc/blitzlog/whisper-stt.env <<ENVEOF
-WHISPER_MODEL=/opt/whisper-stt/models/${{MODEL_FILE}}
-WHISPER_LANGUAGE=${{STT_LANGUAGE}}
-REQUEST_TIMEOUT_MS=60000
-ENVEOF
-
-    systemctl daemon-reload
-    systemctl enable whisper-stt-shim.service
-    systemctl restart whisper-stt-shim.service
-
-# 5. Health-check the shim before the bot starts.
-for i in $(seq 1 30); do
-    if curl -sf http://127.0.0.1:7878/healthz > /dev/null 2>&1; then
-        log "whisper-stt-shim is healthy on http://127.0.0.1:7878"
-        break
-    fi
-    if ! systemctl is-active --quiet whisper-stt-shim.service; then
-        log "WARNING: whisper-stt-shim service is not active; bot will start without STT"
-        break
-    fi
-    log "Waiting for whisper-stt-shim... ($i/30)"
-    sleep 2
-done
-"""
-
-
-def _install_toolchain_script() -> str:
-    return r"""
-log "Checking for mise.toml or .tool-versions..."
-if [ -f /workspace/repo/mise.toml ] || [ -f /workspace/repo/.tool-versions ]; then
-    log "Installing mise..."
-    curl -fsSL https://mise.run | sh
-    export PATH="/root/.local/bin:$PATH"
-
-    cd /workspace/repo
-    mise trust 2>/dev/null || true
-
-    log "Installing project toolchains via mise..."
-    export MISE_NODE_VERIFY=0
-    mise install -y
-
-    MISE_SHIMS="/root/.local/share/mise/shims"
-    if [ -d "$MISE_SHIMS" ]; then
-        echo "export PATH=$MISE_SHIMS:/root/.local/bin:\$PATH" > /etc/profile.d/mise.sh
-        export PATH="$MISE_SHIMS:$PATH"
-    fi
-
-    log "Running project bootstrap if defined..."
-    if mise tasks --name-only 2>/dev/null | grep -qx "bootstrap"; then
-        mise run bootstrap
-    fi
-
-    log "Active toolchains:"
-    mise current || true
-else
-    log "No mise.toml or .tool-versions found, skipping"
-fi
-"""
-
-
 def _write_opencode_config_script(
-    autonomous: bool = True,
+    autonomous: bool = False,
     local_provider: dict | None = None,
     opencode_max_steps: int = 500,
 ) -> str:

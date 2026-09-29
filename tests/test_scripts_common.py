@@ -7,8 +7,6 @@ import unittest
 
 from _common import (
     _decode_api_errors_script,
-    _install_toolchain_script,
-    _install_whisper_stt_script,
     _preflight_local_llm_script,
     _read_secrets_from_ssm_script,
     _write_opencode_config_script,
@@ -62,113 +60,6 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("export BLITZLOG_ENV=dev", script)
 
 
-class TestWhisperSttScript(unittest.TestCase):
-    def test_whisper_install_script_downloads_from_github_release(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("github.com/ggml-org/whisper.cpp/releases/download", script)
-        self.assertIn("whisper-bin-aarch64-linux-gnu", script)
-
-    def test_whisper_install_script_falls_back_to_source_build(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("building whisper.cpp from source", script)
-        self.assertIn("cmake -S", script)
-
-    def test_whisper_install_script_downloads_model_from_s3(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("aws s3 cp", script)
-        self.assertIn("s3://${STT_MODELS_BUCKET}/models/", script)
-        self.assertIn("ggml-${STT_MODEL}.bin", script)
-
-    def test_whisper_install_script_writes_shim_source(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("/opt/whisper-stt/server.py", script)
-        self.assertNotIn("/opt/whisper-stt/server.js", script)
-
-    def test_whisper_install_script_installs_pywhispercpp(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("pywhispercpp", script)
-        self.assertIn("pip install", script)
-
-    def test_whisper_install_script_installs_systemd_unit(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("/etc/systemd/system/whisper-stt-shim.service", script)
-        self.assertIn("systemctl enable whisper-stt-shim.service", script)
-        self.assertIn("systemctl restart whisper-stt-shim.service", script)
-
-    def test_whisper_install_script_health_checks_before_bot(self):
-        script = _install_whisper_stt_script()
-        self.assertIn("http://127.0.0.1:7878/healthz", script)
-        self.assertIn("curl -sf", script)
-
-    def test_whisper_install_script_embeds_loaded_shim_source(self):
-        script = _install_whisper_stt_script()
-        # The embedded source must contain recognizable Python shim
-        # identifiers so we catch accidental overwrites / empty reads.
-        self.assertIn("pywhispercpp", script)
-        self.assertIn("whisper-stt-shim listening", script)
-        self.assertIn("HTTPServer", script)
-
-    def test_whisper_install_script_does_not_install_npm_deps(self):
-        # Regression: the Node.js shim is gone; npm install / busboy /
-        # ffmpeg-static must not reappear.
-        script = _install_whisper_stt_script()
-        self.assertNotIn("npm install", script)
-        self.assertNotIn("busboy", script)
-        self.assertNotIn("ffmpeg-static", script)
-
-    def test_whisper_shim_pip_install_fails_loud(self):
-        """Regression for the silent-pip-fail bug: pip install must NOT
-        be wrapped in `... | tail -3` (which masks exit codes under
-        `set -eu` and silently swallows failures). Use an explicit
-        `if ! ... ; then exit 1; fi` guard instead."""
-        script = _install_whisper_stt_script()
-        self.assertRegex(
-            script, r"if\s+!\s+python3\s+-m\s+pip\s+install\s+pywhispercpp"
-        )
-        # No `| tail -3` masking on pip install.
-        self.assertNotRegex(script, r"pip install[^|]*\|\s*tail")
-
-    def test_whisper_shim_verifies_pywhispercpp_imports(self):
-        """Catches "installed but broken" — pywhispercpp is on disk but
-        unimportable (e.g., ABI mismatch, missing libpython)."""
-        script = _install_whisper_stt_script()
-        self.assertIn(
-            'python3 -c "import pywhispercpp; from pywhispercpp.model import Model"',
-            script,
-        )
-
-    def test_whisper_shim_binds_mise_python_globally(self):
-        """`mise install -y` installs Python 3.12.x but does NOT bind the
-        global shim — until `mise use -g python` runs, `python3 --version`
-        in any clean shell reports "No version is set for shim: python3"
-        (and the systemd ExecStart fails to start)."""
-        script = _install_whisper_stt_script()
-        self.assertRegex(script, r"mise\s+use\s+-g\s+python\b")
-
-    def test_whisper_shim_systemd_uses_mise_shim_path(self):
-        """The systemd ExecStart must use the actual mise shim path
-        (/root/.local/share/mise/shims/python3 — that `whereis` confirms
-        exists), not /root/.local/bin/python3 (which doesn't exist on
-        AL2023; systemd starts with a clean PATH that doesn't include
-        the mise shim dir)."""
-        script = _install_whisper_stt_script()
-        unit_block = script.split("<<'__WHISPER_SHIM_UNIT__'\n", 1)[1].split(
-            "__WHISPER_SHIM_UNIT__", 1
-        )[0]
-        self.assertIn(
-            "ExecStart=/root/.local/share/mise/shims/python3",
-            unit_block,
-        )
-        self.assertNotIn("ExecStart=/usr/bin/python3 ", unit_block)
-        self.assertNotIn("ExecStart=/root/.local/bin/python3", unit_block)
-
-    def test_whisper_shim_script_is_executable(self):
-        """Hygiene: the systemd ExecStart runs `python3 <script>` (data
-        not exec), but chmod +x the script for consistency."""
-        script = _install_whisper_stt_script()
-        self.assertIn("chmod +x /opt/whisper-stt/server.py", script)
-
-
 class TestOpencodeProviderConfig(unittest.TestCase):
     def test_heredoc_uses_minimax_provider(self):
         script = _write_opencode_config_script()
@@ -213,46 +104,17 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         self.assertIn("1008", watchdog)
 
 
-class TestToolchainBootstrapScript(unittest.TestCase):
+class TestSessionArchivePluginInstallLocation(unittest.TestCase):
+    """The session-archive plugin must be installed in the global
+    opencode config dir (~/.config/opencode/plugins/) — not under
+    /workspace/repo/.opencode/plugins — so it runs across projects."""
+
     def test_session_archive_uses_global_directory(self):
         from plugins import _write_session_archive_plugin_script
 
         script = _write_session_archive_plugin_script()
         self.assertIn("/root/.config/opencode/plugins/session-archive.js", script)
         self.assertNotIn("/workspace/repo/.opencode/plugins", script)
-
-    def test_script_installs_mise(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise.run", script)
-        self.assertIn("mise install", script)
-
-    def test_script_checks_config_files(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise.toml", script)
-        self.assertIn(".tool-versions", script)
-
-    def test_script_trusts_config(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise trust", script)
-
-    def test_script_sets_up_shims_path(self):
-        script = _install_toolchain_script()
-        self.assertIn("mise/shims", script)
-        self.assertIn("/etc/profile.d/mise.sh", script)
-
-    def test_script_handles_missing_config(self):
-        script = _install_toolchain_script()
-        self.assertIn("No mise.toml or .tool-versions found", script)
-
-    def test_toolchain_runs_bootstrap_if_present(self):
-        script = _install_toolchain_script()
-        self.assertIn("bootstrap", script)
-        self.assertIn("mise tasks --name-only", script)
-
-    def test_no_secrets_in_toolchain_script(self):
-        script = _install_toolchain_script()
-        self.assertNotIn("ghp_", script)
-        self.assertNotIn("sk-", script)
 
 
 class TestPreflightScript(unittest.TestCase):

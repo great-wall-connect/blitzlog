@@ -6,11 +6,16 @@ Builds the bash script that EC2 runs at first boot for an autonomous
   - fetches secrets from SSM (GitHub token, optionally the cloud API key)
   - optionally installs/authenticates Tailscale (for local-LLM transport)
   - probes the local LLM endpoint if configured (abort on 5 min unreachable)
-  - installs system packages, opencode, the toolchain
+  - downloads the whisper model from S3 (if not cached locally) for
+    the container's whisper-stt-shim
   - writes the opencode config + session-archive plugin
   - writes the spot-watchdog and periodic-autosave plugins
-  - wraps the opencode run in a watchdog that uploads logs + session on
-    exit and terminates the instance
+  - writes /etc/blitzlog.env (the host's watchdog reads this and
+    passes selected vars to the container)
+  - boots the host's Packer-baked watchdog.sh via systemd, which loads
+    the Packer-baked container image and `docker run`s it; the
+    container's entrypoint handles the rest (git clone, mise install,
+    `opencode run --agent build`)
 
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with assisted mode (`_decode_api_errors_script`,
@@ -95,15 +100,6 @@ log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"min
 
 log "Writing periodic autosave plugin..."
 {_write_periodic_autosave_plugin_script()}
-
-log "Setting up watchdog (timeout: 7200s)..."
-cat > /etc/blitzlog.env <<ENVEOF
-ISSUE_NUMBER={issue_number}
-S3_LOGS_BUCKET={s3_bucket}
-REPO={repo}
-SESSION_ARCHIVE_BUCKET={s3_bucket}
-SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
-ENVEOF
 
 log "Starting autonomous opencode agent via systemd watchdog..."
 # The watchdog (Packer-baked to /usr/local/bin/watchdog.sh, registered

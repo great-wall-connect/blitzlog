@@ -188,7 +188,6 @@ log "whisper-stt-shim ready (after ${i}s)"
 if [ "$MODE" = "autonomous" ]; then
     # --- Autonomous: clone, install toolchain, run agent ---
     log "Autonomous mode: cloning ${REPO:-<unknown-repo>}"
-    mkdir -p /workspace
     cd /workspace
     git clone "https://github.com/${REPO}.git" repo
     cd repo
@@ -212,6 +211,30 @@ if [ "$MODE" = "autonomous" ]; then
     exit "$EXIT"
 else
     # --- Assisted: long-running opencode serve + telegram-bot ---
+    log "Assisted mode: cloning ${REPO:-<unknown-repo>}"
+    cd /workspace
+    if [ ! -d repo/.git ]; then
+        git clone "https://github.com/${REPO}.git" repo
+    else
+        log "Workspace already cloned; skipping"
+        cd repo
+        git fetch origin 2>/dev/null || true
+    fi
+    cd repo
+
+    # Project-side bootstrap (mirrors autonomous mode and main's pre-docker
+    # bootstrap). mise installs the toolchain pinned in mise.toml so
+    # /workspace/repo can be developed with the same tooling locally.
+    if [ -f mise.toml ] || [ -f .tool-versions ]; then
+        wget -q -O - https://mise.run | sh || curl -fsSL https://mise.run | sh
+        export PATH="/root/.local/bin:$PATH"
+        mise trust 2>/dev/null || true
+        mise install -y
+        if mise tasks --name-only 2>/dev/null | grep -qx bootstrap; then
+            mise run bootstrap
+        fi
+    fi
+
     log "Assisted mode: starting opencode serve"
 
     # Generate server-side auth credentials. The bot uses these to
@@ -232,6 +255,9 @@ else
     # Start opencode serve via setsid so it gets its own process group
     # (independent of the entrypoint shell's controlling terminal).
     # This is the systemd-style daemonization the test was missing.
+    # Run from /workspace/repo so opencode serve can auto-discover the
+    # project at the /project endpoint (matches main's pre-docker flow).
+    cd /workspace/repo
     setsid opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/opencode-serve.log 2>&1 &
     SERVE_PID=$!
     # Wait only for the port to be listening, not for /health (which
@@ -248,6 +274,62 @@ else
         sleep 1
     done
     log "opencode serve ready (after ${i}s)"
+
+    # Auto-select project (and session if resuming) in the bot's settings.
+    # Matches main's pre-docker-refactor flow: the bootstrap queried
+    # opencode serve at /project for a project whose worktree matches
+    # /workspace, and wrote /root/.config/opencode-telegram-bot/settings.json
+    # so the bot pre-selects the project when it starts (no /projects
+    # prompt required from the user).
+    log "Auto-selecting project and session in bot settings..."
+    PROJECT_JSON=$(curl -sf -u "agent:${OPENCODE_SERVER_PASSWORD}" http://127.0.0.1:4096/project 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for p in data if isinstance(data, list) else [data]:
+    if p.get('worktree','').startswith('/workspace'):
+        print(json.dumps({'id': p['id'], 'worktree': p['worktree'], 'name': p.get('name', p['worktree'])}))
+        break
+" 2>/dev/null || echo "")
+
+    if [ -n "$PROJECT_JSON" ]; then
+        if [ "${OPENCODE_RESUMED:-}" = "true" ] && [ -f /tmp/session-import.json ]; then
+            # Resume requires an active session ID; the host bootstrap
+            # downloaded the session JSON to /tmp before this container
+            # started (this file is on the host's /tmp, NOT mounted — see
+            # the follow-up to also mount /tmp or move the file).
+            RESTORE_SESSION_ID=$(python3 -c "import json; print(json.load(open('/tmp/session-import.json')).get('id',''))" 2>/dev/null || echo "")
+            if [ -n "$RESTORE_SESSION_ID" ]; then
+                SESSION_TITLE=$(curl -sf -u "agent:${OPENCODE_SERVER_PASSWORD}" "http://127.0.0.1:4096/session/${RESTORE_SESSION_ID}" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps({'id': d['id'], 'title': d.get('title',''), 'directory': d.get('directory','')}))
+" 2>/dev/null || echo "")
+                if [ -n "$SESSION_TITLE" ]; then
+                    cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+{\"currentProject\": $PROJECT_JSON, \"currentSession\": $SESSION_TITLE}
+SETTINGS_EOF
+                    log "Project and session pre-selected (resumed)"
+                else
+                    cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+{\"currentProject\": $PROJECT_JSON}
+SETTINGS_EOF
+                    log "Project pre-selected (new session); session resume unavailable"
+                fi
+            else
+                cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+{\"currentProject\": $PROJECT_JSON}
+SETTINGS_EOF
+                log "Project pre-selected (new session); resume session ID missing"
+            fi
+        else
+            cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+{\"currentProject\": $PROJECT_JSON}
+SETTINGS_EOF
+            log "Project pre-selected (new session)"
+        fi
+    else
+        log "WARNING: Could not auto-select project, user will need /projects"
+    fi
 
     # --- Telegram bot (setsid + uses the env vars set above) ---
     log "Starting telegram bot"
@@ -278,11 +360,60 @@ else
     chmod 600 "$bot_env_dir/.env"
     log "Wrote bot config to $bot_env_dir/.env"
 
+    # Pre-warm the opencode-telegram-bot package (downloads to npx cache).
+    # Matches the bootstrap's pre-warm from main; without this the first
+    # bot start would download the package cold and block until done.
+    log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
+    if ! npx -y @grincev/opencode-telegram-bot@latest status >/var/log/pre-warm.log 2>&1; then
+        log "WARNING: Pre-warm failed; will attempt bot start anyway and notify user"
+    fi
+
+    # Fetch the issue title for the Telegram notification body. gh is in
+    # the container runtime image (added in commit c7bfcc4).
+    ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null || echo "unknown")
+
+    # Build the resume-status suffix for the notification (matches main).
+    RESUME_STATUS=""
+    if [ "${OPENCODE_RESUMED:-}" = "true" ] && [ -n "${OPENCODE_RESUMED_TITLE:-}" ]; then
+        RESUME_STATUS="\n\nResumed session: ${OPENCODE_RESUMED_TITLE}"
+    fi
+
+    # Send a proactive "agent ready" notification to the user's Telegram
+    # chat. Matches the pre-docker-refactor behavior from main: the
+    # bootstrap issued this curl right before starting the bot. Moving it
+    # to the entrypoint keeps the behavior identical because the
+    # container has the same env vars (TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID,
+    # TELEGRAM_BOT_NAME, OPENCODE_RESUMED_*) the bootstrap used to have.
+    log "Sending Telegram ready notification"
+    if [ "${PRE_WARM_EXIT:-0}" -ne 0 ]; then
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_USER_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="Assisted agent cannot be started [Bot: ${TELEGRAM_BOT_NAME}]
+
+Repo: ${REPO}
+[Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}](https://github.com/${REPO}/issues/${ISSUE_NUMBER})
+Mode: Assisted (interactive via Telegram)${RESUME_STATUS}" \
+            || true
+    else
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_USER_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="Assisted agent ready [Bot: ${TELEGRAM_BOT_NAME}]
+
+Repo: ${REPO}
+[Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}](https://github.com/${REPO}/issues/${ISSUE_NUMBER})
+Mode: Assisted (interactive via Telegram)${RESUME_STATUS}
+
+Connect to this bot to start working on the task." \
+            || true
+    fi
+
     # setsid gives the bot its own process group (independent of the
     # entrypoint shell's controlling terminal). The bot inherits the
     # parent shell's env (TELEGRAM_BOT_TOKEN, STT_*, etc. from
     # --env-file) and reads everything else from $bot_env_dir/.env.
-    setsid npx -y @grinev/opencode-telegram-bot@latest start >>/var/log/telegram-bot.log 2>&1 &
+    setsid npx -y @grincev/opencode-telegram-bot@latest start >>/var/log/telegram-bot.log 2>&1 &
     BOT_PID=$!
 
     log "All services running; idle until SIGTERM"

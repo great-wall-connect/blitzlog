@@ -6,19 +6,23 @@ Builds the bash script that EC2 runs at first boot for an assisted
   - exports Telegram creds (token, user ID)
   - fetches secrets from SSM
   - optionally installs/authenticates Tailscale (for local-LLM transport)
-  - probes the local LLM endpoint if configured (assisted mode: prompt the
-    user on Telegram with [Retry]/[Abort]/[Use cloud fallback] buttons;
-    cloud fallback switches the opencode config to use the cloud provider)
-  - installs system packages + Node.js 24 (for the Telegram bot) + opencode
-  - installs the toolchain via mise
-  - restores any previous-session state from S3
+  - probes the local LLM endpoint if configured (assisted mode: prompt
+    the user on Telegram with [Retry]/[Abort]/[Use cloud fallback]
+    buttons; cloud fallback switches the opencode config to use the
+    cloud provider)
+  - restores any previous-session state from S3 and exports the
+    resume flag + title to /etc/blitzlog.env (consumed by the container
+    entrypoint to construct the Telegram ready notification)
   - writes the opencode config + session-archive plugin
   - writes the spot-watchdog and periodic-autosave plugins
   - writes the idle-watchdog plugin and the user-invoked shutdown tool
-  - boots the opencode server on 127.0.0.1:4096
-  - pre-warms the @grinev/opencode-telegram-bot package, sends Telegram
-    notification, and starts the bot (foreground; the systemd cleanup
-    unit invokes /usr/local/bin/assisted-shutdown.sh on instance stop)
+  - writes /etc/blitzlog.env (the host's watchdog reads this and
+    passes selected vars to the container)
+  - boots the host's Packer-baked watchdog.sh via systemd, which loads
+    the Packer-baked container image and `docker run`s it; the
+    container's entrypoint handles the rest (git clone, mise install,
+    opencode serve, telegram bot, Telegram ready notification, project
+    auto-selection)
 
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with autonomous mode live in `_common.py`.
@@ -78,6 +82,18 @@ if aws s3 ls "s3://${{S3_RESTORE_BUCKET}}/${{S3_RESTORE_PREFIX}}/metadata.json" 
     fi
 else
     log "No previous session state found"
+fi
+
+# Export resume state for the watchdog/entrypoint. The container
+# entrypoint reads these from /etc/blitzlog.env (written by the bootstrap
+# block below) to construct the "Resumed session: <title>" line in the
+# Telegram ready notification — matching the pre-docker-refactor flow on
+# main.
+export OPENCODE_RESUMED="$RESUMED"
+if [ -f /tmp/session-import.json ]; then
+    export OPENCODE_RESUMED_TITLE=$(python3 -c "import json; print(json.load(open('/tmp/session-import.json')).get('title',''))" 2>/dev/null || echo "")
+else
+    export OPENCODE_RESUMED_TITLE=""
 fi
 """
 
@@ -183,6 +199,8 @@ STT_API_KEY=${{STT_API_KEY}}
 STT_MODEL=${{STT_MODEL}}
 STT_LANGUAGE=${{STT_LANGUAGE}}
 OPENCODE_SERVER_USERNAME=agent
+OPENCODE_RESUMED=${{OPENCODE_RESUMED:-}}
+OPENCODE_RESUMED_TITLE=${{OPENCODE_RESUMED_TITLE:-}}
 GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
 ENVEOF
 
