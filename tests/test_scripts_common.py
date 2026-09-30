@@ -9,7 +9,6 @@ import unittest
 from _common import (
     _decode_api_errors_script,
     _read_secrets_from_ssm_script,
-    script_header,
 )
 from _env import BLITZLOG_ENV
 

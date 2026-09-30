@@ -25,8 +25,6 @@ entrypoint.sh. The host bootstrap no longer needs to install or configure
 the agent runtime — that's the container's job now.
 """
 
-import json
-
 from _env import _blitzlog_env, _ssm_root
 
 
