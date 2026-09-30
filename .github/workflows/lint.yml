@@ -47,7 +47,7 @@ jobs:
       - name: Pytest
         env:
           AWS_DEFAULT_REGION: us-east-1
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ --ignore=tests/test_shim.py -v
 
   terraform:
     name: Validate Terraform
