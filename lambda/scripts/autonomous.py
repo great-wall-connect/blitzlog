@@ -34,10 +34,6 @@ from _common import (
     _write_opencode_config_script,
     script_header,
 )
-from plugins import (
-    _write_periodic_autosave_plugin_script,
-    _write_session_archive_plugin_script,
-)
 
 
 def build_autonomous_user_data(
@@ -92,14 +88,16 @@ if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
         --region "$REGION"
 fi
 
-log "Writing opencode config and session archive plugin..."
+log "Writing opencode config..."
 {_write_opencode_config_script(autonomous=True, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
-{_write_session_archive_plugin_script()}
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing periodic autosave plugin..."
-{_write_periodic_autosave_plugin_script()}
+# opencode plugins (session_archive, spot_watchdog) and tools are baked
+# into the container image at /root/.config/opencode/{{plugins,tools}}/
+# by the Dockerfile (packages/images/agent/Dockerfile). Autonomous mode
+# only needs session_archive + spot_watchdog; idle_watchdog and
+# periodic_autosave are assisted-mode-only and not loaded in autonomous.
 
 log "Starting autonomous opencode agent via systemd watchdog..."
 # The watchdog (Packer-baked to /usr/local/bin/watchdog.sh, registered

@@ -32,10 +32,14 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FI
 # Load the baked agent image
 sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
 
-# Pre-create the signal dirs (owned by host, so container's touch can't
-# fail with permission denied).
+# Pre-create .blitzlog (owned by host, so container's writes can't fail
+# with permission denied) and .idle as a "container is alive" marker.
+# We do NOT pre-create .shutdown — that's only created when the agent's
+# shutdown tool runs assisted-shutdown.sh (as its LAST step, after
+# exporting the session). This avoids a race against the watchdog's
+# own exit-detection logic.
 mkdir -p /workspace/.blitzlog
-touch /workspace/.idle /workspace/.shutdown
+touch /workspace/.idle
 
 # Compute IMDSv2 token + region + instance id (host AWS creds via role)
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' \

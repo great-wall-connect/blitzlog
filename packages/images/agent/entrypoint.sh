@@ -24,10 +24,13 @@ set -eu
 # per-file redirects and are unaffected.
 mkdir -p /var/log/blitzlog
 
-# Pre-create the signal files so the container's touch won't fail with
-# permission denied (the host owns /workspace, not the container user).
+# Pre-create .idle as a "container is alive" marker visible from the
+# host. We do NOT pre-create .shutdown — that's only created when the
+# agent's shutdown tool runs assisted-shutdown.sh (as its LAST step,
+# after exporting the session). The host's watchdog/watcher script
+# detects .shutdown by polling for its existence.
 mkdir -p /workspace/.blitzlog
-touch /workspace/.idle /workspace/.shutdown
+touch /workspace/.idle
 
 log() {
     local msg
@@ -83,11 +86,11 @@ if [ -n "${GIT_USER_NAME:-}" ]; then
     git config --global user.email "${GIT_USER_EMAIL:-}"
 fi
 
-# --- 2. Copy baked-in opencode plugins into the config dir ---
-mkdir -p /root/.config/opencode/plugins
-if [ -d /opt/blitzlog/plugins ]; then
-    cp /opt/blitzlog/plugins/*.js /root/.config/opencode/plugins/ 2>/dev/null || true
-fi
+# --- 2. (plugins/tools baked into the image by the Dockerfile) ---
+# opencode plugins (idle_watchdog, periodic_autosave, session_archive,
+# spot_watchdog) and tools (shutdown) are placed directly into
+# /root/.config/opencode/{plugins,tools}/ by the Dockerfile. No runtime
+# copy needed.
 
 # --- 3. Derive model + provider config; write opencode.jsonc/json ---
 # OPENCODE_MODEL is the slash-form "provider/model_id" string (e.g.

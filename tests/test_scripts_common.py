@@ -107,14 +107,34 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
 class TestSessionArchivePluginInstallLocation(unittest.TestCase):
     """The session-archive plugin must be installed in the global
     opencode config dir (~/.config/opencode/plugins/) — not under
-    /workspace/repo/.opencode/plugins — so it runs across projects."""
+    /workspace/repo/.opencode/plugins — so it runs across projects.
+
+    After the plugins/tools refactor, the file lives at
+    packages/images/agent/opencode/plugins/session_archive.js and is
+    baked into the image by the Dockerfile. This test asserts the source
+    file exists at the expected repo path so the Dockerfile COPY
+    succeeds."""
 
     def test_session_archive_uses_global_directory(self):
-        from plugins import _write_session_archive_plugin_script
+        # session_archive plugin lives at
+        # packages/images/agent/opencode/plugins/session_archive.js and is
+        # baked into the image at /root/.config/opencode/plugins/ by the
+        # Dockerfile. Verify the file is in the expected location.
+        import os
 
-        script = _write_session_archive_plugin_script()
-        self.assertIn("/root/.config/opencode/plugins/session-archive.js", script)
-        self.assertNotIn("/workspace/repo/.opencode/plugins", script)
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "packages",
+            "images",
+            "agent",
+            "opencode",
+            "plugins",
+            "session_archive.js",
+        )
+        self.assertTrue(
+            os.path.exists(path),
+            f"session_archive.js should live at {path} for the Dockerfile COPY",
+        )
 
 
 class TestPreflightScript(unittest.TestCase):

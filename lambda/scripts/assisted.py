@@ -40,12 +40,6 @@ from _common import (
     _write_opencode_config_script,
     script_header,
 )
-from plugins import (
-    _write_idle_watchdog_plugin_script,
-    _write_periodic_autosave_plugin_script,
-    _write_session_archive_plugin_script,
-    _write_shutdown_tool_script,
-)
 
 
 def _session_restore_script(repo: str, issue_number: int, s3_bucket: str) -> str:
@@ -153,20 +147,17 @@ fi
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
 
-log "Writing opencode config and session archive plugin..."
+log "Writing opencode config..."
 {_write_opencode_config_script(autonomous=False, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
-{_write_session_archive_plugin_script()}
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
-log "Writing periodic autosave plugin..."
-{_write_periodic_autosave_plugin_script()}
-
-log "Writing shutdown tool..."
-{_write_shutdown_tool_script()}
-
-log "Writing idle watchdog plugin..."
-{_write_idle_watchdog_plugin_script()}
+# opencode plugins (idle_watchdog, periodic_autosave, session_archive,
+# spot_watchdog) and tools (shutdown) are now baked into the container
+# image at /root/.config/opencode/{{plugins,tools}}/ by the Dockerfile
+# (packages/images/agent/Dockerfile). The Lambda bootstrap no longer
+# writes them via heredoc — that path was removed when the container
+# took over plugin/tool installation.
 
 log "Starting blitzlog-agent via systemd watchdog..."
 # The watchdog (Packer-baked to /usr/local/bin/watchdog.sh and registered

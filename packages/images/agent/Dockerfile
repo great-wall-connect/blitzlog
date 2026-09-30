@@ -191,8 +191,16 @@ COPY server.py /opt/whisper-stt/server.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
 
+# opencode plugins (idle_watchdog, periodic_autosave, session_archive,
+# spot_watchdog) and tools (shutdown). These are baked directly into
+# the opencode config dirs so they're present from the first startup —
+# no runtime copy needed. Without these, the agent has no shutdown
+# tool, no idle watchdog, no session archiver, etc.
+COPY opencode/plugins/ /root/.config/opencode/plugins/
+COPY opencode/tools/ /root/.config/opencode/tools/
+
 # Layout that the entrypoint expects
-RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/plugins /workspace /var/log/blitzlog \
+RUN mkdir -p /opt/whisper-stt/models /workspace /var/log/blitzlog \
     && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh
 
 # Sanity checks

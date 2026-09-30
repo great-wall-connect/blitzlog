@@ -77,7 +77,7 @@ docker buildx build \
   ./packages/images/agent
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
-touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+touch /tmp/blitzlog-workspace/.idle
 docker run --rm --entrypoint="" \
   --env-file ./packages/images/agent/.env.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
@@ -98,7 +98,7 @@ docker buildx build \
   ./packages/images/agent
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
-touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+touch /tmp/blitzlog-workspace/.idle
 docker run --rm --entrypoint="" \
   --env-file ./packages/images/agent/.env.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
@@ -110,7 +110,7 @@ docker run --rm --entrypoint="" \
 """
 
 [tasks.image-telegram-live]
-description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
+description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. The host-side watcher polls /workspace/.shutdown and SIGTERMs the container when the agent invokes its shutdown tool, mirroring the production watchdog's behavior. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
 run = """
 docker buildx build \
   --builder default \
@@ -119,7 +119,33 @@ docker buildx build \
   ./packages/images/agent
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
-touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+# Pre-create .idle as a "container is alive" marker. We do NOT
+# pre-create .shutdown — the host-side watcher below polls for its
+# existence and would otherwise fire on the pre-existing file. .shutdown
+# is created by the agent's shutdown tool (assisted-shutdown.sh) as
+# its LAST step, after the session is exported.
+touch /tmp/blitzlog-workspace/.idle
+# Remove any stale .shutdown left over from a previous run, so the
+# watcher below doesn't fire immediately on startup. The watcher
+# polls for the file's existence, so any leftover .shutdown would
+# immediately satisfy `[ -f ... ]` and trigger an early kill.
+rm -f /tmp/blitzlog-workspace/.shutdown
+rm -f /tmp/blitzlog-workspace/repo/
+# Host-side shutdown watcher — local equivalent of the production
+# watchdog.sh. Polls the host-mirrored .shutdown file and SIGTERMs the
+# container when the agent invokes its shutdown tool. .shutdown is
+# only created by the shutdown tool itself, so an existence check is
+# sufficient — no mtime math, no race.
+(
+    while [ ! -f /tmp/blitzlog-workspace/.shutdown ]; do
+        sleep 1
+    done
+    echo "[watcher] .shutdown detected; sending SIGTERM to blitzlog-tg-test"
+    docker kill --signal TERM blitzlog-tg-test 2>/dev/null || true
+) &
+WATCHER_PID=$!
+# Clean up the watcher when the mise task exits (success, Ctrl-C, error).
+trap "kill $WATCHER_PID 2>/dev/null || true" EXIT INT TERM
 # Fetch a fresh GitHub token from the host's `gh auth login` and pass
 # it to the container via -e. The token is short-lived, so we generate
 # it on every run rather than storing it. -e overrides any value that

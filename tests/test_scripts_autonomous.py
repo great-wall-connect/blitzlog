@@ -68,6 +68,12 @@ class TestAutonomousModelAndDiagnostics(unittest.TestCase):
 
 
 class TestAutonomousShutdownExclusion(unittest.TestCase):
+    """Autonomous mode runs unattended and has no interactive shutdown
+    surface (no Telegram bot, no agent tool call). The shutdown tool
+    is still installed in the image (the Dockerfile copies it), but the
+    Lambda user-data should NOT include any shutdown-tool wiring — the
+    watchdog terminates the instance on container exit."""
+
     def test_user_data_excludes_shutdown_tool(self):
         user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
         self.assertNotIn("shutdown.js", user_data)
