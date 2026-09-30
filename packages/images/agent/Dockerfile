@@ -146,6 +146,7 @@ ARG NODE_VERSION
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=UTC \
     PATH=/usr/local/bin:/usr/bin:/bin
 
 # Runtime deps only. libgomp1 is required by whisper.cpp's matrix multiplications.

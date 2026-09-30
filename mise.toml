@@ -110,7 +110,7 @@ docker run --rm --entrypoint="" \
 """
 
 [tasks.image-telegram-live]
-description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs."
+description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
 run = """
 docker buildx build \
   --builder default \
@@ -120,8 +120,13 @@ docker buildx build \
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
 touch /tmp/blitzlog-workspace/.idle /tmp/blitzlog-workspace/.shutdown
+# Fetch a fresh GitHub token from the host's `gh auth login` and pass
+# it to the container via -e. The token is short-lived, so we generate
+# it on every run rather than storing it. -e overrides any value that
+# might be in .env.test.
 docker run --rm -i \
   --env-file ./packages/images/agent/.env.test \
+  -e "GITHUB_TOKEN=$(gh auth token)" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
   -v /tmp/blitzlog-workspace:/workspace \

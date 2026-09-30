@@ -55,11 +55,28 @@ trap shutdown TERM INT
 
 # --- 1. Configure git credentials (mounted from host) ---
 if [ -n "${GITHUB_TOKEN:-}" ]; then
+    # Capture into a local var so we can unset the env var before
+    # piping the token to `gh auth login --with-token`. gh refuses
+    # --with-token while GITHUB_TOKEN is set in env. After this block,
+    # git uses the credential helper (not env) and gh uses its own
+    # stored credentials (not env), so leaving the env vars unset is
+    # safe — no code downstream reads GITHUB_TOKEN from env.
+    local_token="$GITHUB_TOKEN"
     mkdir -p /root/.git-credentials.d
-    printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" \
+    printf 'https://x-access-token:%s@github.com\n' "$local_token" \
         > /root/.git-credentials.d/github
     chmod 600 /root/.git-credentials.d/github
     git config --global credential.helper 'store --file /root/.git-credentials.d/github'
+    # Authenticate gh CLI for `gh issue view` etc. gh does not support
+    # unauthenticated access for any repo (public or private), so
+    # without this it exits non-zero and aborts the entrypoint under
+    # `set -e`. We unset GITHUB_TOKEN and GH_TOKEN first because gh
+    # refuses --with-token while either is set in env. Token is piped
+    # via stdin to keep it out of argv. We don't restore the env vars —
+    # git uses the credential helper, gh reads from its stored
+    # credentials.
+    unset GITHUB_TOKEN GH_TOKEN
+    printf '%s\n' "$local_token" | gh auth login --with-token --hostname github.com >/dev/null
 fi
 if [ -n "${GIT_USER_NAME:-}" ]; then
     git config --global user.name "${GIT_USER_NAME}"
@@ -172,7 +189,7 @@ export WHISPER_LANGUAGE="${STT_LANGUAGE:-en}"
 # --- 5. Start whisper-stt-shim (always) ---
 log "Starting whisper-stt-shim..."
 mkdir -p /var/log
-python3 /opt/whisper-stt/server.py >>/var/log/whisper-stt-shim.log 2>&1 &
+python3 /opt/whisper-stt/server.py >>/var/log/blitzlog/whisper-stt-shim.log 2>&1 &
 SHIM_PID=$!
 i=0
 while [ "$i" -lt 30 ]; do
@@ -212,6 +229,9 @@ if [ "$MODE" = "autonomous" ]; then
 else
     # --- Assisted: long-running opencode serve + telegram-bot ---
     log "Assisted mode: cloning ${REPO:-<unknown-repo>}"
+    # Bot config dir holds settings.json (auto-select below) and .env
+    # (bot startup below). Both write paths need the dir to exist.
+    mkdir -p /root/.config/opencode-telegram-bot
     cd /workspace
     if [ ! -d repo/.git ]; then
         git clone "https://github.com/${REPO}.git" repo
@@ -258,7 +278,7 @@ else
     # Run from /workspace/repo so opencode serve can auto-discover the
     # project at the /project endpoint (matches main's pre-docker flow).
     cd /workspace/repo
-    setsid opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/opencode-serve.log 2>&1 &
+    setsid opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/blitzlog/opencode-serve.log 2>&1 &
     SERVE_PID=$!
     # Wait only for the port to be listening, not for /health (which
     # can take 30s+ if opencode is doing a real LLM-API connectivity
@@ -306,24 +326,24 @@ print(json.dumps({'id': d['id'], 'title': d.get('title',''), 'directory': d.get(
 " 2>/dev/null || echo "")
                 if [ -n "$SESSION_TITLE" ]; then
                     cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{\"currentProject\": $PROJECT_JSON, \"currentSession\": $SESSION_TITLE}
+{"currentProject": $PROJECT_JSON, "currentSession": $SESSION_TITLE}
 SETTINGS_EOF
                     log "Project and session pre-selected (resumed)"
                 else
                     cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{\"currentProject\": $PROJECT_JSON}
+{"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
                     log "Project pre-selected (new session); session resume unavailable"
                 fi
             else
                 cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{\"currentProject\": $PROJECT_JSON}
+{"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
                 log "Project pre-selected (new session); resume session ID missing"
             fi
         else
             cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
-{\"currentProject\": $PROJECT_JSON}
+{"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
             log "Project pre-selected (new session)"
         fi
@@ -360,17 +380,34 @@ SETTINGS_EOF
     chmod 600 "$bot_env_dir/.env"
     log "Wrote bot config to $bot_env_dir/.env"
 
-    # Pre-warm the opencode-telegram-bot package (downloads to npx cache).
-    # Matches the bootstrap's pre-warm from main; without this the first
-    # bot start would download the package cold and block until done.
-    log "Pre-warming opencode-telegram-bot (downloads package to npx cache)..."
-    if ! npx -y @grincev/opencode-telegram-bot@latest status >/var/log/pre-warm.log 2>&1; then
-        log "WARNING: Pre-warm failed; will attempt bot start anyway and notify user"
+    # The Dockerfile installs @grinev/opencode-telegram-bot globally via
+    # `npm install -g`, so the binary is already on PATH. The old pre-warm
+    # called `npx ... status` to populate the npx cache, but `status` runs
+    # an interactive / long-poll health check that never returns during
+    # pre-launch (it reports "Service status: stopped" and then waits
+    # indefinitely). Just verify the binary is on PATH instead — instant
+    # and matches the actual contract.
+    log "Checking for opencode-telegram-bot binary..."
+    PRE_WARM_EXIT=0
+    if ! command -v opencode-telegram >/dev/null 2>&1; then
+        PRE_WARM_EXIT=1
+        log "WARNING: opencode-telegram-bot binary not on PATH; bot start will likely fail"
     fi
 
     # Fetch the issue title for the Telegram notification body. gh is in
-    # the container runtime image (added in commit c7bfcc4).
-    ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null || echo "unknown")
+    # the container runtime image (added in commit c7bfcc4). The
+    # OPENCODE_ISSUE_TITLE env override is provided for local testing
+    # (when `gh` may be rate-limited or unauthenticated) and any other
+    # deployment that already knows the title upstream.
+    ISSUE_TITLE="${OPENCODE_ISSUE_TITLE:-}"
+    if [ -z "$ISSUE_TITLE" ]; then
+        if ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null); then
+            :
+        else
+            log "WARNING: gh issue view failed (gh may need 'gh auth login' or GH_TOKEN); using 'unknown'"
+            ISSUE_TITLE="unknown"
+        fi
+    fi
 
     # Build the resume-status suffix for the notification (matches main).
     RESUME_STATUS=""
@@ -413,7 +450,7 @@ Connect to this bot to start working on the task." \
     # entrypoint shell's controlling terminal). The bot inherits the
     # parent shell's env (TELEGRAM_BOT_TOKEN, STT_*, etc. from
     # --env-file) and reads everything else from $bot_env_dir/.env.
-    setsid npx -y @grincev/opencode-telegram-bot@latest start >>/var/log/telegram-bot.log 2>&1 &
+    setsid npx -y @grinev/opencode-telegram-bot@latest start >>/var/log/blitzlog/telegram-bot.log 2>&1 &
     BOT_PID=$!
 
     log "All services running; idle until SIGTERM"
