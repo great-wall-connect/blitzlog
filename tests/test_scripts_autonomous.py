@@ -61,7 +61,7 @@ class TestAutonomousModelAndDiagnostics(unittest.TestCase):
         # writes the actual opencode.json; the bootstrap is just a
         # diagnostic line.
         self.assertIn("Effective opencode config", user_data)
-        self.assertIn('model=$OPENCODE_MODEL', user_data)
+        self.assertIn("model=$OPENCODE_MODEL", user_data)
 
     def test_default_opencode_model_is_minimax(self):
         with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):
@@ -82,5 +82,7 @@ class TestAutonomousShutdownExclusion(unittest.TestCase):
         user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
         self.assertNotIn("shutdown.js", user_data)
         self.assertNotIn("SHUTDOWN_TOOL_JS", user_data)
+
+
 if __name__ == "__main__":
     unittest.main()

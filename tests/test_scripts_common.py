@@ -56,6 +56,8 @@ class TestSSMSecretsScript(unittest.TestCase):
         self.assertIn("/blitzlog/dev/ephemeral/github-token-42", script)
         self.assertIn("/blitzlog/dev/opencode/api-key", script)
         self.assertIn("export BLITZLOG_ENV=dev", script)
+
+
 class TestDecodeApiErrorsScript(unittest.TestCase):
     def test_decodes_insufficient_balance_1008(self):
         script = _decode_api_errors_script()
@@ -115,6 +117,8 @@ class TestSessionArchivePluginInstallLocation(unittest.TestCase):
             os.path.exists(path),
             f"session_archive.js should live at {path} for the Dockerfile COPY",
         )
+
+
 class TestReadSecretsWithLocalLlm(unittest.TestCase):
     def test_cloud_path_exports_api_key(self):
         script = _read_secrets_from_ssm_script(42, local_llm=False)
@@ -128,5 +132,7 @@ class TestReadSecretsWithLocalLlm(unittest.TestCase):
     def test_default_local_llm_false(self):
         script = _read_secrets_from_ssm_script(42)
         self.assertIn("export OPENCODE_API_KEY", script)
+
+
 if __name__ == "__main__":
     unittest.main()
