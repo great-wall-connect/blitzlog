@@ -68,7 +68,7 @@ docker run --rm --platform linux/arm64 --entrypoint="" \
 """
 
 [tasks.image-run-test]
-description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.test. The container's entrypoint (a) writes logs to /var/log/blitzlog/opencode.log and (b) writes session artifacts + signal files under /workspace/.blitzlog, /workspace/.idle, /workspace/.shutdown. We mirror the production watchdog.sh: pre-create those host paths in /tmp/blitzlog-{logs,workspace}/ and bind-mount them in so the entrypoint output + signal state are inspectable from the host after the 30s timeout."
+description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.assisted.test. The container's entrypoint (a) writes logs to /var/log/blitzlog/opencode.log and (b) writes session artifacts + signal files under /workspace/.blitzlog, /workspace/.idle, /workspace/.shutdown. We mirror the production watchdog.sh: pre-create those host paths in /tmp/blitzlog-{logs,workspace}/ and bind-mount them in so the entrypoint output + signal state are inspectable from the host after the 30s timeout."
 run = """
 docker buildx build \
   --builder default \
@@ -79,7 +79,7 @@ mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
 touch /tmp/blitzlog-workspace/.idle
 docker run --rm --entrypoint="" \
-  --env-file ./packages/images/agent/.env.test \
+  --env-file ./packages/images/agent/.env.assisted.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
@@ -100,7 +100,7 @@ mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
 touch /tmp/blitzlog-workspace/.idle
 docker run --rm --entrypoint="" \
-  --env-file ./packages/images/agent/.env.test \
+  --env-file ./packages/images/agent/.env.assisted.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
@@ -149,9 +149,9 @@ trap "kill $WATCHER_PID 2>/dev/null || true" EXIT INT TERM
 # Fetch a fresh GitHub token from the host's `gh auth login` and pass
 # it to the container via -e. The token is short-lived, so we generate
 # it on every run rather than storing it. -e overrides any value that
-# might be in .env.test.
+# might be in .env.assisted.test.
 docker run --rm -i \
-  --env-file ./packages/images/agent/.env.test \
+  --env-file ./packages/images/agent/.env.assisted.test \
   -e "GITHUB_TOKEN=$(gh auth token)" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
@@ -174,4 +174,28 @@ run = """
 mkdir -p /tmp/whisper-models
 curl -L --fail -o /tmp/whisper-models/ggml-tiny.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+"""
+
+[tasks.image-telegram-live-autonomous]
+description = "Build the image and run the agent in autonomous mode (fire-and-forget opencode run). The agent clones the repo, installs the toolchain, runs the project's bootstrap task, then runs opencode on the issue specified in OPENCODE_PROMPT. The container exits when opencode finishes. Env vars come from .env.autonomous.test (gitignored, MODE=autonomous + OPENCODE_PROMPT + OPENCODE_API_KEY + etc.) plus -e GITHUB_TOKEN fetched at runtime. Prerequisite: gh auth login on the host. The whisper-stt-shim does NOT run in autonomous mode, so no STT model file is needed."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+# Autonomous mode is fire-and-forget: opencode run --agent build runs to
+# completion, then the entrypoint exits with opencode's exit code. No
+# watcher, no .shutdown, no Telegram bot, no whisper-stt-shim. The
+# container name is different from the assisted task to avoid
+# collisions if both run concurrently (e.g., during CI).
+docker run --rm \
+  --env-file ./packages/images/agent/.env.autonomous.test \
+  -e "GITHUB_TOKEN=$(gh auth token)" \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  --name blitzlog-tg-auto \
+  blitzlog-agent:local
 """

@@ -23,8 +23,10 @@ __pycache__/
 node_modules/
 out/
 
-# Local image-smoke-test config (see packages/images/agent/.env.test sample)
-packages/images/agent/.env.test
+# Local image-smoke-test configs (see packages/images/agent/.env.*.test
+# samples for the assisted and autonomous variants)
+packages/images/agent/.env.assisted.test
+packages/images/agent/.env.autonomous.test
 
 # typescript recordings of interactive shell sessions (created by `script`)
 typescript

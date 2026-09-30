@@ -2,8 +2,8 @@
 # /usr/local/bin/entrypoint.sh — runs inside the blitzlog-agent container.
 #
 # Single bash entrypoint that branches on $MODE:
-#   autonomous: start whisper-stt-shim, git clone target repo, install project
-#               toolchain via mise, exec opencode run --agent build.
+#   autonomous: git clone target repo, install project toolchain via mise,
+#               exec opencode run --agent build.
 #   assisted:   start whisper-stt-shim + opencode serve + telegram-bot, idle
 #               until SIGTERM.
 #
@@ -15,6 +15,10 @@
 # closes session). The container's only responsibility is to forward
 # signals and exit cleanly.
 set -eu
+# pipefail makes a pipeline's exit code reflect the first failing command,
+# so the opencode exit code propagates through the tee below instead of
+# tee always exiting 0.
+set -o pipefail
 
 # We do NOT globally redirect stdout/stderr — `docker logs` and the
 # foreground terminal must see the entrypoint's progress. The watchdog's
@@ -180,30 +184,36 @@ OPENCODE_CFG
     fi
 fi
 
-# --- 4. Verify whisper model is mounted (host pre-fetches from S3) ---
-MODEL_FILE="ggml-${STT_MODEL:-base.en}.bin"
-if [ ! -f "/opt/whisper-stt/models/$MODEL_FILE" ]; then
-    log "ERROR: whisper model $MODEL_FILE not mounted from host"
-    exit 1
-fi
-export WHISPER_MODEL="/opt/whisper-stt/models/$MODEL_FILE"
-export WHISPER_LANGUAGE="${STT_LANGUAGE:-en}"
-
-# --- 5. Start whisper-stt-shim (always) ---
-log "Starting whisper-stt-shim..."
-mkdir -p /var/log
-python3 /opt/whisper-stt/server.py >>/var/log/blitzlog/whisper-stt-shim.log 2>&1 &
-SHIM_PID=$!
-i=0
-while [ "$i" -lt 30 ]; do
-    if wget -q -O - http://127.0.0.1:7878/healthz >/dev/null 2>&1 \
-        || curl -fs http://127.0.0.1:7878/healthz >/dev/null 2>&1; then
-        break
+# --- 4 + 5 (assisted mode only): verify whisper model + start shim ---
+# The whisper-stt-shim is only used by the telegram bot for voice-message
+# transcription. Autonomous mode runs opencode directly and never talks
+# to the shim, so we skip both the model-mount check and the shim
+# startup. The shim's binary and the bundled ggml models stay in the
+# image (the Dockerfile always installs them) — they're just not run.
+if [ "$MODE" = "assisted" ]; then
+    MODEL_FILE="ggml-${STT_MODEL:-base.en}.bin"
+    if [ ! -f "/opt/whisper-stt/models/$MODEL_FILE" ]; then
+        log "ERROR: whisper model $MODEL_FILE not mounted from host"
+        exit 1
     fi
-    i=$((i + 1))
-    sleep 1
-done
-log "whisper-stt-shim ready (after ${i}s)"
+    export WHISPER_MODEL="/opt/whisper-stt/models/$MODEL_FILE"
+    export WHISPER_LANGUAGE="${STT_LANGUAGE:-en}"
+
+    log "Starting whisper-stt-shim..."
+    mkdir -p /var/log
+    python3 /opt/whisper-stt/server.py >>/var/log/blitzlog/whisper-stt-shim.log 2>&1 &
+    SHIM_PID=$!
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if wget -q -O - http://127.0.0.1:7878/healthz >/dev/null 2>&1 \
+            || curl -fs http://127.0.0.1:7878/healthz >/dev/null 2>&1; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    log "whisper-stt-shim ready (after ${i}s)"
+fi
 
 if [ "$MODE" = "autonomous" ]; then
     # --- Autonomous: clone, install toolchain, run agent ---
@@ -224,10 +234,15 @@ if [ "$MODE" = "autonomous" ]; then
     fi
 
     log "Launching opencode run --agent build"
-    OPENCODE_NONINTERACTIVE=1 opencode run --agent build "${OPENCODE_PROMPT:-}" || EXIT=$?
+    # Tee opencode's stdout+stderr to a host-visible log file
+    # (/var/log/blitzlog/opencode-run.log → /tmp/blitzlog-logs/ on the
+    # host) while still streaming live to the user's terminal. PIPESTATUS
+    # gives opencode's exit code (tee's exit is ignored), and pipefail
+    # propagates a non-zero opencode exit through the || below.
+    OPENCODE_NONINTERACTIVE=1 opencode run --agent build "${OPENCODE_PROMPT:-}" \
+        2>&1 | tee /var/log/blitzlog/opencode-run.log || EXIT="${PIPESTATUS[0]}"
     EXIT="${EXIT:-0}"
     log "opencode exited with $EXIT"
-    kill "$SHIM_PID" 2>/dev/null || true
     exit "$EXIT"
 else
     # --- Assisted: long-running opencode serve + telegram-bot ---
