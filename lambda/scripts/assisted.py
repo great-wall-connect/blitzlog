@@ -33,11 +33,7 @@ import os
 from _common import (
     _local_llm_env_block,
     _local_llm_log_line,
-    _preflight_block,
-    _preflight_definitions,
     _read_secrets_from_ssm_script,
-    _tailscale_install_block,
-    _write_opencode_config_script,
     script_header,
 )
 
@@ -111,9 +107,6 @@ def build_assisted_user_data(
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
-    tailscale_block = _tailscale_install_block(local_llm)
-    preflight_defs = _preflight_definitions("assisted") if local_llm else ""
-    preflight_call = _preflight_block(local_llm, "assisted")
 
     opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
 
@@ -134,7 +127,6 @@ def build_assisted_user_data(
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
-{tailscale_block}{preflight_defs}{preflight_call}
 
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
@@ -146,9 +138,6 @@ fi
 
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket)}
-
-log "Writing opencode config..."
-{_write_opencode_config_script(autonomous=False, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
@@ -168,7 +157,11 @@ log "Starting blitzlog-agent via systemd watchdog..."
 # lock, and terminates the EC2 instance. The container itself has NO
 # AWS credentials — all S3 ops happen on the host.
 #
-# Write the env file the watchdog reads.
+# Write the env file the watchdog reads. Tailscale + local LLM env
+# vars are passed through so the container can join a Tailnet and
+# point opencode at a local-LLM endpoint. The container's entrypoint
+# already runs tailscale up, writes opencode.json, and runs the local
+# LLM preflight — we don't repeat any of that here.
 mkdir -p /workspace/.blitzlog
 cat > /etc/blitzlog.env <<ENVEOF
 MODE=assisted
@@ -181,6 +174,11 @@ SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
 OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
 OPENCODE_MODEL={opencode_model}
 OPENCODE_PROMPT=
+LOCAL_LLM_ENDPOINT=${{LOCAL_LLM_ENDPOINT:-}}
+LOCAL_LLM_MODEL=${{LOCAL_LLM_MODEL:-}}
+LOCAL_LLM_API_KEY=${{LOCAL_LLM_API_KEY:-}}
+LOCAL_LLM_FALLBACK=${{LOCAL_LLM_FALLBACK:-closed}}
+TAILSCALE_AUTH_KEY=${{TAILSCALE_AUTH_KEY:-}}
 TELEGRAM_BOT_TOKEN=${{TELEGRAM_BOT_TOKEN}}
 TELEGRAM_USER_ID=${{TELEGRAM_USER_ID}}
 TELEGRAM_BOT_NAME={bot_name}

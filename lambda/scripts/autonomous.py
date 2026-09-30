@@ -27,11 +27,7 @@ import os
 from _common import (
     _local_llm_env_block,
     _local_llm_log_line,
-    _preflight_block,
-    _preflight_definitions,
     _read_secrets_from_ssm_script,
-    _tailscale_install_block,
-    _write_opencode_config_script,
     script_header,
 )
 
@@ -58,9 +54,6 @@ def build_autonomous_user_data(
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
-    tailscale_block = _tailscale_install_block(local_llm)
-    preflight_defs = _preflight_definitions("autonomous") if local_llm else ""
-    preflight_call = _preflight_block(local_llm, "autonomous")
 
     opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
 
@@ -78,7 +71,6 @@ def build_autonomous_user_data(
     )
 
     return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
-{tailscale_block}{preflight_defs}{preflight_call}
 
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
@@ -88,10 +80,7 @@ if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
         --region "$REGION"
 fi
 
-log "Writing opencode config..."
-{_write_opencode_config_script(autonomous=True, local_provider=local_llm, opencode_max_steps=opencode_max_steps)}
-
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
+log "Effective opencode config: model=$OPENCODE_MODEL"
 
 # opencode plugins (session_archive, spot_watchdog) and tools are baked
 # into the container image at /root/.config/opencode/{{plugins,tools}}/
@@ -108,7 +97,11 @@ log "Starting autonomous opencode agent via systemd watchdog..."
 # session artifacts to S3, releases the bot pool lock, and terminates
 # the EC2 instance.
 #
-# Write the env file the watchdog reads.
+# Write the env file the watchdog reads. Tailscale + local LLM env
+# vars are passed through so the container can join a Tailnet and
+# point opencode at a local-LLM endpoint. The container's entrypoint
+# already runs tailscale up, writes opencode.json, and runs the local
+# LLM preflight — we don't repeat any of that here.
 mkdir -p /workspace/.blitzlog
 cat > /etc/blitzlog.env <<ENVEOF
 MODE=autonomous
@@ -121,6 +114,11 @@ SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
 OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
 OPENCODE_MODEL=${{OPENCODE_MODEL}}
 OPENCODE_PROMPT=${{OPENCODE_PROMPT:-}}
+LOCAL_LLM_ENDPOINT=${{LOCAL_LLM_ENDPOINT:-}}
+LOCAL_LLM_MODEL=${{LOCAL_LLM_MODEL:-}}
+LOCAL_LLM_API_KEY=${{LOCAL_LLM_API_KEY:-}}
+LOCAL_LLM_FALLBACK=${{LOCAL_LLM_FALLBACK:-closed}}
+TAILSCALE_AUTH_KEY=${{TAILSCALE_AUTH_KEY:-}}
 OPENCODE_SERVER_USERNAME=agent
 GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
 ENVEOF

@@ -109,7 +109,7 @@ docker run --rm --entrypoint="" \
   sh -c 'sh /smoke-test.sh && echo \"==> entrypoint (bot boot may take up to 60s)\" && timeout 60 /usr/local/bin/entrypoint.sh || echo \"(exited $? — expected without LLM auth)\"'
 """
 
-[tasks.image-telegram-live]
+[tasks.image-telegram-live-assisted]
 description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. The host-side watcher polls /workspace/.shutdown and SIGTERMs the container when the agent invokes its shutdown tool, mirroring the production watchdog's behavior. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
 run = """
 docker buildx build \
@@ -149,8 +149,16 @@ trap "kill $WATCHER_PID 2>/dev/null || true" EXIT INT TERM
 # Fetch a fresh GitHub token from the host's `gh auth login` and pass
 # it to the container via -e. The token is short-lived, so we generate
 # it on every run rather than storing it. -e overrides any value that
+# might be in .env.assisted.test. Conditional docker flags — only grant
+# Tailscale capabilities when TAILSCALE_AUTH_KEY is set in
+# .env.assisted.test (least privilege).
+TUNNEL_FLAGS=""
+if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.assisted.test 2>/dev/null; then
+    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+fi
+
 # might be in .env.assisted.test.
-docker run --rm -i \
+docker run --rm -i $TUNNEL_FLAGS \
   --env-file ./packages/images/agent/.env.assisted.test \
   -e "GITHUB_TOKEN=$(gh auth token)" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
@@ -189,9 +197,16 @@ mkdir -p /tmp/blitzlog-workspace/.blitzlog
 # Autonomous mode is fire-and-forget: opencode run --agent build runs to
 # completion, then the entrypoint exits with opencode's exit code. No
 # watcher, no .shutdown, no Telegram bot, no whisper-stt-shim. The
+# Conditional docker flags — only grant Tailscale capabilities when
+# TAILSCALE_AUTH_KEY is set in .env.autonomous.test (least privilege).
+TUNNEL_FLAGS=""
+if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.autonomous.test 2>/dev/null; then
+    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+fi
+
 # container name is different from the assisted task to avoid
 # collisions if both run concurrently (e.g., during CI).
-docker run --rm \
+docker run --rm $TUNNEL_FLAGS \
   --env-file ./packages/images/agent/.env.autonomous.test \
   -e "GITHUB_TOKEN=$(gh auth token)" \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \

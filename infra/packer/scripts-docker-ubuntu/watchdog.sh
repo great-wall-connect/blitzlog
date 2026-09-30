@@ -52,6 +52,10 @@ REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
 export AWS_REGION="$REGION"
 
 # Write the env file the container reads (and that shutdown.sh sources).
+# Tailscale + local LLM env vars are passed through so the container
+# can join a Tailnet (if TAILSCALE_AUTH_KEY is set) and point opencode
+# at a local-LLM endpoint (if LOCAL_LLM_ENDPOINT is set). The container's
+# entrypoint handles the actual setup; the bootstrap is just plumbing.
 cat > /etc/blitzlog.env <<ENVEOF
 MODE="${MODE:-assisted}"
 ISSUE_NUMBER="${ISSUE_NUMBER}"
@@ -63,6 +67,11 @@ SESSION_ARCHIVE_PREFIX="${SESSION_ARCHIVE_PREFIX}"
 OPENCODE_API_KEY="${OPENCODE_API_KEY}"
 OPENCODE_MODEL="${OPENCODE_MODEL}"
 OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
+LOCAL_LLM_ENDPOINT="${LOCAL_LLM_ENDPOINT:-}"
+LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"
+LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-}"
+LOCAL_LLM_FALLBACK="${LOCAL_LLM_FALLBACK:-closed}"
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-agent}"
 OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-}"
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
@@ -111,6 +120,11 @@ COMMON_ARGS=(
     -e "OPENCODE_MODEL=$OPENCODE_MODEL"
     -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
     -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    -e "LOCAL_LLM_ENDPOINT=$LOCAL_LLM_ENDPOINT"
+    -e "LOCAL_LLM_MODEL=$LOCAL_LLM_MODEL"
+    -e "LOCAL_LLM_API_KEY=$LOCAL_LLM_API_KEY"
+    -e "LOCAL_LLM_FALLBACK=$LOCAL_LLM_FALLBACK"
+    -e "TAILSCALE_AUTH_KEY=$TAILSCALE_AUTH_KEY"
     -e "OPENCODE_SERVER_USERNAME=$OPENCODE_SERVER_USERNAME"
     -e "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD"
     -e "BLITZLOG_ENV=$BLITZLOG_ENV"
@@ -134,7 +148,18 @@ if [ "$MODE" = "assisted" ]; then
     )
 fi
 
+# Tailscale needs CAP_NET_ADMIN (to write iptables rules) and a TUN
+# device (for the wireguard tunnel). Both are only needed when
+# TAILSCALE_AUTH_KEY is set, since tailscaled only runs in that case.
+# Build a conditional array — least privilege means we don't grant
+# capabilities the container doesn't use.
+TUNNEL_FLAGS=()
+if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+    TUNNEL_FLAGS=(--cap-add=NET_ADMIN --cap-add=NET_RAW)
+fi
+
 sudo docker run --name blitzlog-agent \
+    "${TUNNEL_FLAGS[@]}" \
     "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
     -v /root/.config/opencode:/root/.config/opencode \

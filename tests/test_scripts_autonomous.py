@@ -56,8 +56,12 @@ class TestAutonomousModelAndDiagnostics(unittest.TestCase):
             },
         ):
             user_data = build_autonomous_user_data("owner/repo", 42)
+        # The bootstrap logs an "Effective opencode config: model=$X" line
+        # right before starting the watchdog. The container's entrypoint
+        # writes the actual opencode.json; the bootstrap is just a
+        # diagnostic line.
         self.assertIn("Effective opencode config", user_data)
-        self.assertIn("api_key_prefix", user_data)
+        self.assertIn('model=$OPENCODE_MODEL', user_data)
 
     def test_default_opencode_model_is_minimax(self):
         with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):
@@ -78,79 +82,5 @@ class TestAutonomousShutdownExclusion(unittest.TestCase):
         user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
         self.assertNotIn("shutdown.js", user_data)
         self.assertNotIn("SHUTDOWN_TOOL_JS", user_data)
-
-
-class TestAutonomousLocalLlm(unittest.TestCase):
-    LOCAL_LLM = {  # noqa: RUF012 - intentional class-level test fixture
-        "endpoint": "http://100.64.0.5:11434",
-        "model": "qwen2.5-coder:32b",
-        "api_key": "",
-        "allow_private": True,
-        "fallback": "closed",
-    }
-
-    def test_no_local_llm_keeps_cloud_block(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertIn("minimax-coding-plan", user_data)
-        self.assertIn('OPENCODE_MODEL="test/model"', user_data)
-        self.assertIn("export OPENCODE_API_KEY", user_data)
-
-    def test_local_llm_switches_model(self):
-        user_data = _with_env(
-            lambda: build_autonomous_user_data(
-                "owner/repo", 42, local_llm=self.LOCAL_LLM
-            )
-        )
-        self.assertIn('OPENCODE_MODEL="qwen2.5-coder:32b"', user_data)
-        self.assertIn("LOCAL_LLM_ENDPOINT=", user_data)
-        self.assertIn("LOCAL_LLM_MODEL=", user_data)
-        self.assertNotIn('"minimax-coding-plan":', user_data)
-        self.assertIn('"local":', user_data)
-
-    def test_local_llm_includes_preflight(self):
-        user_data = _with_env(
-            lambda: build_autonomous_user_data(
-                "owner/repo", 42, local_llm=self.LOCAL_LLM
-            )
-        )
-        self.assertIn("preflight_local_llm()", user_data)
-        self.assertIn("MODE=autonomous", user_data)
-
-    def test_no_local_llm_no_preflight(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertNotIn("preflight_local_llm", user_data)
-
-    def test_defensive_unset_always_present(self):
-        user_data = _with_env(lambda: build_autonomous_user_data("owner/repo", 42))
-        self.assertIn("unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY", user_data)
-
-    def test_local_llm_includes_tailscale_up_when_key_set(self):
-        llm = dict(self.LOCAL_LLM, tailscale_auth_key="tskey-auth-foobar")
-        user_data = _with_env(
-            lambda: build_autonomous_user_data("owner/repo", 42, local_llm=llm)
-        )
-        self.assertIn("TAILSCALE_AUTH_KEY=", user_data)
-        self.assertIn("tailscale up", user_data)
-        self.assertIn("--accept-routes=false", user_data)
-        self.assertIn("blitzlog-agent-${ISSUE_NUMBER}", user_data)
-        # Regression: --ephemeral is NOT a tailscale up flag. Ephemeral-ness
-        # is a property of the auth key itself (set when the key is
-        # generated at https://login.tailscale.com/admin/settings/keys).
-        # Passing --ephemeral makes tailscale up exit with
-        # "flag provided but not defined: -ephemeral", leaving the node
-        # unauthenticated and the preflight probe timing out.
-        self.assertNotIn("--ephemeral", user_data)
-        self.assertNotIn(" -ephemeral", user_data)
-
-    def test_local_llm_omits_tailscale_when_key_empty(self):
-        user_data = _with_env(
-            lambda: build_autonomous_user_data(
-                "owner/repo", 42, local_llm=self.LOCAL_LLM
-            )
-        )
-        self.assertNotIn("TAILSCALE_AUTH_KEY=", user_data)
-        self.assertNotIn("tailscale up", user_data)
-
-
 if __name__ == "__main__":
     unittest.main()

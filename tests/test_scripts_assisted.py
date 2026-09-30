@@ -53,9 +53,14 @@ class TestAssistedNoSecrets(unittest.TestCase):
         script = _build_assisted()
         self.assertIn("STT_API_KEY=$(aws ssm get-parameter", script)
         # The /etc/blitzlog.env block must reference the runtime-fetched
-        # shell variable, not a literal value.
+        # shell variable, not a literal value. The block now includes
+        # Tailscale + local LLM vars between the cloud vars and STT_* vars,
+        # so search the full heredoc instead of a fixed offset. Skip past
+        # the opening delimiter `<<ENVEOF` (which contains the substring
+        # "ENVEOF") and find the CLOSING delimiter on its own line.
         env_start = script.index("cat > /etc/blitzlog.env")
-        env_section = script[env_start : env_start + 500]
+        env_end = script.index("\nENVEOF\n", env_start)
+        env_section = script[env_start:env_end]
         self.assertIn("STT_API_KEY=${STT_API_KEY}", env_section)
         # No literal STT_API_KEY=xxx should appear anywhere.
         self.assertNotRegex(script, r"STT_API_KEY=[^$\n][^\n]*")

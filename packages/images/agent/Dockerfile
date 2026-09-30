@@ -147,14 +147,34 @@ ARG NODE_VERSION
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=UTC \
-    PATH=/usr/local/bin:/usr/bin:/bin
+    # /usr/sbin is added so tailscaled (Debian package puts the daemon
+    # there, not the CLI) is on PATH for the local-test Tailscale
+    # flow in entrypoint.sh. Other daemons that might land in /usr/sbin
+    # later benefit too.
+    PATH=/usr/local/bin:/usr/sbin:/usr/bin:/bin
 
 # Runtime deps only. libgomp1 is required by whisper.cpp's matrix multiplications.
 # nodejs is re-installed via tarball in this stage too (symlinked via
 # /usr/local/bin/node), so we don't pull Debian's older nodejs here.
+# Tailscale is bundled into the image so local testing can join a
+# Tailnet via TAILSCALE_AUTH_KEY env (gated in entrypoint.sh — the
+# binary is unconditional, the connection is opt-in). We add the
+# Tailscale apt repo explicitly (signed-by= pinned keyring, modern
+# Debian pattern) instead of relying on install.sh; the trixie
+# repo matches the python:3.12-slim base image. Step 1 installs
+# curl+gnupg so step 2 can fetch the key (python:3.12-slim ships
+# without either). Both layers use the same RUN to share /var/lib/apt
+# cache state; splitting here would lose that.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git ca-certificates curl wget jq libgomp1 openssl xz-utils gh \
+        curl gnupg ca-certificates \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main" \
+        > /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git wget jq libgomp1 openssl xz-utils gh tailscale \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
