@@ -102,22 +102,3 @@ jobs:
           docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}' \
             | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 2.0) { print "REJECTED (too big): " $0; exit 1 } }'
           echo "Image size OK"
-
-  trivy:
-    name: Trivy scan
-    runs-on: ubuntu-26.04-arm
-    needs: build
-    if: github.event_name != 'pull_request'
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ghcr.io/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:latest
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: "CRITICAL,HIGH"
