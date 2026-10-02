@@ -1,6 +1,9 @@
+import { makeLogger } from "../lib/log.js";
+import { gitAutosave } from "../lib/git-autosave.js";
+import { telegramNotify } from "../lib/telegram.js";
+
 export const IdleWatchdog = async ({ $, client, directory }) => {
-  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-  const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID;
+  const log = makeLogger("idle-watchdog", client);
 
   let autosaveTimer = null;
   let pingTimer = null;
@@ -16,68 +19,39 @@ export const IdleWatchdog = async ({ $, client, directory }) => {
 
   async function autosave(sessionId) {
     try {
-      await client.app.log({
-        body: { service: "idle-watchdog", level: "info", message: `Autosave timer fired for session: ${sessionId}` },
+      await log("info", `Autosave timer fired for session: ${sessionId}`);
+      const { autosaveBranch } = await gitAutosave({
+        $, directory, commitMessage: "autosave: idle checkpoint",
       });
-      const branch = (await $`git -C ${directory} branch --show-current`.text()).trim();
-      if (!branch) return;
-      const issueNumber = process.env.ISSUE_NUMBER || "unknown";
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const autosaveBranch = `autosave/issue-${issueNumber}-${timestamp}`;
-      await $`git -C ${directory} add -A`.quiet();
-      await $`git -C ${directory} commit --no-verify -m ${"autosave: idle checkpoint"}`.quiet().catch(() => {});
-      await $`git -C ${directory} branch -f ${autosaveBranch} HEAD`.quiet();
-      await $`git -C ${directory} push --force --no-verify origin ${autosaveBranch}`.quiet();
-      await $`git -C ${directory} checkout ${branch}`.quiet().catch(() => {});
-      await client.app.log({
-        body: { service: "idle-watchdog", level: "info", message: `Autosave pushed to ${autosaveBranch}` },
-      });
+      if (!autosaveBranch) return;
+      await log("info", `Autosave pushed to ${autosaveBranch}`);
     } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "idle-watchdog", level: "error", message: `Autosave failed: ${e?.message || e}` },
-        });
-      } catch {}
+      await log("error", `Autosave failed: ${e?.message || e}`);
     }
   }
 
   async function telegramPing() {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_USER_ID) return;
     try {
-      await client.app.log({
-        body: { service: "idle-watchdog", level: "info", message: `Telegram ping timer fired` },
+      await log("info", `Telegram ping timer fired`);
+      await telegramNotify({
+        $,
+        text: "\u{1FAE0} Assisted agent idle 35min. Will shut down in ~2h25m without activity.",
       });
-      const text = "\u{1FAE0} Assisted agent idle 35min. Will shut down in ~2h25m without activity.";
-      await $`curl -s -X POST https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage -d chat_id=${TELEGRAM_USER_ID} -d text=${text}`.quiet();
     } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "idle-watchdog", level: "error", message: `Telegram ping failed: ${e?.message || e}` },
-        });
-      } catch {}
+      await log("error", `Telegram ping failed: ${e?.message || e}`);
     }
   }
 
   async function idleShutdown() {
     try {
-      await client.app.log({
-        body: { service: "idle-watchdog", level: "info", message: `Idle shutdown timer fired, initiating shutdown` },
-      });
+      await log("info", `Idle shutdown timer fired, initiating shutdown`);
       await $`_SHUTDOWN_REASON=${"idle_timeout"} /usr/local/bin/assisted-shutdown.sh`;
     } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "idle-watchdog", level: "error", message: `Idle shutdown failed: ${e?.message || e}` },
-        });
-      } catch {}
+      await log("error", `Idle shutdown failed: ${e?.message || e}`);
     }
   }
 
-  try {
-    await client.app.log({
-      body: { service: "idle-watchdog", level: "info", message: "IdleWatchdog plugin initialized" },
-    });
-  } catch {}
+  await log("info", "IdleWatchdog plugin initialized");
 
   return {
     event: async ({ event }) => {
@@ -89,19 +63,11 @@ export const IdleWatchdog = async ({ $, client, directory }) => {
         autosaveTimer = setTimeout(() => autosave(sessionId), 5 * 60 * 1000);
         pingTimer = setTimeout(() => telegramPing(), 35 * 60 * 1000);
         shutdownTimer = setTimeout(() => idleShutdown(), 3 * 60 * 60 * 1000);
-        try {
-          await client.app.log({
-            body: { service: "idle-watchdog", level: "info", message: `Session idle: ${sessionId}. Timers started.` },
-          });
-        } catch {}
+        await log("info", `Session idle: ${sessionId}. Timers started.`);
       }
 
       if (event.type === "message.part.updated" && idleSessionId) {
-        try {
-          await client.app.log({
-            body: { service: "idle-watchdog", level: "info", message: `Session reactivated (message.part.updated): ${sessionId}. Timers cleared.` },
-          });
-        } catch {}
+        await log("info", `Session reactivated (message.part.updated): ${sessionId}. Timers cleared.`);
         clearTimers();
       }
 

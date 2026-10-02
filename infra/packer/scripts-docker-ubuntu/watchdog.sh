@@ -158,6 +158,27 @@ if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     TUNNEL_FLAGS=(--cap-add=NET_ADMIN --cap-add=NET_RAW)
 fi
 
+# Host-side .shutdown watcher. Mirrors the local mise.toml
+# image-telegram-live-assisted watcher. Polls for the agent's shutdown
+# signal (touched by assisted-shutdown.sh, both for the user-invoked
+# shutdown tool and for spot-interrupt emergency save) and SIGTERMs the
+# container — otherwise the entrypoint's TERM trap is never triggered and
+# the `docker run` below blocks until AWS reclaims it.
+(
+    while [ ! -f /workspace/.shutdown ]; do
+            sleep 1
+    done
+    log ".shutdown detected; sending SIGTERM to blitzlog-agent"
+    sudo docker kill --signal TERM blitzlog-agent 2>/dev/null || true
+) &
+WATCHER_PID=$!
+
+# Defense in depth: clear any stale .shutdown left over from a crashed
+# previous run. watchdog.sh no longer pre-creates it, so on a fresh
+# instance .shutdown only ever appears because the agent's shutdown
+# tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
+rm -f /workspace/.shutdown
+
 sudo docker run --name blitzlog-agent \
     "${TUNNEL_FLAGS[@]}" \
     "${COMMON_ARGS[@]}" \
@@ -168,6 +189,13 @@ sudo docker run --name blitzlog-agent \
     "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
 
 CONTAINER_EXIT=$?
+
+# The watcher auto-exits once it sends SIGTERM (the while loop ends
+# when .shutdown appears). If .shutdown was never touched (autonomous
+# mode finished, agent ran to completion), the watcher is still
+# polling — kill it explicitly.
+kill "$WATCHER_PID" 2>/dev/null || true
+wait "$WATCHER_PID" 2>/dev/null || true
 
 log "Container exited with code $CONTAINER_EXIT"
 

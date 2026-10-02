@@ -218,6 +218,7 @@ COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
 # tool, no idle watchdog, no session archiver, etc.
 COPY opencode/plugins/ /root/.config/opencode/plugins/
 COPY opencode/tools/ /root/.config/opencode/tools/
+COPY opencode/lib/ /root/.config/opencode/lib/
 
 # Layout that the entrypoint expects
 RUN mkdir -p /opt/whisper-stt/models /workspace /var/log/blitzlog \

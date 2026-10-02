@@ -1,32 +1,15 @@
-// Container-side plugin: writes session archives to /workspace/.blitzlog/
-// (a host-mounted dir). The host's watchdog uploads them to S3 after the
-// container exits — the container itself has no AWS credentials.
+import { makeLogger } from "../lib/log.js";
+import { archiveSession } from "../lib/session-archive.js";
+
 export const SessionArchive = async ({ project, client, $, directory }) => {
-  async function archiveSession(sessionId) {
+  const log = makeLogger("session-archive", client);
+
+  async function writeArchive(sessionId) {
     try {
-      const dest = `/workspace/.blitzlog/session-archive-${sessionId}.json`;
-      await $`mkdir -p /workspace/.blitzlog`.quiet();
-      await $`opencode export ${sessionId} > ${dest}`.quiet();
-
-      const branch = (await $`git -C ${directory} branch --show-current`.text()).trim();
-      const commit = (await $`git -C ${directory} rev-parse HEAD`.text()).trim();
-      const metadata = JSON.stringify({
-        sessionId,
-        branch,
-        commit,
-        timestamp: Date.now(),
-      });
-      await $`echo ${metadata} > /workspace/.blitzlog/metadata.json`.quiet();
-
-      await client.app.log({
-        body: { service: "session-archive", level: "info", message: `Session archived: ${sessionId}` },
-      });
+      await archiveSession({ $, sessionId, directory });
+      await log("info", `Session archived: ${sessionId}`);
     } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "session-archive", level: "error", message: `Failed to archive session: ${e?.message || e}` },
-        });
-      } catch {}
+      await log("error", `Failed to archive session: ${e?.message || e}`);
     }
   }
 
@@ -35,17 +18,13 @@ export const SessionArchive = async ({ project, client, $, directory }) => {
       const sessionId = event?.properties?.sessionID;
       if (!sessionId) return;
       if (event.type === "session.created") {
-        try {
-          await client.app.log({
-            body: { service: "session-archive", level: "info", message: `Session created: ${sessionId}` },
-          });
-        } catch {}
+        await log("info", `Session created: ${sessionId}`);
       }
       if (event.type === "session.idle" || event.type === "session.compacted") {
-        await archiveSession(sessionId);
+        await writeArchive(sessionId);
       }
       if (event.type === "session.deleted") {
-        await archiveSession(sessionId);
+        await writeArchive(sessionId);
       }
     },
   };

@@ -1,37 +1,23 @@
+import { makeLogger } from "../lib/log.js";
+import { gitAutosave } from "../lib/git-autosave.js";
+
 export const PeriodicAutosave = async ({ client, $, directory }) => {
+  const log = makeLogger("periodic-autosave", client);
   let saveInterval = null;
 
   async function periodicSave() {
     try {
-      const issueNumber = process.env.ISSUE_NUMBER || "unknown";
-      const autosaveBranch = `autosave/issue-${issueNumber}-latest`;
-
-      const branch = (await $`git -C ${directory} branch --show-current`.text()).trim();
-      await $`git -C ${directory} add -A`.quiet();
-      await $`git -C ${directory} commit --no-verify --allow-empty -m ${"autosave: periodic checkpoint"}`.quiet().catch(() => {});
-      await $`git -C ${directory} branch -f ${autosaveBranch} HEAD`.quiet();
-      await $`git -C ${directory} push --force --no-verify origin ${autosaveBranch}`.quiet();
-      if (branch) {
-        await $`git -C ${directory} checkout ${branch}`.quiet().catch(() => {});
-      }
-
-      await client.app.log({
-        body: { service: "periodic-autosave", level: "info", message: `Periodic autosave pushed to ${autosaveBranch}` },
+      const { autosaveBranch } = await gitAutosave({
+        $, directory, commitMessage: "autosave: periodic checkpoint",
       });
+      if (!autosaveBranch) return;
+      await log("info", `Periodic autosave pushed to ${autosaveBranch}`);
     } catch (e) {
-      try {
-        await client.app.log({
-          body: { service: "periodic-autosave", level: "error", message: `Periodic autosave failed: ${e?.message || e}` },
-        });
-      } catch {}
+      await log("error", `Periodic autosave failed: ${e?.message || e}`);
     }
   }
 
-  try {
-    await client.app.log({
-      body: { service: "periodic-autosave", level: "info", message: "PeriodicAutosave plugin initialized" },
-    });
-  } catch {}
+  await log("info", "PeriodicAutosave plugin initialized");
 
   return {
     event: async ({ event }) => {
@@ -39,11 +25,7 @@ export const PeriodicAutosave = async ({ client, $, directory }) => {
 
       if (event.type === "session.created") {
         saveInterval = setInterval(() => periodicSave(), 5 * 60 * 1000);
-        try {
-          await client.app.log({
-            body: { service: "periodic-autosave", level: "info", message: `Periodic autosave started for session: ${sessionId}` },
-          });
-        } catch {}
+        await log("info", `Periodic autosave started for session: ${sessionId}`);
       }
 
       if (event.type === "session.deleted") {
