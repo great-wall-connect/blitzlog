@@ -568,18 +568,22 @@ else
     cd /workspace/repo
     setsid opencode serve --hostname 127.0.0.1 --port 4096 >>/var/log/blitzlog/opencode-serve.log 2>&1 &
     SERVE_PID=$!
-    # Wait only for the port to be listening, not for /health (which
-    # can take 30s+ if opencode is doing a real LLM-API connectivity
-    # check). 5s is plenty for the Go binary to bind to port 4096.
+    # Wait for opencode serve to be ready. Matches the pre-Docker lambda
+    # bootstrap's 30 × 2 s = 60 s budget — gives project discovery time
+    # to populate /project before we curl it; otherwise the bot starts
+    # without a pre-selected project and the user has to run /projects
+    # manually. Pre-Docker flow had this same 60 s budget (lambda/handler.py
+    # at commit 0a8edcb); it was inadvertently tightened to 5 s when the
+    # logic moved into the container entrypoint (commit c7d914a).
     i=0
-    while [ "$i" -lt 5 ]; do
+    while [ "$i" -lt 30 ]; do
         if curl -fs -u "agent:${OPENCODE_SERVER_PASSWORD}" \
                -o /dev/null \
                http://127.0.0.1:4096/ 2>/dev/null; then
             break
         fi
         i=$((i + 1))
-        sleep 1
+        sleep 2
     done
     log "opencode serve ready (after ${i}s)"
 
