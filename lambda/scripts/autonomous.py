@@ -30,6 +30,7 @@ from _common import (
     _read_secrets_from_ssm_script,
     script_header,
 )
+from _env import _blitzlog_env
 
 
 def build_autonomous_user_data(
@@ -50,7 +51,9 @@ def build_autonomous_user_data(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
     opencode_model = local_llm["model"] if local_llm else base_opencode_model
-    s3_archive_prefix = f"{repo}/issue/{issue_number}"
+    env = _blitzlog_env()
+    s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
+    s3_log_prefix = s3_archive_prefix
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
@@ -65,6 +68,7 @@ def build_autonomous_user_data(
         opencode_max_steps=opencode_max_steps,
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
+        s3_log_prefix=s3_log_prefix,
         local_llm_env=local_llm_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
@@ -111,6 +115,7 @@ BLITZLOG_ENV=${{BLITZLOG_ENV}}
 S3_LOGS_BUCKET={s3_bucket}
 SESSION_ARCHIVE_BUCKET={s3_bucket}
 SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
+S3_LOG_PREFIX={s3_log_prefix}
 OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
 OPENCODE_MODEL=${{OPENCODE_MODEL}}
 OPENCODE_PROMPT=${{OPENCODE_PROMPT:-}}

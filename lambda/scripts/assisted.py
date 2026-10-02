@@ -36,10 +36,13 @@ from _common import (
     _read_secrets_from_ssm_script,
     script_header,
 )
+from _env import _blitzlog_env
 
 
-def _session_restore_script(repo: str, issue_number: int, s3_bucket: str) -> str:
-    s3_prefix = f"{repo}/issue/{issue_number}"
+def _session_restore_script(
+    repo: str, issue_number: int, s3_bucket: str, env: str
+) -> str:
+    s3_prefix = f"{env}/{repo}/issue/{issue_number}"
     return f"""
 S3_RESTORE_PREFIX="{s3_prefix}"
 S3_RESTORE_BUCKET="{s3_bucket}"
@@ -103,7 +106,9 @@ def build_assisted_user_data(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
     opencode_model = local_llm["model"] if local_llm else base_opencode_model
-    s3_archive_prefix = f"{repo}/issue/{issue_number}"
+    env = _blitzlog_env()
+    s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
+    s3_log_prefix = s3_archive_prefix
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
@@ -118,6 +123,7 @@ def build_assisted_user_data(
         opencode_max_steps=opencode_max_steps,
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
+        s3_log_prefix=s3_log_prefix,
         local_llm_env=local_llm_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=None,
@@ -137,7 +143,7 @@ if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
 fi
 
 log "Restoring previous session state..."
-{_session_restore_script(repo, issue_number, s3_bucket)}
+{_session_restore_script(repo, issue_number, s3_bucket, env)}
 
 log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
 
@@ -171,6 +177,7 @@ BLITZLOG_ENV=${{BLITZLOG_ENV}}
 S3_LOGS_BUCKET={s3_bucket}
 SESSION_ARCHIVE_BUCKET={s3_bucket}
 SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
+S3_LOG_PREFIX={s3_log_prefix}
 OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
 OPENCODE_MODEL={opencode_model}
 OPENCODE_PROMPT=

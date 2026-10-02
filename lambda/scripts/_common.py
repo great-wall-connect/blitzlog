@@ -76,6 +76,7 @@ def script_header(
     opencode_max_steps: int,
     s3_bucket: str,
     s3_archive_prefix: str,
+    s3_log_prefix: str,
     local_llm_env: str,
     local_llm_log_line: str = "",
     opencode_prompt: str | None = None,
@@ -133,7 +134,8 @@ OPENCODE_AGENT_MAX_STEPS="{opencode_max_steps}"
 S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
-{local_llm_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
+S3_LOG_PREFIX="{s3_log_prefix}"
+{local_llm_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX S3_LOG_PREFIX
 
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"

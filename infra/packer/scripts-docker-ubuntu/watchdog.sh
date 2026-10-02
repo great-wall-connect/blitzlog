@@ -64,6 +64,7 @@ BLITZLOG_ENV="${BLITZLOG_ENV}"
 S3_LOGS_BUCKET="${S3_LOGS_BUCKET}"
 SESSION_ARCHIVE_BUCKET="${SESSION_ARCHIVE_BUCKET}"
 SESSION_ARCHIVE_PREFIX="${SESSION_ARCHIVE_PREFIX}"
+S3_LOG_PREFIX="${S3_LOG_PREFIX}"
 OPENCODE_API_KEY="${OPENCODE_API_KEY}"
 OPENCODE_MODEL="${OPENCODE_MODEL}"
 OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
@@ -131,6 +132,7 @@ COMMON_ARGS=(
     -e "S3_LOGS_BUCKET=$S3_LOGS_BUCKET"
     -e "SESSION_ARCHIVE_BUCKET=$SESSION_ARCHIVE_BUCKET"
     -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
+    -e "S3_LOG_PREFIX=$S3_LOG_PREFIX"
     -e "TELEGRAM_BOT_NAME=$TELEGRAM_BOT_NAME"
     -e "GITHUB_TOKEN=$GITHUB_TOKEN"
 )
@@ -215,13 +217,25 @@ if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "rate.?limit|quota.?exceede
     log "ACTIONABLE: Wait for the quota window to reset, then re-trigger."
 fi
 
+# Stamp every object from this run with the same timestamp+instance prefix,
+# so all files from one EC2 run sort together and never overwrite each
+# other (or a previous run's files on the same issue).
+RUN_TS=$(date -u +%Y%m%d_%H%M)
+RUN_TAG="${RUN_TS}_i${INSTANCE_ID}"
+
+# Defensive default for AMIs baked before S3_LOG_PREFIX was added to the
+# bootstrap env file. Falls back to the legacy flat env/logs/ path so a
+# mid-deploy window (new lambda, old AMI) doesn't produce double-slash
+# keys.
+: "${S3_LOG_PREFIX:=${BLITZLOG_ENV}/logs}"
+
 # Upload container + host logs to S3 (BOTH per user request).
 for log in /var/log/blitzlog/*.log /var/log/backend-bootstrap.log; do
     [ -f "$log" ] || continue
     log_name=$(basename "$log")
     log "Uploading $log_name to S3"
     aws s3 cp "$log" \
-        "s3://${S3_LOGS_BUCKET}/${BLITZLOG_ENV}/logs/${INSTANCE_ID}-${log_name}" \
+        "s3://${S3_LOGS_BUCKET}/${S3_LOG_PREFIX}/${RUN_TAG}_${log_name}" \
         --region "$REGION" || true
 done
 
@@ -231,7 +245,7 @@ for f in /workspace/.blitzlog/*; do
     fname=$(basename "$f")
     log "Uploading $fname to S3"
     aws s3 cp "$f" \
-        "s3://${SESSION_ARCHIVE_BUCKET:-${S3_LOGS_BUCKET}}/${SESSION_ARCHIVE_PREFIX}/${fname}" \
+        "s3://${SESSION_ARCHIVE_BUCKET:-${S3_LOGS_BUCKET}}/${SESSION_ARCHIVE_PREFIX}/${RUN_TAG}_${fname}" \
         --region "$REGION" || true
 done
 
