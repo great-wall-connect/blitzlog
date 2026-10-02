@@ -162,8 +162,6 @@ sudo docker run --name blitzlog-agent \
     "${TUNNEL_FLAGS[@]}" \
     "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v /root/.config/opencode:/root/.config/opencode \
-    -v /root/.config/opencode-telegram-bot:/root/.config/opencode-telegram-bot \
     -v /root/.git-credentials.d:/root/.git-credentials.d \
     -v /workspace:/workspace \
     -v /var/log/blitzlog:/var/log/blitzlog \
