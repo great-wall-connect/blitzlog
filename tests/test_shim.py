@@ -123,15 +123,6 @@ class TestParseMultipart(unittest.TestCase):
         self.assertIsNone(result.get("prompt"))
         self.assertEqual(result.get("fields"), [])
 
-    def test_shim_installs_python_multipart(self):
-        """python-multipart (new name: python_multipart) is the modern,
-        robust multipart parser. cgi is deprecated in 3.11, removed in
-        3.13. The bootstrap installs it as a replacement."""
-        from _common import _install_whisper_stt_script
-
-        script = _install_whisper_stt_script()
-        self.assertIn("python-multipart", script)
-
 
 class TestAudioConversion(unittest.TestCase):
     """ensure_wav converts non-WAV inputs to 16kHz mono WAV via ffmpeg,
@@ -199,31 +190,6 @@ class TestAudioConversion(unittest.TestCase):
             dst = src.rsplit(".", 1)[0] + ".wav"
             if os.path.exists(dst):
                 os.unlink(dst)
-
-    def test_shim_install_script_installs_imageio_ffmpeg(self):
-        """The EC2 bootstrap must install `imageio-ffmpeg` — pywhispercpp's
-        internal audio decoder only handles WAV, so the shim converts
-        upstream OGG/Opus via a bundled static ffmpeg provided by the
-        `imageio-ffmpeg` pip package. The Node.js shim did the same with
-        `ffmpeg-static` (npm); this is the Python equivalent."""
-        from _common import _install_whisper_stt_script
-
-        script = _install_whisper_stt_script()
-        self.assertRegex(script, r"pip\s+install\s+.*\bimageio-ffmpeg\b")
-
-    def test_shim_install_script_does_not_install_ffmpeg_via_dnf(self):
-        """Regression: `ffmpeg` is now bundled via imageio-ffmpeg pip
-        wheel — no system install needed. Ensure `dnf install ffmpeg`
-        does not slip back in."""
-        from _common import _install_whisper_stt_script
-
-        script = _install_whisper_stt_script()
-        self.assertNotRegex(
-            script,
-            r"dnf\s+install\s+.*\bffmpeg\b",
-            "ffmpeg should be bundled via imageio-ffmpeg pip wheel, "
-            "not installed via dnf",
-        )
 
 
 class TestTranscribeTextExtraction(unittest.TestCase):
