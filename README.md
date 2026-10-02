@@ -69,6 +69,7 @@ Two modes:
 - An existing VPC and subnet (Blitzlog needs to launch into one)
 - An S3 bucket for Terraform state
 - A GitHub App installed on the target repo
+- **Python 3.12 on the deploy host.** `terraform apply` runs `python3 -m venv` and `pip install -r lambda/requirements.txt` in a `local-exec` provisioner (`infra/modules/core/lambda.tf`). The lambda runtime is `python3.12`. The local-exec resolves Python 3.12 from the first available source: `command -v python3.12` first (macOS's `python3.12` works), then `~/.local/share/mise/installs/python/3.12.*/bin/python3` (the project's `mise.toml` pins `python = "3.12"`; `mise install` puts it there). If your deploy host has a different `python3` default (e.g., Ubuntu Desktop's `python3.14`), the local-exec still picks the mise install — as long as `mise install` has been run once. If neither Python 3.12 source exists, the local-exec fails loudly with instructions to install it.
 
 ---
 
@@ -609,10 +610,10 @@ The user has up to 10 minutes to reply.
 
 ## Instance lifecycle
 
-1. **Launch** — Lambda spawns a `t4g.medium` (or `t4g.large` / `t4g.xlarge`) spot instance with user-data.
-2. **Setup** — cloud-init configures git credentials, installs OpenCode, clones the target repo.
-3. **Agent run** — OpenCode reads the issue, creates a `feat/issue-{N}-{slug}` branch, implements, tests, lints, commits, pushes.
-4. **Watchdog** — `timeout 7200` (2 hours) forces termination if the agent hangs.
+1. **Launch** — Lambda spawns a `t4g.medium` (or `t4g.large` / `t4g.xlarge`) spot instance from a Packer-built AMI. The AMI ships with `dockerd` and a pre-baked `ghcr.io/great-wall-connect/blitzlog-agent` container image. Cold start: ~22-60s. See [`docs/DOCKER.md`](docs/DOCKER.md).
+2. **Setup** — user-data reads SSM secrets, downloads the whisper model from S3, configures git credentials, and `docker run`s the agent container.
+3. **Agent run** — Inside the container, OpenCode reads the issue, creates a `feat/issue-{N}-{slug}` branch, implements, tests, lints, commits, pushes.
+4. **Watchdog** — host polls IMDS every 5s for spot interruption; on detection sends SIGTERM via `docker stop --time=120`. The 2-hour `timeout` forces termination if the agent hangs.
 5. **Shutdown** — post-exit script calls `ec2:TerminateInstances` via IMDSv2.
 6. **Cleanup** — git credentials are deleted after `git clone`; the GitHub installation token is repo-scoped with up to 8h lifetime (longer than the watchdog, intentionally).
 

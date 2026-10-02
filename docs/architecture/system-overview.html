@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Blitzlog system architecture</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --ink: #0f172a;
+    --ink-soft: #475569;
+    --muted: #94a3b8;
+    --brand: #1e3a8a;
+    --brand-soft: #dbeafe;
+    --orange: #d97706;
+    --orange-soft: #fef3c7;
+    --teal: #0f766e;
+    --teal-soft: #ccfbf1;
+    --violet: #7c3aed;
+    --violet-soft: #ede9fe;
+    --slate: #334155;
+    --slate-soft: #e2e8f0;
+    --line: #cbd5e1;
+    --card: #ffffff;
+    --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.06);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .canvas {
+    width: 1800px;
+    min-height: 1200px;
+    padding: 48px 56px 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 28px;
+    background:
+      radial-gradient(1200px 600px at 50% -100px, rgba(30, 58, 138, 0.06), transparent 70%),
+      var(--bg);
+    position: relative;
+  }
+
+  /* ─── SLIDE-OUT (teal-tinted backdrop enclosing EC2 host + volume + container,
+       signifying the volume and container are nested in the EC2 host) ── */
+  .slide-out {
+    position: absolute;
+    left: 40px;
+    top: 822px;
+    width: 1721px;
+    height: 641px;
+    background-color: rgba(15, 118, 110, 0.04);
+    background-image: linear-gradient(to right, rgba(15, 118, 110, 0.35) 0, rgba(15, 118, 110, 0.35) 51.19%, transparent 51.19%, transparent 71.53%, rgba(15, 118, 110, 0.35) 71.53%, rgba(15, 118, 110, 0.35) 100%);
+    background-size: 100% 2px;
+    background-position: top left;
+    background-repeat: no-repeat;
+    border: 2px solid rgba(15, 118, 110, 0.35);
+    border-top: none;
+    border-radius: 14px 14px 14px 14px;
+    z-index: 0;
+  }
+  .slide-out-top {
+    position: absolute;
+    left: 919px;
+    top: 362px;
+    width: 353px;
+    height: 460px;
+    background: rgba(15, 118, 110, 0.04);
+    border: 2px solid rgba(15, 118, 110, 0.35);
+    border-bottom: none;
+    border-radius: 14px 14px 0 0;
+    z-index: 0;
+  }
+
+  /* ─── HEADER ──────────────────────────────────────────────── */
+  .header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    padding-bottom: 8px;
+  }
+  .eyebrow {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--brand);
+  }
+  .title {
+    font-size: 46px; font-weight: 800; line-height: 1.05;
+    margin: 0; color: var(--ink); letter-spacing: -0.02em;
+  }
+  .title em {
+    font-style: normal;
+    background: linear-gradient(90deg, #1e3a8a, #7c3aed);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .subtitle {
+    font-size: 18px; color: var(--ink-soft);
+    line-height: 1.45; max-width: 1200px;
+    margin: 0;
+  }
+
+  /* ─── SECTION ──────────────────────────────────────────────── */
+  .section {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+  }
+  .section-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted);
+    padding-left: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-label::before {
+    content: ""; width: 8px; height: 8px;
+    border-radius: 50%; background: var(--brand);
+  }
+  .section-divider {
+    border: none; border-top: 1px dashed rgba(148, 163, 184, 0.4);
+    margin: 0;
+  }
+
+  /* ─── ROW ──────────────────────────────────────────────── */
+  .row {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: stretch;
+    gap: 20px;
+    flex-wrap: nowrap;
+  }
+
+  /* ─── CARD ──────────────────────────────────────────────── */
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+    border: 1px solid rgba(15, 23, 42, 0.05);
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .card .label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card .label .icon {
+    width: 24px; height: 24px;
+    object-fit: contain;
+    display: block;
+  }
+  .card h3 { font-size: 19px; font-weight: 700; margin: 0; color: var(--ink); }
+  .card p { font-size: 13px; color: var(--ink-soft); margin: 0; }
+  .card ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px;
+             color: var(--ink-soft); line-height: 1.55; }
+  .card ul li { margin-bottom: 3px; }
+
+  .card.tone-blue    { border-left: 4px solid var(--brand); }
+  .card.tone-orange  { border-left: 4px solid var(--orange); }
+  .card.tone-teal    { border-left: 4px solid var(--teal); }
+  .card.tone-violet  { border-left: 4px solid var(--violet); }
+  .card.tone-slate   { border-left: 4px solid var(--slate); }
+
+/* ─── AWS WRAPPER ──────────────────────────────────────────── */
+.aws-wrapper {
+    background: linear-gradient(180deg, #f1f5fb 0%, #f8fafc 100%);
+    border: 1.5px solid #c7d2e0;
+    border-radius: 18px;
+    padding: 18px 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 1140px;
+    box-shadow: 0 1px 2px rgba(30, 58, 138, 0.04), 0 6px 16px rgba(30, 58, 138, 0.06);
+}
+.aws-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 4px;
+}
+.aws-header .aws-svg { width: 64px; height: 38px; object-fit: cover; object-position: center top; display: block; }
+.aws-header .aws-title {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-soft);
+}
+.aws-cards {
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+    align-items: stretch;
+    flex: 1 1 0;
+}
+.aws-cards .card { flex: 1 1 0; min-width: 0; max-width: 360px; z-index: 100; }
+
+  /* ─── GH WRAPPER (mirrors AWS wrapper styling) ─────────────────────── */
+.gh-wrapper {
+    background: linear-gradient(180deg, #f5f6f8 0%, #f8fafc 100%);
+    border: 1.5px solid #d0d7de;
+    border-radius: 18px;
+    padding: 18px 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 0 1 320px;
+    min-width: 0;
+    max-width: 360px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 16px rgba(15, 23, 42, 0.06);
+}
+.gh-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 4px;
+}
+.gh-header .gh-icon { width: 32px; height: 32px; object-fit: contain; display: block; }
+.gh-header .gh-title {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-soft);
+}
+.gh-card { flex: 1 1 0; }
+
+  /* ─── CARD WIDTHS ──────────────────────────────────────────── */
+  .workflow-row { gap: 24px; align-items: stretch; }
+  .workflow-row > #trigger-card { flex: 0 1 320px; }
+
+  /* ─── INLINE ARROWS (between cards in the workflow row) ─────────── */
+  .arrow-inline {
+    align-self: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-soft);
+    flex: 0 0 auto;
+    width: 24px;
+  }
+  .arrow-inline svg { display: block; }
+  .arrow-inline.orange { color: var(--orange); }
+
+  .container-row { justify-content: center; }
+  .container-row .card { flex: 0 0 auto; width: 940px; max-width: none; }
+
+  /* ─── SIGNAL ROW (fixed 320 px per card) ───────────────────────────── */
+  .signals-row { justify-content: center; gap: 18px; flex-wrap: nowrap; }
+  .signals-row .card { flex: 0 0 320px; width: 320px; max-width: 320px; min-width: 320px; }
+
+  /* ─── VOLUME WRAPPER (mirrors AWS wrapper styling for signal cards) ────── */
+  .volume-wrapper {
+    background: linear-gradient(180deg, #f5f3ee 0%, #f8fafc 100%);
+    border: 1.5px solid #d6d0c4;
+    border-radius: 18px;
+    padding: 18px 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 16px rgba(15, 23, 42, 0.06);
+  }
+  .volume-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 4px;
+  }
+  .volume-header .volume-title {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-soft);
+  }
+  .volume-cards {
+    display: flex;
+    flex-direction: row;
+    gap: 18px;
+    align-items: stretch;
+    justify-content: center;
+    flex-wrap: nowrap;
+  }
+  .volume-cards .card { flex: 0 0 320px; width: 320px; max-width: 320px; min-width: 320px; }
+
+  /* ─── DOCKER WRAPPER (mirrors AWS wrapper styling for container card) ── */
+  .docker-wrapper {
+    background: linear-gradient(180deg, #eef4fb 0%, #f8fafc 100%);
+    border: 1.5px solid #b8c9d8;
+    border-radius: 18px;
+    padding: 18px 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 16px rgba(15, 23, 42, 0.06);
+  }
+  .docker-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 4px;
+    align-self: flex-start;
+  }
+  .docker-header .docker-icon { height: 32px; width: auto; display: block; }
+  .docker-header .docker-title {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-soft);
+  }
+  .docker-card { width: 1100px; max-width: 100%; }
+
+  /* ─── STORAGE LAYOUT (icons stacked inside the card) ──────────────── */
+  .storage-icons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: stretch;
+    margin-top: 4px;
+  }
+  .storage-icons .icon-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .storage-icons img { width: 22px; height: 22px; object-fit: contain; display: block; }
+
+  /* ─── FOOTER ──────────────────────────────────────────────── */
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px; color: var(--muted); letter-spacing: 0.04em;
+    margin-top: 8px;
+  }
+  .footer code {
+    background: rgba(15, 23, 42, 0.05);
+    padding: 2px 6px; border-radius: 4px; font-size: 11px;
+  }
+
+  /* ─── ARROW LABELS (no arrows in this version; styling kept for footer) ── */
+  .pill {
+    background: var(--brand-soft); color: var(--brand);
+    border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 600;
+  }
+  .pill-violet { background: var(--violet-soft); color: var(--violet); }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- Slide-out backdrop: teal-tinted rectangle enclosing EC2 + volume + container -->
+  <div class="slide-out" aria-hidden="true"></div>
+  <div class="slide-out-top" aria-hidden="true"></div>
+
+  <!-- VERTICAL 1: HEADER -->
+  <header class="header">
+    <div class="eyebrow">Blitzlog · System architecture</div>
+    <h1 class="title">How an <em>autonomous agent</em> runs from a labeled issue to a finished PR</h1>
+    <p class="subtitle">
+      A thin Packer-baked EC2 host wraps a single container. The container has no AWS credentials —
+      all S3 work happens on the host. Three shutdown triggers (user / shutdown tool, EC2 spot
+      interruption, and ECIM 2 reclamation) all funnel through one shared signal file so the
+      agent's last work always reaches S3.
+    </p>
+  </header>
+
+  <hr class="section-divider">
+
+  <!-- VERTICAL 2: WORKFLOW -->
+  <section class="section">
+    <div class="section-label">Workflow</div>
+    <div class="row workflow-row">
+
+      <div class="gh-wrapper">
+        <div class="gh-header">
+          <img class="gh-icon" src="./gh.png" alt="GitHub">
+          <div class="gh-title">GitHub</div>
+        </div>
+        <article class="card tone-blue gh-card" id="trigger-card">
+          <div class="label" style="color: var(--brand);">Trigger</div>
+          <h3>Labeled GitHub issue</h3>
+          <p>User attaches a trigger label (e.g. <code>feat/issue-12-foo</code>) to an issue. GitHub
+          fires an <code>issues.labeled</code> webhook at the Lambda URL.</p>
+          <p style="margin-top: 6px;">In assisted mode, the user also has a Telegram conversation
+          with the bot — typed messages flow in via the Bot API.</p>
+        </article>
+      </div>
+
+      <div class="arrow-inline" aria-label="webhook">
+        <svg width="24" height="14" viewBox="0 0 24 14"><path d="M0,7 L20,7 M14,1 L20,7 L14,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <!-- AWS services wrapper -->
+      <div class="aws-wrapper">
+        <div class="aws-header">
+          <img class="aws-svg" src="./AWS.svg" alt="AWS">
+          <div class="aws-title">AWS services</div>
+        </div>
+        <div class="aws-cards">
+
+          <article class="card tone-blue" id="orch">
+            <div class="label" style="color: var(--brand);">
+              <img class="icon" src="./Lambda.png" alt="">
+              Orchestration · AWS Lambda
+            </div>
+            <h3>handler.py</h3>
+            <ul>
+              <li>Verifies GitHub webhook HMAC</li>
+              <li>Mints a GitHub App installation token</li>
+              <li>Acquires a free bot from the user's pool</li>
+              <li>Builds user-data (env, secrets, Tailscale)</li>
+              <li>Launches an EC2 spot instance with that user-data</li>
+            </ul>
+          </article>
+
+          <div class="arrow-inline" aria-label="user-data">
+            <svg width="24" height="14" viewBox="0 0 24 14"><path d="M0,7 L20,7 M14,1 L20,7 L14,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+          </div>
+
+<article class="card tone-teal" id="host">
+              <div class="label" style="color: var(--teal);">
+                <img class="icon" src="./EC2.png" alt="">
+                EC2 HOST · PACKER-BAKED UBUNTU 26.04
+              </div>
+              <h3>Two systemd services</h3>
+              <ul>
+                <li><b>blitzlog-agent.service</b> — runs <code>watchdog.sh</code>: loads baked image,
+                runs container, watches <code>/workspace/.shutdown</code>, on container exit uploads
+                logs + session archive to S3 and terminates the instance.</li>
+                <li><b>spot-watchdog.service</b> — runs
+                <code>spot-watchdog.sh</code>: polls IMDS for spot reclamation notices, touches
+                <code>/workspace/.interrupted</code> on ACTION, exits.</li>
+              </ul>
+              <p style="margin-top: 6px; font-size: 12px; color: var(--ink-soft);">Both services
+              have IAM role access for S3 / EC2 — credentials never enter the container.</p>
+            </article>
+
+            <div class="arrow-inline" aria-label="IAM access">
+              <svg width="28" height="14" viewBox="0 0 28 14">
+                <path d="M10,1 L4,7 L10,13 M4,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/>
+              </svg>
+            </div>
+
+            <article class="card tone-slate" id="storage">
+            <div class="label" style="color: var(--slate);">Storage &amp; secrets</div>
+            <div class="storage-icons">
+              <div class="icon-row">
+                <img src="./S3.png" alt="S3">
+                <span>S3 — agent logs, session archives, bot-pool locks</span>
+              </div>
+              <div class="icon-row">
+                <img src="./SSM.png" alt="SSM">
+                <span>SSM — <code>GITHUB_TOKEN</code>, <code>OPENCODE_API_KEY</code>, <code>STT_*</code> keys</span>
+              </div>
+            </div>
+            <ul style="margin-top: 6px;">
+              <li><b>GitHub API</b> — issue/PR reads + writes</li>
+              <li><b>Telegram Bot API</b> — chat with the user</li>
+            </ul>
+          </article>
+
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- VERTICAL 3: SHARED SIGNAL FILES -->
+  <section class="section">
+    <div class="section-label">Shared signal files</div>
+    <div class="volume-wrapper">
+      <div class="volume-header">
+        <div class="volume-title">Volume /workspace</div>
+      </div>
+      <div class="volume-cards">
+
+        <article class="card tone-slate" id="signal-idle" style="background: #fefce8;">
+          <div class="label" style="color: var(--slate);">Heartbeat</div>
+          <h3>/.idle</h3>
+          <p>Container's entrypoint touches this on boot. Cosmetic — host uses it as a "container is alive" marker.</p>
+        </article>
+
+        <article class="card tone-orange" id="signal-interrupted" style="background: #fffbeb;">
+          <div class="label" style="color: var(--orange);">Spot signal</div>
+          <h3>/.interrupted</h3>
+          <p>Written by <code>spot-watchdog.service</code> on the host when IMDS returns a spot
+          reclamation notice. The container's <code>spot_watchdog</code> plugin polls every 5 s.</p>
+        </article>
+
+        <article class="card tone-blue" id="signal-shutdown" style="background: #eff6ff;">
+          <div class="label" style="color: var(--brand);">Shutdown signal</div>
+          <h3>/.shutdown</h3>
+          <p>Written by <code>assisted-shutdown.sh</code> (called from the shutdown tool OR the
+          spot_watchdog plugin). Host's <code>watchdog.sh</code> watcher SIGTERMs the container on detection.</p>
+        </article>
+
+        <article class="card tone-slate" id="signal-blitzlog" style="background: #f8fafc;">
+          <div class="label" style="color: var(--slate);">Session artifacts</div>
+          <h3>/.blitzlog/*</h3>
+          <p><code>session-archive-*.json</code> + <code>metadata.json</code>. Container writes them; host's <code>watchdog.sh</code> uploads to S3 on container exit.</p>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- VERTICAL 4: CONTAINER -->
+  <section class="section">
+    <div class="section-label">Container</div>
+    <div class="row container-row">
+
+      <div class="docker-wrapper">
+        <div class="docker-header">
+          <img class="docker-icon" src="./docker.png" alt="Docker">
+        </div>
+        <article class="card tone-violet docker-card" id="container">
+          <div class="label" style="color: var(--violet);">Container · blitzlog-agent</div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+            <div>
+              <h3>entrypoint.sh</h3>
+              <p>First boot inside the container: sets up git credentials, runs
+              <code>gh auth login</code>, renders <code>opencode.json</code>, then starts services.</p>
+            </div>
+            <div>
+              <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px;">
+                <span class="pill-violet pill">Services</span>
+                <span>whisper-stt-shim · opencode serve · telegram-bot</span>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                <span class="pill-violet pill">Plugins (lib/)</span>
+                <span>idle_watchdog · periodic_autosave · session_archive · spot_watchdog</span>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                <span class="pill-violet pill">Tools</span>
+                <span>shutdown</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <span><code>github.com/great-wall-connect/blitzlog</code></span>
+    <span>three shutdown flows → one signal file → S3 + terminate</span>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,6 +1,7 @@
 [tools]
 python = "3.12"
 terraform = "1.9.8"
+packer = "1.16.1"
 
 [tasks.bootstrap]
 description = "Install runtime + dev Python dependencies and symlink /usr/local/bin/python"
@@ -41,3 +42,175 @@ run = "terraform plan"
 description = "Terraform apply"
 dir = "infra"
 run = "terraform apply"
+
+[tasks.image-build]
+description = "Build the blitzlog-agent image locally (buildx auto-detects the host arch; CI builds arm64 via ubuntu-26.04-arm)"
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+"""
+
+[tasks.image-test]
+description = "Build the image and run the Tier-1 smoke test (no env vars, no network)"
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+docker run --rm --platform linux/arm64 --entrypoint="" \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  blitzlog-agent:local \
+  sh /smoke-test.sh
+"""
+
+[tasks.image-run-test]
+description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.assisted.test. The container's entrypoint (a) writes logs to /var/log/blitzlog/opencode.log and (b) writes session artifacts + signal files under /workspace/.blitzlog, /workspace/.idle, /workspace/.shutdown. We mirror the production watchdog.sh: pre-create those host paths in /tmp/blitzlog-{logs,workspace}/ and bind-mount them in so the entrypoint output + signal state are inspectable from the host after the 30s timeout."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+touch /tmp/blitzlog-workspace/.idle
+docker run --rm --entrypoint="" \
+  --env-file ./packages/images/agent/.env.assisted.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo "==> entrypoint (may fail without real GitHub/LLM access — that is expected)" && timeout 30 /usr/local/bin/entrypoint.sh || echo "(exited $? — expected without network/auth)"'
+"""
+
+[tasks.image-telegram]
+description = "Build the image and run the Tier-2 Telegram bot boot smoke (60s timeout — boots the bot, doesn't talk to Telegram). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in so entrypoint logs + signal files (.idle, .shutdown, .blitzlog/) are inspectable from the host after the 60s timeout."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+touch /tmp/blitzlog-workspace/.idle
+docker run --rm --entrypoint="" \
+  --env-file ./packages/images/agent/.env.assisted.test \
+  -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  blitzlog-agent:local \
+  sh -c 'sh /smoke-test.sh && echo \"==> entrypoint (bot boot may take up to 60s)\" && timeout 60 /usr/local/bin/entrypoint.sh || echo \"(exited $? — expected without LLM auth)\"'
+"""
+
+[tasks.image-telegram-live-assisted]
+description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. The host-side watcher polls /workspace/.shutdown and SIGTERMs the container when the agent invokes its shutdown tool, mirroring the production watchdog's behavior. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+# Pre-create .idle as a "container is alive" marker. We do NOT
+# pre-create .shutdown — the host-side watcher below polls for its
+# existence and would otherwise fire on the pre-existing file. .shutdown
+# is created by the agent's shutdown tool (assisted-shutdown.sh) as
+# its LAST step, after the session is exported.
+touch /tmp/blitzlog-workspace/.idle
+# Remove any stale .shutdown left over from a previous run, so the
+# watcher below doesn't fire immediately on startup. The watcher
+# polls for the file's existence, so any leftover .shutdown would
+# immediately satisfy `[ -f ... ]` and trigger an early kill.
+rm -f /tmp/blitzlog-workspace/.shutdown
+rm -f /tmp/blitzlog-workspace/repo/
+# Host-side shutdown watcher — local equivalent of the production
+# watchdog.sh. Polls the host-mirrored .shutdown file and SIGTERMs the
+# container when the agent invokes its shutdown tool. .shutdown is
+# only created by the shutdown tool itself, so an existence check is
+# sufficient — no mtime math, no race.
+(
+    while [ ! -f /tmp/blitzlog-workspace/.shutdown ]; do
+        sleep 1
+    done
+    echo "[watcher] .shutdown detected; sending SIGTERM to blitzlog-tg-test"
+    docker kill --signal TERM blitzlog-tg-test 2>/dev/null || true
+) &
+WATCHER_PID=$!
+# Clean up the watcher when the mise task exits (success, Ctrl-C, error).
+trap "kill $WATCHER_PID 2>/dev/null || true" EXIT INT TERM
+# Fetch a fresh GitHub token from the host's `gh auth login` and pass
+# it to the container via -e. The token is short-lived, so we generate
+# it on every run rather than storing it. -e overrides any value that
+# might be in .env.assisted.test. Conditional docker flags — only grant
+# Tailscale capabilities when TAILSCALE_AUTH_KEY is set in
+# .env.assisted.test (least privilege).
+TUNNEL_FLAGS=""
+if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.assisted.test 2>/dev/null; then
+    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+fi
+
+# might be in .env.assisted.test.
+docker run --rm -i $TUNNEL_FLAGS \
+  --env-file ./packages/images/agent/.env.assisted.test \
+  -e "GITHUB_TOKEN=$(gh auth token)" \
+  -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  --name blitzlog-tg-test \
+  blitzlog-agent:local
+"""
+
+[tasks.preflight]
+description = "Run all pre-PR checks: lint, test, image-test"
+run = """
+mise run lint
+mise run test
+mise run image-test
+"""
+
+[tasks.fetch-whisper]
+description = "Download ggml-tiny.en.bin to /tmp/whisper-models (needed by image-telegram-live / image-telegram; the Packer image bakes the model into the AMI for production)"
+run = """
+mkdir -p /tmp/whisper-models
+curl -L --fail -o /tmp/whisper-models/ggml-tiny.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+"""
+
+[tasks.image-telegram-live-autonomous]
+description = "Build the image and run the agent in autonomous mode (fire-and-forget opencode run). The agent clones the repo, installs the toolchain, runs the project's bootstrap task, then runs opencode on the issue specified in OPENCODE_PROMPT. The container exits when opencode finishes. Env vars come from .env.autonomous.test (gitignored, MODE=autonomous + OPENCODE_PROMPT + OPENCODE_API_KEY + etc.) plus -e GITHUB_TOKEN fetched at runtime. Prerequisite: gh auth login on the host. The whisper-stt-shim does NOT run in autonomous mode, so no STT model file is needed."
+run = """
+docker buildx build \
+  --builder default \
+  --tag blitzlog-agent:local \
+  --load \
+  ./packages/images/agent
+mkdir -p /tmp/blitzlog-logs
+mkdir -p /tmp/blitzlog-workspace/.blitzlog
+# Autonomous mode is fire-and-forget: opencode run --agent build runs to
+# completion, then the entrypoint exits with opencode's exit code. No
+# watcher, no .shutdown, no Telegram bot, no whisper-stt-shim. The
+# Conditional docker flags — only grant Tailscale capabilities when
+# TAILSCALE_AUTH_KEY is set in .env.autonomous.test (least privilege).
+TUNNEL_FLAGS=""
+if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.autonomous.test 2>/dev/null; then
+    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+fi
+
+# container name is different from the assisted task to avoid
+# collisions if both run concurrently (e.g., during CI).
+docker run --rm $TUNNEL_FLAGS \
+  --env-file ./packages/images/agent/.env.autonomous.test \
+  -e "GITHUB_TOKEN=$(gh auth token)" \
+  -v /tmp/blitzlog-logs:/var/log/blitzlog \
+  -v /tmp/blitzlog-workspace:/workspace \
+  --name blitzlog-tg-auto \
+  blitzlog-agent:local
+"""
