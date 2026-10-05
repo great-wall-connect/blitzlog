@@ -97,6 +97,14 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
         user_data = _build_assisted()
         self.assertIn("Effective opencode config", user_data)
         self.assertIn("api_key_prefix", user_data)
+        # Regression guard for #73: the host bootstrap used to grep
+        # /root/.config/opencode/opencode.json to derive the provider,
+        # but the file lives in the container, not the host — so the
+        # grep always failed with "No such file or directory" and the
+        # diagnostic reported `provider=` (empty). The provider now
+        # comes from shell parameter expansion on $OPENCODE_MODEL.
+        self.assertNotIn("/root/.config/opencode/opencode.json", user_data)
+        self.assertNotIn("grep -oE", user_data)
 
     def test_default_opencode_model_is_minimax(self):
         with patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"}, clear=True):

@@ -262,6 +262,12 @@ OPENCODE_CFG
 OPENCODE_CFG
         cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
     fi
+    # Mirrors the local-LLM "Configuring opencode for local LLM: ..."
+    # log on line 167 so the cloud-success path has the same operator
+    # diagnostic. Lands in /var/log/blitzlog/opencode.log (bind-mounted
+    # to the host) so future "is the config there?" questions have a
+    # definitive answer in the logs.
+    log "Wrote /root/.config/opencode/opencode.json: model=$opencode_model, provider=$opencode_provider, api_key_prefix=${OPENCODE_API_KEY:0:8}..."
 fi
 
 # --- 3.5 (optional): join Tailscale Tailnet if TAILSCALE_AUTH_KEY is set ---
@@ -577,7 +583,14 @@ else
     # logic moved into the container entrypoint (commit c7d914a).
     i=0
     while [ "$i" -lt 30 ]; do
-        if curl -fs -u "agent:${OPENCODE_SERVER_PASSWORD}" \
+        # --max-time 3 caps each request at 3s; --connect-timeout 2
+        # bounds the TCP handshake. Without these, an opencode serve that
+        # is up (port 4096 listening) but slow on / traps curl forever
+        # — the shell blocks in waitpid, the loop never increments i,
+        # and the bot never starts. The whole loop is then hard-bounded
+        # at 30 × (3 + 2) ≈ 150 s worst case instead of "forever."
+        if curl -fs --max-time 3 --connect-timeout 2 \
+               -u "agent:${OPENCODE_SERVER_PASSWORD}" \
                -o /dev/null \
                http://127.0.0.1:4096/ 2>/dev/null; then
             break
