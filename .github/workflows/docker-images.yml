@@ -63,7 +63,7 @@ jobs:
 
       - name: Build (PR only — no push)
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./packages/images/agent
           push: false
@@ -75,7 +75,7 @@ jobs:
 
       - name: Build and push (push to main)
         if: github.event_name == 'push'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./packages/images/agent
           push: true
@@ -88,7 +88,7 @@ jobs:
 
       - name: Build and push (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./packages/images/agent
           push: true
