@@ -56,6 +56,12 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "opencode_agent_max_steps" {
+  description = "Max agentic iterations per opencode session for dev agents. Same semantics as the module-level variable — when hit, opencode forces summarization."
+  type        = number
+  default     = 500
+}
+
 variable "opencode_api_key" {
   description = "API key for the OpenCode inference provider used by dev agents. Use a separate API key if your provider supports multiple keys."
   type        = string

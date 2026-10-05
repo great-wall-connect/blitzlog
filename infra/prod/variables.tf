@@ -51,9 +51,15 @@ variable "alert_email" {
 }
 
 variable "opencode_model" {
-  description = "OpenCode model ID (e.g. <provider>/<model>). Defaults to a MiniMax coding-plan model."
+  description = "OpenCode model ID for dev agents. Often set to the same provider/model as prod."
   type        = string
   default     = "minimax-coding-plan/MiniMax-M3"
+}
+
+variable "opencode_agent_max_steps" {
+  description = "Max agentic iterations per opencode session for prod agents. Same semantics as the module-level variable — when hit, opencode forces summarization."
+  type        = number
+  default     = 500
 }
 
 variable "opencode_api_key" {

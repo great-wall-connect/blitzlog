@@ -6,53 +6,31 @@ Builds the bash script that EC2 runs at first boot for an autonomous
   - fetches secrets from SSM (GitHub token, optionally the cloud API key)
   - optionally installs/authenticates Tailscale (for local-LLM transport)
   - probes the local LLM endpoint if configured (abort on 5 min unreachable)
-  - installs system packages, opencode, the toolchain
+  - downloads the whisper model from S3 (if not cached locally) for
+    the container's whisper-stt-shim
   - writes the opencode config + session-archive plugin
   - writes the spot-watchdog and periodic-autosave plugins
-  - wraps the opencode run in a watchdog that uploads logs + session on
-    exit and terminates the instance
+  - writes /etc/blitzlog.env (the host's watchdog reads this and
+    passes selected vars to the container)
+  - boots the host's Packer-baked watchdog.sh via systemd, which loads
+    the Packer-baked container image and `docker run`s it; the
+    container's entrypoint handles the rest (git clone, mise install,
+    `opencode run --agent build`)
 
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with assisted mode (`_decode_api_errors_script`,
-`_read_secrets_from_ssm_script`, `_install_system_packages_script`, ...)
-live in `_common.py`.
+`_read_secrets_from_ssm_script`, ...) live in `_common.py`.
 """
 
 import os
 
 from _common import (
-    _configure_git_script,
-    _decode_api_errors_script,
-    _install_opencode_script,
-    _install_system_packages_script,
-    _install_toolchain_script,
     _local_llm_env_block,
     _local_llm_log_line,
-    _preflight_block,
-    _preflight_definitions,
     _read_secrets_from_ssm_script,
-    _session_export_to_s3_script,
-    _tailscale_install_block,
-    _write_opencode_config_script,
     script_header,
 )
-from plugins import (
-    _write_periodic_autosave_plugin_script,
-    _write_session_archive_plugin_script,
-    _write_spot_watchdog_plugin_script,
-)
-
-
-def _upload_logs_and_terminate_script(repo: str, issue_number: int) -> str:
-    s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
-    s3_prefix = f"{repo}/issue/{issue_number}"
-    return f"""
-TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
-LOG_KEY="{s3_prefix}/logs/${{INSTANCE_ID}}-$(date +%Y%m%d-%H%M%S).log"
-aws s3 cp /var/log/backend-bootstrap.log "s3://{s3_bucket}/${{LOG_KEY}}" --region "$REGION" || true
-"""
+from _env import _blitzlog_env
 
 
 def build_autonomous_user_data(
@@ -72,106 +50,85 @@ def build_autonomous_user_data(
     base_opencode_model = os.environ.get(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
-    if local_llm:
-        opencode_model = local_llm["model"]
-    else:
-        opencode_model = base_opencode_model
-    s3_archive_prefix = f"{repo}/issue/{issue_number}"
-
-    git_user_name = sender_login or ""
-    git_user_email = (
-        f"{sender_id}+{sender_login}@users.noreply.github.com" if sender_login else ""
-    )
+    opencode_model = local_llm["model"] if local_llm else base_opencode_model
+    env = _blitzlog_env()
+    s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
+    s3_log_prefix = s3_archive_prefix
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
-    tailscale_block = _tailscale_install_block(local_llm)
-    preflight_defs = _preflight_definitions("autonomous") if local_llm else ""
-    preflight_call = _preflight_block(local_llm, "autonomous")
+
+    opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
 
     header = script_header(
         mode="autonomous",
         repo=repo,
         issue_number=issue_number,
         opencode_model=opencode_model,
+        opencode_max_steps=opencode_max_steps,
         s3_bucket=s3_bucket,
         s3_archive_prefix=s3_archive_prefix,
+        s3_log_prefix=s3_log_prefix,
         local_llm_env=local_llm_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
     )
 
     return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
-{tailscale_block}{preflight_defs}{preflight_call}
 
-log "Installing system packages..."
-{_install_system_packages_script()}
+log "Downloading whisper model..."
+mkdir -p /opt/whisper-stt/models
+if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
+    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
+        --region "$REGION"
+fi
 
-log "Setting up git credentials..."
-{_configure_git_script(git_user_name, git_user_email)}
+log "Effective opencode config: model=$OPENCODE_MODEL"
 
-log "Installing opencode..."
-{_install_opencode_script()}
+# opencode plugins (session_archive, spot_watchdog) and tools are baked
+# into the container image at /root/.config/opencode/{{plugins,tools}}/
+# by the Dockerfile (packages/images/agent/Dockerfile). Autonomous mode
+# only needs session_archive + spot_watchdog; idle_watchdog and
+# periodic_autosave are assisted-mode-only and not loaded in autonomous.
 
-log "Cloning repository..."
-mkdir -p /workspace
-git clone "https://github.com/${{REPO}}.git" /workspace/repo
-cd /workspace/repo
-
-{_install_toolchain_script()}
-
-log "Writing opencode config and session archive plugin..."
-{_write_opencode_config_script(autonomous=True, local_provider=local_llm)}
-{_write_session_archive_plugin_script()}
-
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
-
-log "Writing spot watchdog and periodic autosave plugins..."
-{_write_spot_watchdog_plugin_script()}
-{_write_periodic_autosave_plugin_script()}
-
-log "Setting up watchdog (timeout: 7200s)..."
+log "Starting autonomous opencode agent via systemd watchdog..."
+# The watchdog (Packer-baked to /usr/local/bin/watchdog.sh, registered
+# via 02-systemd.sh as the blitzlog-agent.service unit) is the host's
+# lifecycle manager. It loads the baked container image, runs the agent
+# (the container's entrypoint invokes opencode run for the autonomous
+# mode), waits for it to exit, uploads host + container logs and
+# session artifacts to S3, releases the bot pool lock, and terminates
+# the EC2 instance.
+#
+# Write the env file the watchdog reads. Tailscale + local LLM env
+# vars are passed through so the container can join a Tailnet and
+# point opencode at a local-LLM endpoint. The container's entrypoint
+# already runs tailscale up, writes opencode.json, and runs the local
+# LLM preflight — we don't repeat any of that here.
+mkdir -p /workspace/.blitzlog
 cat > /etc/blitzlog.env <<ENVEOF
+MODE=autonomous
 ISSUE_NUMBER={issue_number}
-S3_LOGS_BUCKET={s3_bucket}
 REPO={repo}
+BLITZLOG_ENV=${{BLITZLOG_ENV}}
+S3_LOGS_BUCKET={s3_bucket}
 SESSION_ARCHIVE_BUCKET={s3_bucket}
 SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
+S3_LOG_PREFIX={s3_log_prefix}
+OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
+OPENCODE_MODEL=${{OPENCODE_MODEL}}
+OPENCODE_PROMPT=${{OPENCODE_PROMPT:-}}
+LOCAL_LLM_ENDPOINT=${{LOCAL_LLM_ENDPOINT:-}}
+LOCAL_LLM_MODEL=${{LOCAL_LLM_MODEL:-}}
+LOCAL_LLM_API_KEY=${{LOCAL_LLM_API_KEY:-}}
+LOCAL_LLM_FALLBACK=${{LOCAL_LLM_FALLBACK:-closed}}
+TAILSCALE_AUTH_KEY=${{TAILSCALE_AUTH_KEY:-}}
+OPENCODE_SERVER_USERNAME=agent
+GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
 ENVEOF
-cat > /usr/local/bin/watchdog.sh << 'WDOG_SCRIPT'
-#!/bin/bash
-set -euo pipefail
-source /etc/blitzlog.env
-export HOME=/root
-export PATH=/root/.opencode/bin:$PATH
-export SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX
-LOG_FILE="/var/log/backend-bootstrap.log"
-log() {{
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}}
-TIMEOUT=7200
-COMMAND="$@"
-timeout $TIMEOUT $COMMAND 2>&1
-EXIT_CODE=$?
 
-# Upload logs to S3 before terminating
-{_upload_logs_and_terminate_script(repo, issue_number)}
-log "Logs uploaded to S3"
-
-{_decode_api_errors_script()}
-
-# Export session to S3
-{_session_export_to_s3_script()}
-
-# Terminate instance
-if [ $EXIT_CODE -eq 124 ]; then
-    echo "Watchdog triggered: command exceeded ${{TIMEOUT}}s"
-fi
-aws ec2 terminate-instances --instance-id "$INSTANCE_ID" --region "$REGION" || true
-WDOG_SCRIPT
-chmod +x /usr/local/bin/watchdog.sh
-
-log "Launching opencode agent..."
-cd /workspace/repo
-OPENCODE_NONINTERACTIVE=1 /usr/local/bin/watchdog.sh opencode run --agent build "$OPENCODE_PROMPT" 2>&1 | tee -a "$LOG_FILE"
+# Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog
+# runs the agent container, waits for exit, then does AWS cleanup.
+sudo systemctl start blitzlog-agent.service
 """

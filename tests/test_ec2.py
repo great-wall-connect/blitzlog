@@ -5,9 +5,10 @@ import importlib
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import ec2 as ec2_module
+from botocore.exceptions import ClientError
 from ec2 import (
     _DEFAULT_SPOT_INSTANCE_TYPES,
     _build_s3_downloader_script,
@@ -154,7 +155,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "ec2.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
     @patch("ec2.s3")
     @patch("ec2.boto3")
     @patch("ec2.ec2")
@@ -199,7 +200,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "ec2.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
     @patch("ec2.s3")
     @patch("ec2.boto3")
     @patch("ec2.ec2")
@@ -247,7 +248,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "ec2.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
     @patch("ec2.s3")
     @patch("ec2.boto3")
     @patch("ec2.ec2")
@@ -285,14 +286,16 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertTrue(call_args[1]["Key"].startswith("user-data/assisted-issue-42-"))
         body = call_args[1]["Body"].decode()
         self.assertNotIn("ghp_testtoken", body)
-        self.assertIn('user.name "octocat"', body)
-        self.assertIn('user.email "12345+octocat@users.noreply.github.com"', body)
+        # Git identity is configured inside the agent container via
+        # entrypoint.sh (consuming the GITHUB_TOKEN env var). The host
+        # bootstrap only writes the env-var plumbing.
+        self.assertIn("GITHUB_TOKEN=", body)
 
     @patch(
         "ec2.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
     @patch("ec2.s3")
     @patch("ec2.boto3")
     @patch("ec2.ec2")
@@ -335,7 +338,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         "ec2.get_instance_profile_arn",
         return_value="arn:aws:iam::123:instance-profile/test",
     )
-    @patch("ec2.get_latest_al2023_ami", return_value="ami-12345")
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
     @patch("ec2.s3")
     @patch("ec2.boto3")
     @patch("ec2.ec2")
@@ -368,6 +371,139 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertEqual(block_device[0]["Ebs"]["VolumeSize"], 20)
         self.assertEqual(block_device[0]["Ebs"]["VolumeType"], "gp3")
         self.assertTrue(block_device[0]["Ebs"]["DeleteOnTermination"])
+
+    @patch(
+        "ec2.get_instance_profile_arn",
+        return_value="arn:aws:iam::123:instance-profile/test",
+    )
+    @patch("ec2.get_agent_ami", return_value="ami-12345")
+    @patch("ec2.s3")
+    @patch("ec2.boto3")
+    @patch("ec2.ec2")
+    @patch.dict(
+        os.environ,
+        {
+            "EC2_SECURITY_GROUP_ID": "sg-123",
+            "EC2_SUBNET_ID": "subnet-123",
+            "VPC_ID": "vpc-123",
+            "S3_LOGS_BUCKET": "test-bucket",
+            "BLITZLOG_ENV": "prod",
+        },
+    )
+    def test_instance_has_environment_tag(
+        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
+    ):
+        """EC2 instances must carry an `Environment` tag matching the
+        Lambda's BLITZLOG_ENV. The ec2_agent_role's `ec2:TerminateInstances`
+        IAM condition (infra/modules/core/iam.tf:178-190) keys on
+        `ec2:ResourceTag/Environment = var.environment`; without this tag
+        the watchdog's `aws ec2 terminate-instances` fails with
+        `UnauthorizedOperation` and the instance waits the full 2-hour EC2
+        lifecycle timeout.
+        """
+        mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+        mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+
+        from ec2 import launch_ec2_spot_instance
+        from scripts.autonomous import build_autonomous_user_data
+
+        launch_ec2_spot_instance(
+            "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data
+        )
+
+        tags = mock_ec2.run_instances.call_args[1]["TagSpecifications"][0]["Tags"]
+        env_tag = next((t for t in tags if t["Key"] == "Environment"), None)
+        self.assertIsNotNone(
+            env_tag,
+            "EC2 instance must be tagged with `Environment` so the EC2 role's "
+            "ec2:TerminateInstances IAM condition can match. Without it the "
+            "watchdog's terminate call is denied and the instance waits 2h.",
+        )
+        self.assertEqual(
+            env_tag["Value"],
+            "prod",
+            "Environment tag value must equal BLITZLOG_ENV (set in the Lambda "
+            "env by infra/modules/core/lambda.tf:95) so prod and dev resources "
+            "are isolated in IAM conditions.",
+        )
+
+
+class TestGetAgentAmi(unittest.TestCase):
+    """Tests for get_agent_ami() (Ubuntu 26.04 only — issue #55)."""
+
+    @patch("ec2.ec2")
+    @patch("ec2.boto3")
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "dev"})
+    def test_reads_docker_ubuntu_param(self, mock_boto3, mock_ec2):
+        from ec2 import get_agent_ami
+
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-ubuntu"}}
+        mock_boto3.client.return_value = mock_ssm
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-ubuntu"}]}
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-ubuntu")
+        mock_ssm.get_parameter.assert_called_once_with(
+            Name="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+        )
+
+    @patch("ec2.ec2")
+    @patch("ec2.boto3")
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
+    def test_falls_back_to_upstream_ubuntu_when_param_missing(
+        self, mock_boto3, mock_ec2
+    ):
+        from ec2 import get_agent_ami
+
+        mock_ssm = MagicMock()
+        # First call (primary): SSM param missing. Second call
+        # (fallback via get_latest_ubuntu_ami): returns upstream AMI.
+        mock_ssm.get_parameter.side_effect = [
+            ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
+            {"Parameter": {"Value": "ami-upstream-ubuntu"}},
+        ]
+        mock_boto3.client.return_value = mock_ssm
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-upstream-ubuntu")
+        self.assertEqual(mock_ssm.get_parameter.call_count, 2)
+
+    @patch("ec2.ec2")
+    @patch("ec2.boto3")
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
+    def test_clears_param_and_falls_back_when_ami_retired(self, mock_boto3, mock_ec2):
+        from ec2 import get_agent_ami
+
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.side_effect = [
+            {"Parameter": {"Value": "ami-stale"}},
+            {"Parameter": {"Value": "ami-upstream-ubuntu"}},
+        ]
+        mock_boto3.client.return_value = mock_ssm
+        mock_ec2.describe_images.side_effect = ClientError(
+            {"Error": {"Code": "InvalidAMIID.NotFound"}}, "DescribeImages"
+        )
+
+        result = get_agent_ami()
+        self.assertEqual(result, "ami-upstream-ubuntu")
+        mock_ssm.delete_parameter.assert_called_once_with(
+            Name="/blitzlog/prod/agent-ami-id-docker-ubuntu"
+        )
+
+    @patch("ec2.ec2")
+    @patch("ec2.boto3")
+    @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
+    def test_propagates_unexpected_client_error(self, mock_boto3, mock_ec2):
+        from ec2 import get_agent_ami
+
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "GetParameter"
+        )
+        mock_boto3.client.return_value = mock_ssm
+        with self.assertRaises(ClientError):
+            get_agent_ami()
 
 
 class TestLoadSpotInstanceTypes(unittest.TestCase):

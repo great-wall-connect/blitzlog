@@ -27,9 +27,10 @@ module "core" {
   github_app_installation_id = var.github_app_installation_id
   github_webhook_secret      = var.github_webhook_secret
 
-  alert_email      = var.alert_email
-  opencode_model   = var.opencode_model
-  opencode_api_key = var.opencode_api_key
+  alert_email              = var.alert_email
+  opencode_model           = var.opencode_model
+  opencode_agent_max_steps = var.opencode_agent_max_steps
+  opencode_api_key         = var.opencode_api_key
 
   agent_logs_bucket_name = var.agent_logs_bucket_name
 

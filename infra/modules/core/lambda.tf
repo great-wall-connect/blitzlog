@@ -18,11 +18,16 @@ data "archive_file" "lambda_zip" {
 #     lambda/bot_pool.py            # per-user bot pool + locks
 #     lambda/llm_guard.py           # IP safety guard for local LLM endpoints
 #     lambda/ec2.py                 # EC2 spot launch + helpers
-#     lambda/plugins.py             # JS plugin loader + heredoc writers
-#     lambda/plugins/*.js           # 5 JS sources (extracted from string literals)
 #     lambda/scripts/_common.py     # shared prologue + install/config builders
 #     lambda/scripts/autonomous.py  # build_autonomous_user_data
 #     lambda/scripts/assisted.py    # build_assisted_user_data
+#
+# opencode plugins + tools (idle_watchdog, periodic_autosave,
+# session_archive, spot_watchdog, shutdown) live in
+# packages/images/agent/opencode/{plugins,tools}/ and are baked into
+# the container image by packages/images/agent/Dockerfile. They are
+# NOT loaded by the Lambda bootstrap — that path was removed when the
+# container took over plugin installation.
 #
 # The `filemd5` trigger below enumerates every source file so any edit to
 # the package forces a rebuild. Adding a new module means adding a new
@@ -37,28 +42,36 @@ resource "null_resource" "lambda_build" {
     bot_pool_py  = filemd5("${path.module}/../../../lambda/bot_pool.py")
     llm_guard_py = filemd5("${path.module}/../../../lambda/llm_guard.py")
     ec2_py       = filemd5("${path.module}/../../../lambda/ec2.py")
-    plugins_py   = filemd5("${path.module}/../../../lambda/plugins.py")
 
     # scripts/ subpackage
     scripts_common_py     = filemd5("${path.module}/../../../lambda/scripts/_common.py")
     scripts_autonomous_py = filemd5("${path.module}/../../../lambda/scripts/autonomous.py")
     scripts_assisted_py   = filemd5("${path.module}/../../../lambda/scripts/assisted.py")
 
-    # JS plugin sources (loaded at cold-start, embedded into bootstrap heredoc)
-    plugin_session_archive_js   = filemd5("${path.module}/../../../lambda/plugins/session_archive.js")
-    plugin_spot_watchdog_js     = filemd5("${path.module}/../../../lambda/plugins/spot_watchdog.js")
-    plugin_periodic_autosave_js = filemd5("${path.module}/../../../lambda/plugins/periodic_autosave.js")
-    plugin_idle_watchdog_js     = filemd5("${path.module}/../../../lambda/plugins/idle_watchdog.js")
-    plugin_shutdown_tool_js     = filemd5("${path.module}/../../../lambda/plugins/shutdown_tool.js")
-
     # Runtime deps + the embedded whisper-stt shim
     requirements = filemd5("${path.module}/../../../lambda/requirements.txt")
-    shim_source  = filemd5("${path.module}/../../../packages/whisper-stt-shim/server.py")
   }
 
   provisioner "local-exec" {
     command = <<-EOT
       set -e
+      # The lambda runtime is python3.12 (see `runtime = "python3.12"` above).
+      # The build MUST use the same version — otherwise C extensions
+      # (e.g., cryptography's `_cffi_backend.cpython-312-*.so`) link against
+      # the wrong Python ABI and fail to import at lambda runtime. Resolve
+      # Python 3.12 from the first source we find:
+      #   1. system python3.12 (apt install python3.12)
+      #   2. mise's Python 3.12 install (the project pins python = "3.12" in
+      #      mise.toml, so this is the common case)
+      #   3. fail loudly
+      PYTHON_BIN="$(command -v python3.12 || true)"
+      if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+        PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+      fi
+      if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+        echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
+        exit 1
+      fi
       rm -rf ${path.module}/build ${path.module}/.build-venv
       mkdir -p ${path.module}/build
       # Copy the whole lambda/ source dir as a package; the AWS Lambda
@@ -70,7 +83,7 @@ resource "null_resource" "lambda_build" {
       mkdir -p ${path.module}/build/lambda/packages/whisper-stt-shim
       cp ${path.module}/../../../packages/whisper-stt-shim/server.py \
          ${path.module}/build/lambda/packages/whisper-stt-shim/
-      python3 -m venv ${path.module}/.build-venv
+      "$PYTHON_BIN" -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
       ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../lambda/requirements.txt -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv
@@ -98,10 +111,11 @@ resource "aws_lambda_function" "handler" {
       EC2_SECURITY_GROUP_ID     = aws_security_group.agent_sg.id
       EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
       OPENCODE_MODEL            = var.opencode_model
+      OPENCODE_AGENT_MAX_STEPS  = tostring(var.opencode_agent_max_steps)
       S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
       # JSON-encoded so a single env var can carry the ordered list; the Lambda
       # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
-      SPOT_INSTANCE_TYPES_JSON  = jsonencode(var.spot_instance_types)
+      SPOT_INSTANCE_TYPES_JSON = jsonencode(var.spot_instance_types)
     }
   }
 
