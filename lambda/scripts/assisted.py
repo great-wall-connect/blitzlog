@@ -145,7 +145,7 @@ fi
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket, env)}
 
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=$(grep -oE '"minimax[a-z-]*"|"local"' /root/.config/opencode/opencode.json | head -1 | tr -d '\"'){", api_key_prefix=${OPENCODE_API_KEY:0:8}..." if not local_llm else "..."}"
+log "Effective opencode config: model=$OPENCODE_MODEL, provider=${{OPENCODE_MODEL%%/*}}, api_key_prefix=${{OPENCODE_API_KEY:0:8}}..."
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown) are now baked into the container
