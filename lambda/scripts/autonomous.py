@@ -17,6 +17,16 @@ Builds the bash script that EC2 runs at first boot for an autonomous
     container's entrypoint handles the rest (git clone, mise install,
     `opencode run --agent build`)
 
+The `/etc/blitzlog.env` heredoc MUST keep every value double-quoted —
+the host's watchdog (`infra/packer/scripts-docker-ubuntu/watchdog.sh`)
+runs `source /etc/blitzlog.env` at startup, BEFORE its own rewrite of
+that file. `OPENCODE_PROMPT` carries a multi-word prompt by default,
+and an unquoted heredoc expansion like
+`OPENCODE_PROMPT=${OPENCODE_PROMPT:-}` writes `OPENCODE_PROMPT=Work on
+GitHub ...`, which bash parses as `OPENCODE_PROMPT=Work` + command
+`on` and aborts with `on: command not found`. See the quoting
+regression tests in `tests/test_scripts_autonomous.py`.
+
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with assisted mode (`_decode_api_errors_script`,
 `_read_secrets_from_ssm_script`, ...) live in `_common.py`.
@@ -108,24 +118,24 @@ log "Starting autonomous opencode agent via systemd watchdog..."
 # LLM preflight — we don't repeat any of that here.
 mkdir -p /workspace/.blitzlog
 cat > /etc/blitzlog.env <<ENVEOF
-MODE=autonomous
-ISSUE_NUMBER={issue_number}
-REPO={repo}
-BLITZLOG_ENV=${{BLITZLOG_ENV}}
-S3_LOGS_BUCKET={s3_bucket}
-SESSION_ARCHIVE_BUCKET={s3_bucket}
-SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
-S3_LOG_PREFIX={s3_log_prefix}
-OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
-OPENCODE_MODEL=${{OPENCODE_MODEL}}
-OPENCODE_PROMPT=${{OPENCODE_PROMPT:-}}
-LOCAL_LLM_ENDPOINT=${{LOCAL_LLM_ENDPOINT:-}}
-LOCAL_LLM_MODEL=${{LOCAL_LLM_MODEL:-}}
-LOCAL_LLM_API_KEY=${{LOCAL_LLM_API_KEY:-}}
-LOCAL_LLM_FALLBACK=${{LOCAL_LLM_FALLBACK:-closed}}
-TAILSCALE_AUTH_KEY=${{TAILSCALE_AUTH_KEY:-}}
-OPENCODE_SERVER_USERNAME=agent
-GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
+MODE="autonomous"
+ISSUE_NUMBER="{issue_number}"
+REPO="{repo}"
+BLITZLOG_ENV="${{BLITZLOG_ENV}}"
+S3_LOGS_BUCKET="{s3_bucket}"
+SESSION_ARCHIVE_BUCKET="{s3_bucket}"
+SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
+S3_LOG_PREFIX="{s3_log_prefix}"
+OPENCODE_API_KEY="${{OPENCODE_API_KEY}}"
+OPENCODE_MODEL="${{OPENCODE_MODEL}}"
+OPENCODE_PROMPT="${{OPENCODE_PROMPT:-}}"
+LOCAL_LLM_ENDPOINT="${{LOCAL_LLM_ENDPOINT:-}}"
+LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"
+LOCAL_LLM_API_KEY="${{LOCAL_LLM_API_KEY:-}}"
+LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
+TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
+OPENCODE_SERVER_USERNAME="agent"
+GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}"
 ENVEOF
 
 # Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog
