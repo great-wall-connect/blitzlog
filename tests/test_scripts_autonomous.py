@@ -84,5 +84,117 @@ class TestAutonomousShutdownExclusion(unittest.TestCase):
         self.assertNotIn("SHUTDOWN_TOOL_JS", user_data)
 
 
+def _extract_blitzlog_env_heredoc(script: str) -> str:
+    """Return the body of the `cat > /etc/blitzlog.env <<ENVEOF ... ENVEOF`
+    heredoc in the rendered bootstrap. Used by the quoting regression
+    tests below."""
+    start = script.index("cat > /etc/blitzlog.env")
+    end = script.index("\nENVEOF\n", start)
+    return script[start:end]
+
+
+class TestAutonomousEnvFileQuoting(unittest.TestCase):
+    """Regression: the heredoc that writes /etc/blitzlog.env is consumed
+    by `bash source /etc/blitzlog.env` in the host's watchdog
+    (`infra/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
+    watchdog rewrites it with a properly-quoted copy. If a value with
+    spaces is written unquoted, bash parses the second token as a
+    command name and the bootstrap dies with `command not found`.
+
+    `OPENCODE_PROMPT` is the canonical trigger (autonomous mode always
+    sets it to a multi-word prompt), but any value could carry spaces
+    in a future field, so the invariant is: every `${{VAR...}}` expansion
+    must be wrapped in double quotes.
+    """
+
+    @staticmethod
+    def _render_with_prompt():
+        """Render the bootstrap with OPENCODE_PROMPT, OPENCODE_API_KEY,
+        etc. set to realistic values so the heredoc body is fully expanded."""
+        env = {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "test/model",
+            "OPENCODE_PROMPT": "Work on GitHub issue #42. Follow AGENTS.md.",
+            "OPENCODE_API_KEY": "sk-secret-with-no-spaces",
+            "BLITZLOG_ENV": "test",
+            "STT_MODEL": "base.en",
+            "STT_LANGUAGE": "en",
+            "STT_API_URL": "http://stt.local",
+            "STT_API_KEY": "stt-key",
+            "STT_MODELS_BUCKET": "stt-models",
+        }
+        with patch.dict(os.environ, env):
+            return build_autonomous_user_data("owner/repo", 42)
+
+    def test_blitzlog_env_lines_are_quoted(self):
+        """Every `${{VAR...}}` expansion inside the heredoc must be
+        wrapped in double quotes. Without this, an expansion whose
+        value contains spaces turns into a bash syntax error at
+        source-time (the second token is parsed as a command name)."""
+        script = self._render_with_prompt()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        for raw_line in heredoc.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            value = line.split("=", 1)[1]
+            # Allow bare literals with no shell parameter — those
+            # can't trigger the bug. But if the value contains a
+            # `$` (i.e., still a shell expansion) it MUST be quoted.
+            if "$" in value:
+                self.assertTrue(
+                    value.startswith(('"', "'")),
+                    f"unquoted shell expansion in /etc/blitzlog.env heredoc: {line!r}",
+                )
+
+    def test_blitzlog_env_passes_bash_n(self):
+        """The rendered heredoc, with realistic values substituted, must
+        be syntactically valid bash (`bash -n` exits 0). Catches a
+        missing quote / unbalanced quote at the parse level."""
+        import subprocess
+
+        script = self._render_with_prompt()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        # Strip the leading `cat > /etc/blitzlog.env` so `bash -n` only
+        # sees the assignment body.
+        body = heredoc.split("\n", 1)[1]
+        result = subprocess.run(
+            ["bash", "-n", "-c", body],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"bash -n failed: stderr={result.stderr!r} body={body!r}",
+        )
+
+    def test_blitzlog_env_sources_cleanly(self):
+        """`source /etc/blitzlog.env` must succeed with realistic values.
+        This is the original bug: an unquoted `OPENCODE_PROMPT=${OPENCODE_PROMPT:-}`
+        expanded to `OPENCODE_PROMPT=Work on GitHub issue #5...` and bash
+        aborted with `on: command not found`. Run with `set -e` so any
+        uncaught command-not-found exits non-zero."""
+        import subprocess
+
+        script = self._render_with_prompt()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        body = heredoc.split("\n", 1)[1]
+        result = subprocess.run(
+            ["bash", "-c", f"set -e\n{body}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"source failed: stderr={result.stderr!r} body={body!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

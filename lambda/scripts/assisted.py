@@ -24,6 +24,14 @@ Builds the bash script that EC2 runs at first boot for an assisted
     opencode serve, telegram bot, Telegram ready notification, project
     auto-selection)
 
+The `/etc/blitzlog.env` heredoc MUST keep every value double-quoted —
+the host's watchdog (`infra/packer/scripts-docker-ubuntu/watchdog.sh`)
+runs `source /etc/blitzlog.env` at startup, BEFORE its own rewrite of
+that file. An unquoted value with spaces (e.g. `OPENCODE_RESUMED_TITLE`
+on a resumed session) makes bash treat the second token as a command
+name and aborts with `command not found`. See the quoting regression
+tests in `tests/test_scripts_assisted.py`.
+
 Module-local helpers are kept here because they're only used by this
 script. Helpers shared with autonomous mode live in `_common.py`.
 """
@@ -170,34 +178,34 @@ log "Starting blitzlog-agent via systemd watchdog..."
 # LLM preflight — we don't repeat any of that here.
 mkdir -p /workspace/.blitzlog
 cat > /etc/blitzlog.env <<ENVEOF
-MODE=assisted
-ISSUE_NUMBER={issue_number}
-REPO={repo}
-BLITZLOG_ENV=${{BLITZLOG_ENV}}
-S3_LOGS_BUCKET={s3_bucket}
-SESSION_ARCHIVE_BUCKET={s3_bucket}
-SESSION_ARCHIVE_PREFIX={s3_archive_prefix}
-S3_LOG_PREFIX={s3_log_prefix}
-OPENCODE_API_KEY=${{OPENCODE_API_KEY}}
-OPENCODE_MODEL={opencode_model}
-OPENCODE_PROMPT=
-LOCAL_LLM_ENDPOINT=${{LOCAL_LLM_ENDPOINT:-}}
-LOCAL_LLM_MODEL=${{LOCAL_LLM_MODEL:-}}
-LOCAL_LLM_API_KEY=${{LOCAL_LLM_API_KEY:-}}
-LOCAL_LLM_FALLBACK=${{LOCAL_LLM_FALLBACK:-closed}}
-TAILSCALE_AUTH_KEY=${{TAILSCALE_AUTH_KEY:-}}
-TELEGRAM_BOT_TOKEN=${{TELEGRAM_BOT_TOKEN}}
-TELEGRAM_USER_ID=${{TELEGRAM_USER_ID}}
-TELEGRAM_BOT_NAME={bot_name}
-TELEGRAM_SENDER_LOGIN={sender_login}
-STT_API_URL=${{STT_API_URL}}
-STT_API_KEY=${{STT_API_KEY}}
-STT_MODEL=${{STT_MODEL}}
-STT_LANGUAGE=${{STT_LANGUAGE}}
-OPENCODE_SERVER_USERNAME=agent
-OPENCODE_RESUMED=${{OPENCODE_RESUMED:-}}
-OPENCODE_RESUMED_TITLE=${{OPENCODE_RESUMED_TITLE:-}}
-GITHUB_TOKEN_SSM_PARAM=/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}
+MODE="assisted"
+ISSUE_NUMBER="{issue_number}"
+REPO="{repo}"
+BLITZLOG_ENV="${{BLITZLOG_ENV}}"
+S3_LOGS_BUCKET="{s3_bucket}"
+SESSION_ARCHIVE_BUCKET="{s3_bucket}"
+SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
+S3_LOG_PREFIX="{s3_log_prefix}"
+OPENCODE_API_KEY="${{OPENCODE_API_KEY}}"
+OPENCODE_MODEL="{opencode_model}"
+OPENCODE_PROMPT=""
+LOCAL_LLM_ENDPOINT="${{LOCAL_LLM_ENDPOINT:-}}"
+LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"
+LOCAL_LLM_API_KEY="${{LOCAL_LLM_API_KEY:-}}"
+LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
+TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
+TELEGRAM_BOT_TOKEN="${{TELEGRAM_BOT_TOKEN}}"
+TELEGRAM_USER_ID="${{TELEGRAM_USER_ID}}"
+TELEGRAM_BOT_NAME="{bot_name}"
+TELEGRAM_SENDER_LOGIN="{sender_login}"
+STT_API_URL="${{STT_API_URL}}"
+STT_API_KEY="${{STT_API_KEY}}"
+STT_MODEL="${{STT_MODEL}}"
+STT_LANGUAGE="${{STT_LANGUAGE}}"
+OPENCODE_SERVER_USERNAME="agent"
+OPENCODE_RESUMED="${{OPENCODE_RESUMED:-}}"
+OPENCODE_RESUMED_TITLE="${{OPENCODE_RESUMED_TITLE:-}}"
+GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}"
 ENVEOF
 
 # The unit is already enabled (Packer 02-systemd.sh). Just start it; the
