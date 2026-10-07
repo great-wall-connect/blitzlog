@@ -146,6 +146,8 @@ Register in your GitHub repo → **Settings → Webhooks**:
 
 Label any issue with **`autonomous`** to trigger the autonomous pipeline, or **`assisted`** (with a configured Telegram bot pool) to start an interactive session.
 
+> **Note for automated agents** (e.g. blitzlog itself, OpenCode sessions, or any other CI agent): applying `autonomous` or `assisted` to an issue on this repo spawns a new EC2 instance that runs the very agent that applied the label. **Don't apply these labels** — even `bug, autonomous` will. Use `bug`, `enhancement`, `dependencies`, or another non-trigger label, and let a human maintainer apply the trigger label if they want a follow-up run. The same rule is documented in [AGENTS.md](AGENTS.md#trigger-labels).
+
 ---
 
 ## Environments (prod / dev)
@@ -917,6 +919,7 @@ This project follows the conventions in [AGENTS.md](AGENTS.md). The autonomous a
 - **Commits**: [Conventional Commits](https://www.conventionalcommits.org/).
 - **Tests required** for all new functionality.
 - **No breaking changes** without an issue discussion.
+- **Trigger labels are for humans, not agents**: the labels `autonomous` and `assisted` cause blitzlog to launch an EC2 agent for the labeled issue, so an automated agent must never apply them.
 
 ---
 
