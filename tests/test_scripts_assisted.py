@@ -67,7 +67,7 @@ class TestAssistedNoSecrets(unittest.TestCase):
         # quoting is from the heredoc-fix for /etc/blitzlog.env (see
         # TestAssistedEnvFileQuoting); it expands at source-time, not
         # at heredoc-write-time, so it doesn't embed a literal key.
-        self.assertNotRegex(script, r'STT_API_KEY=(?!\"\$\{)[^$\n][^\n]*')
+        self.assertNotRegex(script, r"STT_API_KEY=(?!\"\$\{)[^$\n][^\n]*")
 
 
 class TestAssistedModelAndDiagnostics(unittest.TestCase):
