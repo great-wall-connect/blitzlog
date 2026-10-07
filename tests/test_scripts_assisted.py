@@ -61,9 +61,13 @@ class TestAssistedNoSecrets(unittest.TestCase):
         env_start = script.index("cat > /etc/blitzlog.env")
         env_end = script.index("\nENVEOF\n", env_start)
         env_section = script[env_start:env_end]
-        self.assertIn("STT_API_KEY=${STT_API_KEY}", env_section)
-        # No literal STT_API_KEY=xxx should appear anywhere.
-        self.assertNotRegex(script, r"STT_API_KEY=[^$\n][^\n]*")
+        self.assertIn('STT_API_KEY="${STT_API_KEY}"', env_section)
+        # No literal STT_API_KEY=xxx should appear anywhere. Allow the
+        # quoted shell-param form `STT_API_KEY="${STT_API_KEY}"` — the
+        # quoting is from the heredoc-fix for /etc/blitzlog.env (see
+        # TestAssistedEnvFileQuoting); it expands at source-time, not
+        # at heredoc-write-time, so it doesn't embed a literal key.
+        self.assertNotRegex(script, r"STT_API_KEY=(?!\"\$\{)[^$\n][^\n]*")
 
 
 class TestAssistedModelAndDiagnostics(unittest.TestCase):
@@ -84,7 +88,7 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
         env_section = user_data[env_start : env_start + 500]
         self.assertIn("minimax-coding-plan", env_section)
         # The slash-form model id is what the container receives.
-        self.assertIn("OPENCODE_MODEL=minimax-coding-plan/MiniMax-M3", env_section)
+        self.assertIn('OPENCODE_MODEL="minimax-coding-plan/MiniMax-M3"', env_section)
 
     @patch.dict(
         os.environ,
@@ -114,6 +118,103 @@ class TestAssistedModelAndDiagnostics(unittest.TestCase):
                     "owner/repo", 1, bot_name="b", bot_token="t", telegram_user_id="9"
                 ),
             )
+
+
+def _extract_blitzlog_env_heredoc(script: str) -> str:
+    """Return the body of the `cat > /etc/blitzlog.env <<ENVEOF ... ENVEOF`
+    heredoc in the rendered bootstrap. Used by the quoting regression
+    tests below."""
+    start = script.index("cat > /etc/blitzlog.env")
+    end = script.index("\nENVEOF\n", start)
+    return script[start:end]
+
+
+class TestAssistedEnvFileQuoting(unittest.TestCase):
+    """Regression: the heredoc that writes /etc/blitzlog.env is consumed
+    by `bash source /etc/blitzlog.env` in the host's watchdog
+    (`infra/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
+    watchdog rewrites it with a properly-quoted copy. In assisted mode
+    the prompt is empty (Telegram supplies it at runtime), but
+    `OPENCODE_RESUMED_TITLE` carries the issue's title on a resumed
+    session and a real title is essentially guaranteed to have spaces.
+    Same quoting invariant as autonomous: every `${{VAR...}}` expansion
+    must be wrapped in double quotes.
+    """
+
+    @staticmethod
+    def _render_with_resume():
+        """Render the bootstrap with OPENCODE_RESUMED_TITLE set to a
+        multi-word title — the canonical trigger for the latent
+        assisted-mode bug."""
+        env = {
+            "S3_LOGS_BUCKET": "test-bucket",
+            "OPENCODE_MODEL": "test/model",
+            "OPENCODE_RESUMED": "1",
+            "OPENCODE_RESUMED_TITLE": "My task with spaces and - punctuation",
+            "OPENCODE_API_KEY": "sk-secret",
+            "BLITZLOG_ENV": "test",
+            "STT_MODEL": "base.en",
+            "STT_LANGUAGE": "en",
+            "STT_API_URL": "http://stt.local",
+            "STT_API_KEY": "stt-key",
+            "STT_MODELS_BUCKET": "stt-models",
+            "TELEGRAM_BOT_TOKEN": "tg-token",
+            "TELEGRAM_USER_ID": "99999",
+        }
+        with patch.dict(os.environ, env):
+            return _build_assisted()
+
+    def test_blitzlog_env_lines_are_quoted(self):
+        script = self._render_with_resume()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        for raw_line in heredoc.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            value = line.split("=", 1)[1]
+            if "$" in value:
+                self.assertTrue(
+                    value.startswith(('"', "'")),
+                    f"unquoted shell expansion in /etc/blitzlog.env heredoc: {line!r}",
+                )
+
+    def test_blitzlog_env_passes_bash_n(self):
+        import subprocess
+
+        script = self._render_with_resume()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        body = heredoc.split("\n", 1)[1]
+        result = subprocess.run(
+            ["bash", "-n", "-c", body],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"bash -n failed: stderr={result.stderr!r} body={body!r}",
+        )
+
+    def test_blitzlog_env_sources_cleanly(self):
+        import subprocess
+
+        script = self._render_with_resume()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        body = heredoc.split("\n", 1)[1]
+        result = subprocess.run(
+            ["bash", "-c", f"set -e\n{body}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"source failed: stderr={result.stderr!r} body={body!r}",
+        )
 
 
 if __name__ == "__main__":

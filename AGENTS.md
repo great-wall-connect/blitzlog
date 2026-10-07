@@ -60,6 +60,22 @@ If the target repo has no existing test infrastructure, add minimal smoke tests.
 | Node.js/TypeScript | `npm run lint` |
 | Python | `ruff check . && black --check .` |
 
+## Pre-Push Checklist
+
+**Always run every CI step locally and confirm it passes before committing and pushing — not just on PR.** CI rejects the push with a red check only after you've already burned the round-trip; running locally first is cheaper and faster.
+
+For blitzlog, the Lint + test (Python) job runs three steps in this order; run all three:
+
+```bash
+python -m ruff check .
+python -m black --check .
+pytest
+```
+
+If any step fails, fix it locally, re-run the full sequence (a fix in one file can fail the linter in another), and only then commit and push. Do not push on the assumption that "CI will tell me what's wrong" — that wastes a CI cycle and slows you down.
+
+For other stacks, mirror this with the equivalent "build + lint + test" sequence from the Testing Commands / Linting tables above.
+
 ## Pull Request
 
 1. **Create PR** against `main` (or `master` if that's the default)
