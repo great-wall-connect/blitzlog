@@ -176,7 +176,7 @@ class TestAssistedEnvFileQuoting(unittest.TestCase):
             value = line.split("=", 1)[1]
             if "$" in value:
                 self.assertTrue(
-                    value.startswith('"') or value.startswith("'"),
+                    value.startswith(('"', "'")),
                     f"unquoted shell expansion in /etc/blitzlog.env heredoc: {line!r}",
                 )
 
@@ -190,6 +190,7 @@ class TestAssistedEnvFileQuoting(unittest.TestCase):
             ["bash", "-n", "-c", body],
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             result.returncode,
@@ -207,6 +208,7 @@ class TestAssistedEnvFileQuoting(unittest.TestCase):
             ["bash", "-c", f"set -e\n{body}"],
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             result.returncode,

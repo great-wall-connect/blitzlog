@@ -145,7 +145,7 @@ class TestAutonomousEnvFileQuoting(unittest.TestCase):
             # `$` (i.e., still a shell expansion) it MUST be quoted.
             if "$" in value:
                 self.assertTrue(
-                    value.startswith('"') or value.startswith("'"),
+                    value.startswith(('"', "'")),
                     f"unquoted shell expansion in /etc/blitzlog.env heredoc: {line!r}",
                 )
 
@@ -164,6 +164,7 @@ class TestAutonomousEnvFileQuoting(unittest.TestCase):
             ["bash", "-n", "-c", body],
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             result.returncode,
@@ -186,6 +187,7 @@ class TestAutonomousEnvFileQuoting(unittest.TestCase):
             ["bash", "-c", f"set -e\n{body}"],
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             result.returncode,
