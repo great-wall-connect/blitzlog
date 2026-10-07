@@ -267,7 +267,12 @@ OPENCODE_CFG
     # diagnostic. Lands in /var/log/blitzlog/opencode.log (bind-mounted
     # to the host) so future "is the config there?" questions have a
     # definitive answer in the logs.
-    log "Wrote /root/.config/opencode/opencode.json: model=$opencode_model, provider=$opencode_provider, api_key_prefix=${OPENCODE_API_KEY:0:8}..."
+    #
+    # `printf '%.8s'` is POSIX — ${var:0:8} is bash-only and fails
+    # with "bad substitution" under /bin/sh on the python:3.12-slim
+    # runtime image (where /bin/sh -> dash). See PR #89.
+    api_key_prefix=$(printf '%.8s' "${OPENCODE_API_KEY:-}")
+    log "Wrote /root/.config/opencode/opencode.json: model=$opencode_model, provider=$opencode_provider, api_key_prefix=${api_key_prefix}..."
 fi
 
 # --- 3.5 (optional): join Tailscale Tailnet if TAILSCALE_AUTH_KEY is set ---
@@ -512,11 +517,22 @@ if [ "$MODE" = "autonomous" ]; then
     log "Launching opencode run --agent build"
     # Tee opencode's stdout+stderr to a host-visible log file
     # (/var/log/blitzlog/opencode-run.log → /tmp/blitzlog-logs/ on the
-    # host) while still streaming live to the user's terminal. PIPESTATUS
-    # gives opencode's exit code (tee's exit is ignored), and pipefail
-    # propagates a non-zero opencode exit through the || below.
-    OPENCODE_NONINTERACTIVE=1 opencode run --agent build "${OPENCODE_PROMPT:-}" \
-        2>&1 | tee /var/log/blitzlog/opencode-run.log || EXIT="${PIPESTATUS[0]}"
+    # host) while still streaming live to the user's terminal. We run
+    # opencode in a subshell that writes its exit code to a sentinel
+    # file under /tmp, so we capture opencode's exit (not tee's) without
+    # relying on bash-only ${PIPESTATUS[0]} — POSIX-clean under /bin/sh
+    # on python:3.12-slim (where /bin/sh -> dash). The trailing `|| true`
+    # suppresses `set -e`'s abort when opencode fails (pipefail makes
+    # the pipeline's exit = opencode's); the sentinel is the source of
+    # truth for opencode's exit. See PR #89.
+    EXIT=0
+    rm -f /tmp/blitzlog-opencode-exit
+    (
+        OPENCODE_NONINTERACTIVE=1 opencode run --agent build "${OPENCODE_PROMPT:-}"
+        echo "$?" > /tmp/blitzlog-opencode-exit
+    ) 2>&1 | tee /var/log/blitzlog/opencode-run.log || true
+    EXIT=$(cat /tmp/blitzlog-opencode-exit 2>/dev/null || echo 0)
+    rm -f /tmp/blitzlog-opencode-exit
     EXIT="${EXIT:-0}"
     log "opencode exited with $EXIT"
     exit "$EXIT"

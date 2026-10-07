@@ -66,9 +66,11 @@ class TestEntrypointReadiness(unittest.TestCase):
         i = self.text.index('log "Wrote /root/.config/opencode/opencode.json')
         # Sanity: the log must come after at least one `cp` of the
         # .jsonc to .json rename in the initial config-writing block.
-        # We require the cp to be at most 600 chars before the log —
-        # the initial block is ~100 lines but the cp is at the very end.
-        preceding = self.text[max(0, i - 600) : i]
+        # We require the cp to be at most 1200 chars before the log —
+        # the initial block is ~100 lines but the cp is at the very end,
+        # and rationale blocks added by later PRs (e.g. #89) push the cp
+        # further out.
+        preceding = self.text[max(0, i - 1200) : i]
         self.assertIn(
             "cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json",
             preceding,
@@ -89,6 +91,50 @@ class TestEntrypointReadiness(unittest.TestCase):
         self.assertIn("local_llm_endpoint", self.text)
         self.assertIn('opencode_provider" ] && [ -n "$opencode_api_key" ]', self.text)
         self.assertIn('elif [ -n "$opencode_model" ]; then', self.text)
+
+    def test_no_bash_only_parameter_expansions(self):
+        """The entrypoint's shebang is `#!/bin/sh` and the runtime image
+        is `python:3.12-slim`, where /bin/sh -> dash. Dash rejects
+        bash-only parameter-expansion forms with "bad substitution"
+        (regression in #89). The smoke test runs `bash -n`, which
+        accepts bash-only syntax, so we need a string-level guard that
+        explicitly fails on these shapes:
+
+        - ${var:N} or ${var:N:M}  substring expansion (bash-only)
+        - ${var/pat/repl}, ${var//pat/repl}  pattern substitution (bash-only)
+        - ${var^^}, ${var,,}, ${var^}, ${var,}  case modification (bash-only)
+        - ${!var}  indirect reference (bash-only)
+        - ${PIPESTATUS[…]}  array subscript on a bash-only array (bash-only)
+
+        Patterns are matched anywhere on a line; the test reports every
+        match with file:line so the failure message is actionable.
+        """
+        import re
+
+        patterns = {
+            r"\$\{[^}]+:[0-9]+(:[0-9]+)?\}": "substring expansion ${var:N[:M]}",
+            r"\$\{[^}]+//[^}/]+/[^}]*\}": "pattern substitution ${var//pat/repl}",
+            r"\$\{[^}]+/[^}/]+/[^}]*\}": "pattern substitution ${var/pat/repl}",
+            r"\$\{[^}]+\^\^?}?\}": "case modification (${var^}, ${var^^})",
+            r"\$\{[^}]+,,?}?\}": "case modification (${var,}, ${var,,})",
+            r"\$\{![^}]+\}": "indirect reference ${!var}",
+            r"\$\{PIPESTATUS\[[^}]*\}": "PIPESTATUS array subscript (bash-only)",
+        }
+        # Track which lines are full-line comments so we can skip matches
+        # there (rationale blocks frequently mention the bash-only
+        # constructs by name — they shouldn't false-positive).
+        is_comment = [line.lstrip().startswith("#") for line in self.text.splitlines()]
+        for pattern, label in patterns.items():
+            for m in re.finditer(pattern, self.text):
+                line_no = self.text[: m.start()].count("\n") + 1
+                if is_comment[line_no - 1]:
+                    continue
+                self.fail(
+                    f"bash-only parameter expansion in entrypoint.sh "
+                    f"at line {line_no}: {label!r} matched {m.group(0)!r}. "
+                    f"The entrypoint runs under dash on python:3.12-slim; "
+                    f"rewrite to POSIX before merging."
+                )
 
 
 if __name__ == "__main__":

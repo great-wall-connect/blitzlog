@@ -29,6 +29,14 @@ echo "==> checking whisper-stt-shim"
 test -f /opt/whisper-stt/server.py
 
 echo "==> checking entrypoint syntax"
+# Both checks: the container's runtime shell is /bin/sh -> dash on
+# python:3.12-slim, so `sh -n` matches what actually runs. `bash -n` is
+# kept for wider compatibility — bash accepts a superset of POSIX, so a
+# script that passes `sh -n` will also pass `bash -n`. Running both in
+# this order would surface bash-only constructs (e.g., ${var:0:8},
+# ${PIPESTATUS[…]}) that would crash under /bin/sh at container boot —
+# the regression caught in PR #89.
+sh -n /usr/local/bin/entrypoint.sh
 bash -n /usr/local/bin/entrypoint.sh
 
 echo "==> checking expected dirs"
