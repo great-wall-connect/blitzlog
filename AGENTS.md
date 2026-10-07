@@ -31,6 +31,18 @@ Examples:
 - `fix: handle null pointer in cache lookup`
 - `docs: update API documentation`
 
+## Trigger Labels
+
+The labels `autonomous` and `assisted` cause the blitzlog webhook Lambda to launch an EC2 agent for the labeled issue. **Agents must never apply these labels** — neither when opening new issues, nor when editing existing ones. Use any other appropriate label (`bug`, `enhancement`, `dependencies`, etc.).
+
+Why the rule exists:
+
+- Applying `autonomous` or `assisted` to a blitzlog repo issue spawns an EC2 instance that runs the very agent that applied the label — i.e. the agent triggers itself. That is almost never what the agent wants (it's working on this repo, not asking for a separate agent to work on it), and it doubles the spot spend for one issue.
+- Two agents labelling the same issue, or one agent labelling twice, spawns duplicate EC2 instances on the same issue — the bug class blitzlog is meant to prevent for *its users* (issue #87's context).
+- An agent that genuinely wants blitzlog to pick the issue up should commit and push the work directly to a branch and open a PR. The maintainer can then add the trigger label themselves if they want a follow-up autonomous run.
+
+Filing or batching issues in this repo is, by definition, an agent task — so this rule applies to every issue created by an automated agent on this repository.
+
 ## Implementation Standards
 
 1. **Read the issue** — Fetch full issue body and comments from GitHub API before starting
