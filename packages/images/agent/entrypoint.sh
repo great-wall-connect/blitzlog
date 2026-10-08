@@ -535,6 +535,37 @@ if [ "$MODE" = "autonomous" ]; then
     rm -f /tmp/blitzlog-opencode-exit
     EXIT="${EXIT:-0}"
     log "opencode exited with $EXIT"
+
+    # --- Final WIP save -------------------------------------------------
+    # Work-loss prevention for autonomous runs: the watchdog terminates
+    # the EC2 instance ~60 s after the container exits. If the agent
+    # finished with uncommitted changes (or never committed at all),
+    # those changes die with the instance unless we capture them here.
+    #
+    # Gate: only autosave when the working tree is dirty OR no PR exists
+    # for the current branch. The `gh pr view` call is wrapped in `if`
+    # so the script's `set -eu` doesn't trip on a missing-PR exit code
+    # — when the gate can't be evaluated, we fail safe to "autosave".
+    cd /workspace/repo 2>/dev/null || { log "WARN: /workspace/repo gone; skipping final autosave"; exit "$EXIT"; }
+    CURRENT_BRANCH=$(git branch --show-current)
+    WIP=$(git status --porcelain)
+    HAS_PR=false
+    if gh pr view "$CURRENT_BRANCH" >/dev/null 2>&1; then
+        HAS_PR=true
+    fi
+    if [ -n "$WIP" ] || [ "$HAS_PR" = "false" ]; then
+        ISSUE_TAG="${ISSUE_NUMBER:-unknown}"
+        log "Final autosave to autosave/issue-${ISSUE_TAG} (wip=${WIP:+yes} pr=${HAS_PR})"
+        git add -A
+        git commit --no-verify -m "autosave: end-of-run WIP for issue #${ISSUE_TAG}" || true
+        git branch -f "autosave/issue-${ISSUE_TAG}" HEAD
+        git push --force --no-verify origin "autosave/issue-${ISSUE_TAG}" || \
+            log "WARN: autosave push failed (WIP recovered via session_archive's working-tree.patch)"
+    else
+        log "PR open for ${CURRENT_BRANCH}; WIP fully captured, skipping final autosave"
+    fi
+    # --- End final WIP save ---------------------------------------------
+
     exit "$EXIT"
 else
     # --- Assisted: long-running opencode serve + telegram-bot ---
