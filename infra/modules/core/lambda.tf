@@ -37,6 +37,7 @@ resource "null_resource" "lambda_build" {
     # Package entrypoint + modules
     handler_py   = filemd5("${path.module}/../../../lambda/handler.py")
     init_py      = filemd5("${path.module}/../../../lambda/__init__.py")
+    version_py   = filemd5("${path.module}/../../../lambda/_version.py")
     env_py       = filemd5("${path.module}/../../../lambda/_env.py")
     auth_py      = filemd5("${path.module}/../../../lambda/auth.py")
     bot_pool_py  = filemd5("${path.module}/../../../lambda/bot_pool.py")

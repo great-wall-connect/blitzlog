@@ -14,6 +14,7 @@ import base64
 import json
 
 from _env import logger
+from _version import get_version
 from auth import (
     get_github_app_token,
     get_ssm_param,
@@ -29,6 +30,8 @@ from botocore.exceptions import ClientError
 from ec2 import launch_ec2_spot_instance
 from scripts.assisted import build_assisted_user_data
 from scripts.autonomous import build_autonomous_user_data
+
+logger.info("blitzlog-agent %s", get_version())
 
 
 def extract_event_data(payload: dict) -> dict | None:
