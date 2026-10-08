@@ -88,6 +88,23 @@ Otherwise `terraform init` should be a no-op — the lockfile is the source of t
 4. Open a PR against `main`. Fill out the PR template.
 5. Wait for CI to pass and at least one review. **Do not merge without approval** — leave for human review.
 
+## Releases
+
+Releases are cut automatically by [release-please](https://github.com/googleapis/release-please)
+based on Conventional Commits. After each merge to `main`, release-please opens a
+"release-please: pending release" PR that bumps `lambda.__version__` (in
+`lambda/__init__.py`) and moves the `[Unreleased]` entries in `CHANGELOG.md`
+into a dated section.
+
+Merging that release PR cuts the tag (`vX.Y.Z`), creates the GitHub Release,
+and triggers `.github/workflows/release.yml` to build + push the
+`blitzlog-agent` container image and attach the Lambda zip as a release asset.
+A maintainer (not the agent) merges release-please's release PRs.
+
+While the project is pre-1.0, `feat:` bumps the minor version (`0.1.0 → 0.2.0`)
+and `fix:` bumps the patch (`0.1.0 → 0.1.1`). The 1.0 cut is a deliberate
+decision tied to API stability and is not on this pipeline.
+
 ## Security issues
 
 **Do not** file public GitHub issues for security vulnerabilities. See [SECURITY.md](SECURITY.md) for the private disclosure process.

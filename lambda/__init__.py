@@ -30,11 +30,21 @@ runtime import path assumes. The ``sys.path`` mutation runs only when
 ``import lambda`` (or any submodule via the dotted path) actually
 happens — tests that load modules by sys.path lookup
 (``import auth``) never trigger this code.
+
+The package's SemVer ``__version__`` and ``get_version()`` are defined
+in ``_version.py`` (a regular module — ``lambda`` is reserved and can't
+be imported by name). They are re-exported here so callers that
+``import lambda`` still see ``lambda.__version__``.
 """
 
 import os
 import sys
 
+from ._version import __version__, get_version
+
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PACKAGE_DIR)
 sys.path.insert(0, os.path.join(_PACKAGE_DIR, "scripts"))
+
+
+__all__ = ["__version__", "get_version"]

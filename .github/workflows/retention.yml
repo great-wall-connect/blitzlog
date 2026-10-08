@@ -1,0 +1,25 @@
+name: retention
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  retention:
+    name: Prune blitzlog-agent GHCR tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Run container retention policy
+        uses: snok/container-retention-policy@v3.1.0
+        with:
+          image-names: blitzlog-agent
+          keep-n-most-recent: 10
+          cut-off: 30d
+          token: ${{ secrets.GITHUB_TOKEN }}

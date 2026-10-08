@@ -6,21 +6,9 @@ on:
     paths:
       - "packages/images/agent/**"
       - ".github/workflows/docker-images.yml"
-  push:
-    branches: [main]
-    paths:
-      - "packages/images/agent/**"
-      - ".github/workflows/docker-images.yml"
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Image tag to publish (e.g. 2.1.0). Defaults to 'latest'."
-        required: false
-        default: "latest"
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
@@ -32,8 +20,6 @@ jobs:
       IMAGE_NAME: blitzlog-agent
       REGISTRY: ghcr.io
       OWNER: great-wall-connect
-      # Default to "latest" for dispatch; CI runs override with git SHA + semver.
-      IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
 
     steps:
       - name: Checkout
@@ -45,54 +31,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Login to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute image tag (push only)
-        id: tag
-        if: github.event_name == 'push'
-        run: |
-          # Tag with semver (from pkrvars.hcl if changed) plus the short SHA.
-          SHORT_SHA=${GITHUB_SHA::7}
-          echo "value=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build (PR only — no push)
-        if: github.event_name == 'pull_request'
+      - name: Build (PR — no push)
         uses: docker/build-push-action@v7
         with:
           context: ./packages/images/agent
           push: false
           load: true
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/arm64
-
-      - name: Build and push (push to main)
-        if: github.event_name == 'push'
-        uses: docker/build-push-action@v7
-        with:
-          context: ./packages/images/agent
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/arm64
-
-      - name: Build and push (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        uses: docker/build-push-action@v7
-        with:
-          context: ./packages/images/agent
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/arm64
