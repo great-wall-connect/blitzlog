@@ -33,6 +33,7 @@ LAMBDA_INIT = REPO_ROOT / "lambda" / "__init__.py"
 LAMBDA_VERSION = REPO_ROOT / "lambda" / "_version.py"
 LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
 RELEASE_PLEASE_CONFIG = REPO_ROOT / "release-please-config.json"
+RELEASE_PLEASE_MANIFEST = REPO_ROOT / ".release-please-manifest.json"
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -175,12 +176,63 @@ class TestReleasePleaseConfig(unittest.TestCase):
             "release-please bump-patch-for-minor-pre-major must be true under 0.x",
         )
 
+    def test_manifest_file_exists_and_is_json(self):
+        """.release-please-manifest.json MUST exist and parse as JSON.
+
+        ``googleapis/release-please-action@v4`` defaults to manifest mode
+        and hard-errors with "Missing required manifest versions" when
+        this file is absent. The manifest is the canonical source of
+        truth for the current package version; release-please edits it
+        on every release, and reviewers rely on its API in PRs to spot
+        version drift.
+        """
+        self.assertTrue(
+            RELEASE_PLEASE_MANIFEST.is_file(),
+            f"{RELEASE_PLEASE_MANIFEST} must exist; release-please-action@v4 "
+            "fails without it",
+        )
+        try:
+            parsed = json.loads(RELEASE_PLEASE_MANIFEST.read_text())
+        except json.JSONDecodeError as exc:
+            self.fail(f"{RELEASE_PLEASE_MANIFEST} is not valid JSON: {exc}")
+        self.assertIsInstance(
+            parsed,
+            dict,
+            f"{RELEASE_PLEASE_MANIFEST} must be a JSON object at the top level",
+        )
+        self.assertNotEqual(
+            parsed,
+            {},
+            f"{RELEASE_PLEASE_MANIFEST} must declare at least one package version",
+        )
+
     def test_seed_version_is_semver(self):
-        """The seeded version MUST be a plain SemVer string."""
+        """The seeded version in the manifest MUST be a plain SemVer string.
+
+        ``release-please-config.json`` no longer carries a top-level
+        ``"version"`` key — that field was the legacy non-manifest
+        convention and is ignored when ``release-please-action@v4``
+        runs in manifest mode. The seed now lives in
+        ``.release-please-manifest.json`` and must match ``^\\d+\\.\\d+\\.\\d+$``;
+        anything else (a tuple, a leading 'v', a PEP 440 '0.1.0a1'
+        suffix) trips release-please's parser and either no-ops or
+        errors.
+        """
+        self.assertTrue(
+            RELEASE_PLEASE_MANIFEST.is_file(),
+            f"{RELEASE_PLEASE_MANIFEST} must exist; see test_manifest_file_exists_and_is_json",
+        )
+        manifest = json.loads(RELEASE_PLEASE_MANIFEST.read_text())
+        # Single-package repo: the version lives under the "." key.
+        version = manifest.get(".")
+        self.assertIsNotNone(
+            version,
+            f"{RELEASE_PLEASE_MANIFEST} must declare a version under the '.' key",
+        )
         self.assertRegex(
-            self.config.get("version", ""),
+            version,
             SEMVER_RE,
-            f"release-please version {self.config.get('version')!r} is not SemVer",
+            f"manifest version {version!r} is not a SemVer string",
         )
 
 
