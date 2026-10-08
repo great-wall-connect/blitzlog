@@ -274,6 +274,29 @@ class TestDockerImagesWorkflow(unittest.TestCase):
             "docker-images.yml must request packages: write (needed for the manual-dispatch push)",
         )
 
+    def test_manual_dispatch_logs_into_ghcr(self):
+        """docker-images.yml MUST log into GHCR on the non-PR path so
+        buildx can push to a private package.
+
+        Without a `docker/login-action` step ahead of the
+        manual-dispatch push, buildx falls back to anonymous auth and
+        GHCR returns 403 on the anonymous-token endpoint for packages
+        the workflow has never published. Run `37791630137` on
+        2026-10-08 failed exactly that way: ``failed to fetch
+        anonymous token ... 403 Forbidden``. This test pins the
+        login step back in so a future PR can't re-introduce the
+        regression. (`packages: write` alone is not enough — it
+        authorizes the post-build API calls, but the docker client
+        still needs an authenticated session to push.)
+        """
+        self.assertRegex(
+            self.text,
+            r"(?ms)^\s+- name: Login to GHCR\s*\n"
+            r"\s+if: github\.event_name != 'pull_request'\s*\n"
+            r"\s+uses: docker/login-action@v\d+",
+            "docker-images.yml must log into GHCR on the non-PR path (workflow_dispatch / push)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

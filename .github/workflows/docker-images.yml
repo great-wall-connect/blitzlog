@@ -47,6 +47,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Log into GHCR before any push step. The PR-time build doesn't
+      # push, so it skips login; workflow_dispatch and other non-PR
+      # triggers run it. Without this, buildx falls back to anonymous
+      # auth and GHCR returns 403 on the anonymous-token endpoint for
+      # packages the workflow has never published before.
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build (PR — no push)
         uses: docker/build-push-action@v7
         with:
