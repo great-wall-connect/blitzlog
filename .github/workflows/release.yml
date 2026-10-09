@@ -7,8 +7,9 @@ name: release
 #                                       * reads version from lambda/version.py
 #                                       * auto-detects bump type from the
 #                                         conventional commits in the PR's diff
-#                                         (feat!:/BREAKING CHANGE:/feat:/default
-#                                         = major/minor/minor/patch)
+#                                         via git-cliff (BREAKING CHANGE:/
+#                                         feat!:/feat(...):/fix:/
+#                                         default = major/minor/minor/patch)
 #                                       * builds and pushes the agent image
 #                                         with tag v{X}-pr{N} (no :latest)
 #                                       * bakes a dev AMI from that image and
@@ -25,8 +26,8 @@ name: release
 #                                       * auto-detects bump type from the
 #                                         conventional commits in the diff
 #                                         range (last release tag -> ref)
-#                                       * updates lambda/version.py +
-#                                         .release-please-manifest.json
+#                                         via git-cliff
+#                                       * updates lambda/version.py
 #                                       * commits with [skip ci]
 #                                       * pushes (with fallback to a
 #                                         release/vX.Y.Z-<ts> branch +
@@ -86,10 +87,12 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
           fetch-depth: 0
+          fetch-tags: true
 
       # Decide the mode (pr-test vs release) by whether $BUILD_REF has
       # an open PR. The bump type is auto-detected from the conventional
-      # commits in the diff (last release tag -> $BUILD_REF). The
+      # commits in the diff (last release tag -> $BUILD_REF) via
+      # git-cliff (a battle-hardened conventional-commits parser). The
       # single dispatch input is `ref`; everything else is computed.
       - name: Detect mode and bump type
         id: detect
@@ -97,6 +100,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Install git-cliff. The Detect step uses `git-cliff
+          # --bumped-version` to compute the new version from the
+          # conventional commits since the last v* tag. git-cliff
+          # correctly handles all edge cases (BREAKING CHANGE: in
+          # body, `feat!:` subject, post-breaking fix: commits, etc.)
+          # — which is the correctness we couldn't get from a
+          # hand-rolled bash parser or from cocogitto 7.0.0's
+          # `--auto` flag.
+          #
+          # Pinned to a specific release rather than `/latest/` so the
+          # runner is hermetic; bump CLIFF_VERSION here when upgrading.
+          #
+          # URL notes (verified against the actual GitHub release):
+          # - git-cliff tags use the `v` prefix (`v2.14.2`), so the
+          #   download path is `releases/download/v${CLIFF_VERSION}/...`
+          #   (without the `v` would 404).
+          # - Asset name embeds the version AND the target triple.
+          #   The runner is `ubuntu-26.04-arm` (ARM64, glibc), so we
+          #   download the `aarch64-unknown-linux-gnu` tarball.
+          CLIFF_VERSION="2.14.2"
+          # The tarball's top-level directory is `git-cliff-${CLIFF_VERSION}/`,
+          # with the binary at `git-cliff-${CLIFF_VERSION}/git-cliff`. Use
+          # --strip-components=1 to drop the leading directory and extract
+          # `git-cliff` (plus the LICENSE files) directly into /usr/local/bin.
+          curl -fsSL \
+            "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin
+          git-cliff --version
 
           # Mode: open PR on $BUILD_REF -> pr-test, else release.
           PR_NUMBER=$(gh pr list --state open \
@@ -108,69 +140,52 @@ jobs:
             MODE=release
           fi
 
-          # Bump type: walk the conventional commits in the diff. Use
-          # `git log` against the last release tag (or HEAD~0 if no
-          # tag exists yet). -m strips merge commits.
-          LAST_TAG=$(git describe --tags --abbrev=0 \
-            "$(git rev-parse "${{ env.BUILD_REF }}" 2>/dev/null)" 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ] || [ "$LAST_TAG" = "${{ env.BUILD_REF }}" ]; then
-            # No prior release tag reachable from $BUILD_REF (or only
-            # $BUILD_REF itself is tagged). Compute the bump by
-            # looking at the last `version = "X.Y.Z"` in the manifest
-            # history or hardcode a "patch" bump as a safe default.
-            #
-            # The release-please-manifest.json was added in PR #99
-            # (commit 5cffa61), so use that as the diff range start.
-            if [ -f .release-please-manifest.json ]; then
-              CURRENT_VERSION=$(python3 -c "
-          import json, re, sys
-          with open('.release-please-manifest.json') as f:
-              m = json.load(f)
-          for v in m.values():
-              if isinstance(v, str) and re.match(r'^\d+\.\d+\.\d+$', v):
-                  print(v); sys.exit(0)
-          sys.exit(1)
-          ")
-            else
-              echo "FATAL: no last release tag and no manifest; cannot determine bump base" >&2
-              exit 1
-            fi
-            BUMP_BASE="$CURRENT_VERSION"
-          else
-            BUMP_BASE="$LAST_TAG"
-            BUMP_BASE="${BUMP_BASE#v}"
-          fi
-          RANGE="${BUMP_BASE}..${{ env.BUILD_REF }}"
-
-          # Parse the conventional commit subjects in the diff.
-          MAJOR_HIT=$(git log --no-merges --format='%s' "$RANGE" 2>/dev/null | grep -ciE '^[Bb]reaking [Cc]hange:' || true)
-          MINOR_HIT=$(git log --no-merges --format='%s' "$RANGE" 2>/dev/null | grep -ciE '^feat(\(|!|:)' || true)
-          if [ "$MAJOR_HIT" -gt 0 ]; then
-            BUMP=major
-          elif [ "$MINOR_HIT" -gt 0 ]; then
-            BUMP=minor
-          else
-            BUMP=patch
-          fi
-
-          # Compute the new version from the current lambda/version.py
-          # literal (the post-bump value is $VERSION + 1 in the right
-          # position). Read it directly so we don't depend on the
-          # manifest format.
-          CURRENT_VERSION=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' | head -1)
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "FATAL: could not read version from lambda/version.py" >&2
+          # Bump type: ask git-cliff. It reads the conventional commits
+          # since the last v* tag and outputs the next SemVer on stdout.
+          # Fail loud if no v* tag is reachable.
+          LAST_TAG=$(git describe --tags --abbrev=0 "${{ env.BUILD_REF }}" 2>/dev/null || true)
+          if [ -z "$LAST_TAG" ]; then
+            echo "FATAL: no v* release tag reachable from ${{ env.BUILD_REF }}; cannot determine bump base." >&2
+            echo "  If this is the first release, push a v0.1.1 tag manually first." >&2
             exit 1
           fi
-          IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
-          case "$BUMP" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-            *) echo "FATAL: unknown bump type: $BUMP"; exit 1 ;;
-          esac
-          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-          echo "Resolved current version: $CURRENT_VERSION"
+          BUMP_BASE="${LAST_TAG#v}"
+
+          # git-cliff's --bumped-version prints the next SemVer for
+          # the unreleased commits (everything since the last v* tag)
+          # on stdout, with the same prefix as the previous tag
+          # (so for a `v0.1.1` tag, it returns `v0.1.2`). We don't
+          # let git-cliff write to disk or create commits — the Bump
+          # step below does the file update + commit + tag explicitly
+          # so the workflow's behavior is fully visible and testable.
+          # Strip the `v` prefix so the regex below is a plain SemVer.
+          NEW_VERSION=$(git-cliff --bumped-version 2>/dev/null | tail -1 | sed 's/^v//')
+          if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FATAL: git-cliff did not return a semver: '$NEW_VERSION'" >&2
+            exit 1
+          fi
+
+          # Derive bump type from the version-component diff.
+          IFS=. read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$BUMP_BASE"
+          IFS=. read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VERSION"
+          if   [ "$NEW_MAJOR" -gt "$CUR_MAJOR" ]; then BUMP=major
+          elif [ "$NEW_MINOR" -gt "$CUR_MINOR" ]; then BUMP=minor
+          else                                        BUMP=patch
+          fi
+
+          # ALIGNMENT INVARIANT: the last v* tag's version must equal
+          # the literal in lambda/version.py. Catches drift where
+          # someone tags or bumps one without the other, before the
+          # Bump step makes any changes. Pinned by
+          # tests/test_release_workflow.py::test_detect_step_aligns_tag_and_version_file.
+          FILE_VERSION=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' | head -1)
+          if [ -n "$FILE_VERSION" ] && [ "$FILE_VERSION" != "$BUMP_BASE" ]; then
+            echo "FATAL: tag/version drift — last v* tag is v$BUMP_BASE but lambda/version.py says $FILE_VERSION" >&2
+            echo "  Reconcile them (re-tag or re-bump the file) and re-run." >&2
+            exit 1
+          fi
+
+          echo "Resolved current version: $BUMP_BASE (from $LAST_TAG)"
           echo "Detected bump type: $BUMP"
           echo "Computed new version: $NEW_VERSION"
 
@@ -214,8 +229,6 @@ jobs:
       # Build and push the agent image. The tag depends on the mode:
       #   pr-test  -> v{new_version}-pr{N}  (e.g. v0.1.1-pr107)
       #   release -> v{new_version} + :latest
-      # The mode is read from steps.detect.outputs.mode (NOT env.MODE,
-      # which doesn't exist in this design).
       #
       # NOTE: the tag formula here MUST match the AGENT_IMAGE_TAG
       # computed in the "Resolve Packer vars" step below — Packer
@@ -357,7 +370,7 @@ jobs:
       # PR-test-only: post a PR comment describing the build. Fails loudly
       # if no open PR is found on $BUILD_REF (we already detected this
       # in the Detect step; here we re-check and emit a clear error).
-      - name: Post PR-test release-please comment
+      - name: Post PR-test release comment
         if: steps.detect.outputs.mode == 'pr-test'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -374,12 +387,12 @@ jobs:
           CURRENT=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
           AMI_ID="${{ steps.packer.outputs.ami_id }}"
           SSM_PATH="${{ steps.packer-vars.outputs.ssm_path }}"
-          COMMENT_BODY="## Release-please PR-test output"
+          COMMENT_BODY="## Release PR-test output"
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+="- Current version (lambda/version.py): \`${CURRENT}\`"
           COMMENT_BODY+=$'\n'
-          COMMENT_BODY+="- Bump type (auto-detected from conventional commits): \`${BUMP}\`"
+          COMMENT_BODY+="- Bump type (auto-detected by git-cliff from conventional commits): \`${BUMP}\`"
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+="- New version: \`${NEW_VERSION}\`"
           COMMENT_BODY+=$'\n'
@@ -397,9 +410,10 @@ jobs:
           COMMENT_BODY+="The image is built and pushed with the bumped version, and a dev AMI has been baked from it. Source is NOT modified by this run. To land this version on the canonical release branch, run this workflow against \`main\` (or a release branch) — the mode auto-detects from the ref's open-PR status."
           gh pr comment "${PR_NUMBER}" --body "${COMMENT_BODY}" || true
 
-      # Release-only: bump lambda_version.py + manifest, commit, push
-      # (with fallback to release branch + gh pr create if direct push
-      # to BUILD_REF fails), then tag.
+      # Release-only: bump lambda/version.py, commit, push (with
+      # fallback to release branch + gh pr create if direct push to
+      # BUILD_REF fails), then tag. lambda/version.py is the only
+      # source of truth — no manifest file to keep in sync.
       - name: Bump version in source (release only)
         if: steps.detect.outputs.mode == 'release'
         id: bump
@@ -408,11 +422,10 @@ jobs:
         run: |
           set -euo pipefail
           NEW_VERSION="${{ steps.detect.outputs.new_version }}"
-          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.\\d+\\.\\d+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
-          python3 -c "import json; p='.release-please-manifest.json'; d=json.load(open(p)); d['lambda/']='${NEW_VERSION}'; json.dump(d, open(p,'w'), indent=2); open(p,'a').write('\\n')"
+          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
           git config user.name "release-bot"
           git config user.email "release-bot@users.noreply.github.com"
-          git add lambda/version.py .release-please-manifest.json
+          git add lambda/version.py
           git commit -m "chore(release): ${NEW_VERSION} [skip ci]"
 
           # Try direct push to BUILD_REF. If that succeeds, that's the
@@ -430,7 +443,7 @@ jobs:
               --base "${{ env.BUILD_REF }}" \
               --head "$RELEASE_BRANCH" \
               --title "chore(release): ${NEW_VERSION}" \
-              --body "Automated release PR.\n\nBumps \`lambda/version.py\` to ${NEW_VERSION} and updates \`.release-please-manifest.json\`.\n\nMerge to trigger the release image build via the canonical v* tag path." \
+              --body "Automated release PR.\n\nBumps \`lambda/version.py\` to ${NEW_VERSION}.\n\nMerge to trigger the release image build via the canonical v* tag path." \
               --label "release" || true
             echo "release_ref=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
           fi

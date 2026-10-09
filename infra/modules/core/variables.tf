@@ -48,6 +48,17 @@ variable "github_app_installation_id" {
   type        = string
 }
 
+variable "github_token_lifetime_hours" {
+  description = "Requested lifetime in hours for the GitHub App installation token minted per webhook. Passed to the Lambda as GITHUB_TOKEN_LIFETIME_HOURS; the Lambda includes the matching `expires_at` field when POSTing to /app/installations/<id>/access_tokens. Default 8 h is wider than the watchdog (the EC2 `timeout` plus the `idle_watchdog` 3 h hard-shutdown) so a single static token keeps both `git` and `gh` alive for an overnight assisted run without giving the agent AWS credentials to refresh them. NOTE: some GitHub orgs cap installation tokens below 8 h via their GitHub App's policy — lower this in those envs or the Lambda will fail the launch with a 422 from the access_tokens endpoint. Values < 1 are rejected."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.github_token_lifetime_hours >= 1
+    error_message = "github_token_lifetime_hours must be >= 1."
+  }
+}
+
 variable "github_webhook_secret" {
   description = "GitHub webhook HMAC secret"
   type        = string

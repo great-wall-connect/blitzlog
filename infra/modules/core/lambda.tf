@@ -118,6 +118,11 @@ resource "aws_lambda_function" "handler" {
       # JSON-encoded so a single env var can carry the ordered list; the Lambda
       # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
       SPOT_INSTANCE_TYPES_JSON = jsonencode(var.spot_instance_types)
+      # Requested GitHub App installation-token lifetime in hours. The Lambda
+      # reads this on every invocation and includes the matching `expires_at`
+      # when POSTing to /app/installations/<id>/access_tokens, so `git` and
+      # `gh` stay authed for the full agent run (see lambda/auth.py).
+      GITHUB_TOKEN_LIFETIME_HOURS = tostring(var.github_token_lifetime_hours)
     }
   }
 

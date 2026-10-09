@@ -132,10 +132,13 @@ runtime, it shrinks to ~30 lines:
    a dev AMI from the image and publishes its id to
    `/blitzlog/dev/agent-ami-id-docker-ubuntu`. Dev agents pick up the
    new image immediately.
-3. Merge the PR. `release-please` opens a release PR; merging that
-   triggers `release.yml` against `main`, which bakes the prod AMI
-   from the `v{X}+:latest` image and publishes its id to
-   `/blitzlog/prod/agent-ami-id-docker-ubuntu`.
+3. To cut the release, dispatch `release.yml` against `main`
+   (`gh workflow run release.yml --ref main`). The workflow bumps
+   `lambda/version.py`, commits with `[skip ci]`, creates the `v{X.Y.Z}`
+   tag, builds + pushes the `v{X.Y.Z}` + `:latest` image, and bakes
+   the prod AMI from it, publishing its id to
+   `/blitzlog/prod/agent-ami-id-docker-ubuntu`. Prod agents pick up
+   the new image on next launch.
 4. No Lambda or Terraform change is required.
 
 ### Rollback

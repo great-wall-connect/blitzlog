@@ -1,9 +1,11 @@
 """Lambda webhook entrypoint.
 
 Receives GitHub `issues.labeled` webhooks, verifies the HMAC-SHA256
-signature, mints a short-lived GitHub App installation token, optionally
-acquires a free bot from the user's per-env-independent pool (assisted
-mode only), and launches an EC2 spot instance to run the agent.
+signature, mints a GitHub App installation token (lifetime configured by
+the GITHUB_TOKEN_LIFETIME_HOURS env var, default 8 h — see
+`lambda/auth.py`), optionally acquires a free bot from the user's
+per-env-independent pool (assisted mode only), and launches an EC2 spot
+instance to run the agent.
 
 `extract_event_data` normalizes both EventBridge-style payloads
 (`{"detail": {...}}`) and direct webhook payloads (`{"action": ..., ...}`)
