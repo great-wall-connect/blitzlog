@@ -12,6 +12,9 @@ name: release
 #                                         default = major/minor/minor/patch)
 #                                       * builds and pushes the agent image
 #                                         with tag v{X}-pr{N} (no :latest)
+#                                       * bakes a dev AMI from that image and
+#                                         publishes its id to
+#                                         /blitzlog/dev/agent-ami-id-docker-ubuntu
 #                                       * posts a PR comment describing the
 #                                         build (fails loudly if no PR is
 #                                         found)
@@ -32,6 +35,9 @@ name: release
 #                                         to BUILD_REF fails)
 #                                       * builds and pushes the agent image
 #                                         with tags v{X} + :latest
+#                                       * bakes a prod AMI from that image
+#                                         and publishes its id to
+#                                         /blitzlog/prod/agent-ami-id-docker-ubuntu
 #                                       * tags v{X} and pushes the tag
 #                                       * uploads the Lambda zip to a
 #                                         GitHub Release
@@ -39,6 +45,9 @@ name: release
 # The operator runs ONE of:
 #   gh workflow run release.yml --ref fix/issue-110-foo
 #   gh workflow run release.yml --ref main
+#
+# Packer integration added by issue #91: the previous local `packer build`
+# step is gone; everything goes through this workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -53,12 +62,18 @@ permissions:
   # Required for the fallback "create release branch + open PR" path
   # in the Bump step.
   pull-requests: write
+  # Required for OIDC into blitzlog-packer-build-role when baking the
+  # AMI in the Packer build steps below.
+  id-token: write
 
 jobs:
   release:
     name: Publish release artifacts
     runs-on: ubuntu-26.04-arm
-    timeout-minutes: 20
+    # 35 min covers worst case: docker build ~5min + Packer ~12min + tag
+    # push + Lambda zip + buffer. The Packer bake was added in #91 and
+    # grew the budget from the previous 20min.
+    timeout-minutes: 35
 
     env:
       IMAGE_NAME: blitzlog-agent
@@ -214,6 +229,10 @@ jobs:
       # Build and push the agent image. The tag depends on the mode:
       #   pr-test  -> v{new_version}-pr{N}  (e.g. v0.1.1-pr107)
       #   release -> v{new_version} + :latest
+      #
+      # NOTE: the tag formula here MUST match the AGENT_IMAGE_TAG
+      # computed in the "Resolve Packer vars" step below — Packer
+      # bakes exactly this image tag into the AMI.
       - name: Build and push blitzlog-agent image
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         env:
@@ -240,6 +259,118 @@ jobs:
               ./packages/images/agent
           fi
 
+      # ----------------------------------------------------------------
+      # Bake the AMI from the image we just pushed (issue #91).
+      #
+      # The Packer pipeline (infra/packer/agent-docker-ubuntu.pkr.hcl)
+      # already publishes the AMI id to /blitzlog/<env>/agent-ami-id-
+      # docker-ubuntu via its shell-local post-processor; we just need
+      # to map mode -> Packer `environment`:
+      #
+      #   pr-test  -> environment=dev   -> /blitzlog/dev/... (dev agents)
+      #   release -> environment=prod  -> /blitzlog/prod/... (prod agents)
+      #
+      # agent_image_tag MUST match the IMAGE_BASE tag above (the one
+      # that was just pushed); see the NOTE on the build step.
+      # ----------------------------------------------------------------
+
+      - name: Install Packer
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
+        uses: hashicorp/setup-packer@v2
+        # v2 of hashicorp/setup-packer renamed the input from
+        # `packer_version` (v1) to `version`. Passing the old name fails
+        # the step with "Unexpected input(s) 'packer_version', valid
+        # inputs are ['version']" before any Packer command runs.
+        with:
+          version: 1.16.1
+
+      - name: Configure AWS credentials (OIDC) for Packer
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # OIDC into the role that infra/bootstrap/packer-role.tf
+          # provisions. Trust policy already covers any branch of
+          # great-wall-connect/blitzlog. vars.AWS_ACCOUNT_ID must
+          # be set at the repo or org level before this runs.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-packer-build-role
+          aws-region: ap-east-1
+
+      - name: Resolve Packer vars from mode
+        id: packer-vars
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
+        env:
+          MODE: ${{ steps.detect.outputs.mode }}
+          NEW_VERSION: ${{ steps.detect.outputs.new_version }}
+          PR_NUMBER: ${{ steps.detect.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "pr-test" ]; then
+            # PR mode -> dev env (PR images get baked into the dev AMI;
+            # last-writer-wins on /blitzlog/dev/agent-ami-id-docker-ubuntu).
+            BLITZLOG_ENV=dev
+            STT_BUCKET=gwc-blitzlog-stt-models
+            AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
+            SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+          else
+            # release mode -> prod env
+            BLITZLOG_ENV=prod
+            STT_BUCKET=gwc-blitzlog-stt-models
+            AGENT_IMAGE_TAG="v${NEW_VERSION}"
+            SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
+          fi
+          echo "blitzlog_env=$BLITZLOG_ENV"      >> "$GITHUB_OUTPUT"
+          echo "stt_bucket=$STT_BUCKET"          >> "$GITHUB_OUTPUT"
+          echo "agent_image_tag=$AGENT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "ssm_path=$SSM_PATH"              >> "$GITHUB_OUTPUT"
+
+      - name: Packer init
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
+        working-directory: infra/packer
+        run: packer init agent-docker-ubuntu.pkr.hcl
+
+      - name: Packer build (bake AMI, publish id to SSM)
+        id: packer
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
+        working-directory: infra/packer
+        env:
+          BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
+          STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}
+          AGENT_IMAGE_TAG: ${{ steps.packer-vars.outputs.agent_image_tag }}
+          # GITHUB_TOKEN is consumed by 03-bake-images.sh to `docker login
+          # ghcr.io` before pulling the blitzlog-agent image. Empty when
+          # the secret isn't set; the script warns and the pull fails.
+          GH_TOKEN_FOR_PACKER: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # -force skips the "Do you want to proceed?" prompt that Packer
+          # emits in non-TTY / non-CI-detected contexts. Safe here because
+          # the build is operator-dispatched and the packer-role's IAM
+          # already gates what the build can do.
+          packer build -force \
+              -var "environment=${BLITZLOG_ENV}" \
+              -var "agent_image_tag=${AGENT_IMAGE_TAG}" \
+              -var "stt_models_bucket=${STT_BUCKET}" \
+              -var "github_token=${GH_TOKEN_FOR_PACKER}" \
+              -var-file docker-images.pkrvars.hcl \
+              agent-docker-ubuntu.pkr.hcl
+          # Packer writes manifest.json (via the `manifest` post-processor
+          # in agent-docker-ubuntu.pkr.hcl) with the build's artifact_id
+          # in the form "<region>:ami-<id>". The same source of truth the
+          # 05-publish-ami-id.sh post-processor reads from.
+          if [ ! -r manifest.json ]; then
+            echo "FATAL: Packer did not write manifest.json (build may have failed before the post-processor ran)" >&2
+            exit 1
+          fi
+          AMI_ID=$(jq -r '.builds[-1].artifact_id' manifest.json | awk -F: '{print $2}')
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "null" ]; then
+            echo "FATAL: could not extract AMI id from manifest.json:" >&2
+            jq . manifest.json | sed 's/^/    /' >&2
+            exit 1
+          fi
+          echo "Baked AMI: $AMI_ID"
+          echo "Published to ${{ steps.packer-vars.outputs.ssm_path }} via the Packer post-processor (05-publish-ami-id.sh)."
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
       # PR-test-only: post a PR comment describing the build. Fails loudly
       # if no open PR is found on $BUILD_REF (we already detected this
       # in the Detect step; here we re-check and emit a clear error).
@@ -258,12 +389,14 @@ jobs:
           NEW_VERSION="${{ steps.detect.outputs.new_version }}"
           BUMP="${{ steps.detect.outputs.bump }}"
           CURRENT=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          AMI_ID="${{ steps.packer.outputs.ami_id }}"
+          SSM_PATH="${{ steps.packer-vars.outputs.ssm_path }}"
           COMMENT_BODY="## Release PR-test output"
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+="- Current version (lambda/version.py): \`${CURRENT}\`"
           COMMENT_BODY+=$'\n'
-          COMMENT_BODY+="- Bump type (auto-detected by cocogitto from conventional commits): \`${BUMP}\`"
+          COMMENT_BODY+="- Bump type (auto-detected by git-cliff from conventional commits): \`${BUMP}\`"
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+="- New version: \`${NEW_VERSION}\`"
           COMMENT_BODY+=$'\n'
@@ -271,8 +404,14 @@ jobs:
           COMMENT_BODY+=$'\n'
           COMMENT_BODY+="- Image registry: \`${REGISTRY}/${OWNER}/${IMAGE_NAME}:${IMAGE_TAG}\`"
           COMMENT_BODY+=$'\n'
+          if [ -n "$AMI_ID" ]; then
+            COMMENT_BODY+="- AMI id: \`${AMI_ID}\`"
+            COMMENT_BODY+=$'\n'
+            COMMENT_BODY+="- SSM param (dev): \`${SSM_PATH}\`"
+            COMMENT_BODY+=$'\n'
+          fi
           COMMENT_BODY+=$'\n'
-          COMMENT_BODY+="The image is built and pushed with the bumped version. Source is NOT modified by this run. To land this version on the canonical release branch, run this workflow against \`main\` (or a release branch) — the mode auto-detects from the ref's open-PR status."
+          COMMENT_BODY+="The image is built and pushed with the bumped version, and a dev AMI has been baked from it. Source is NOT modified by this run. To land this version on the canonical release branch, run this workflow against \`main\` (or a release branch) — the mode auto-detects from the ref's open-PR status."
           gh pr comment "${PR_NUMBER}" --body "${COMMENT_BODY}" || true
 
       # Release-only: bump lambda/version.py, commit, push (with

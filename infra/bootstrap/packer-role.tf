@@ -11,6 +11,10 @@
 
 data "aws_caller_identity" "current" {}
 
+data "aws_iam_role" "admin_sso" {
+  name = "AWSReservedSSO_AdministratorAccess_5305ac39caba2579"
+}
+
 locals {
   github_repo   = "great-wall-connect/blitzlog"
   github_org    = "great-wall-connect"
@@ -33,7 +37,7 @@ resource "aws_iam_role" "packer_build" {
       {
         Effect = "Allow"
         Principal = {
-          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+          Federated = aws_iam_openid_connect_provider.github.arn
         }
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
@@ -41,7 +45,7 @@ resource "aws_iam_role" "packer_build" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_org}/${local.github_repo}:ref:refs/heads/*"
+            "token.actions.githubusercontent.com:sub" = "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
           }
         }
       },
@@ -57,6 +61,18 @@ resource "aws_iam_role" "packer_build" {
           Service = "ec2.amazonaws.com"
         }
         Action = "sts:AssumeRole"
+      },
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = data.aws_iam_role.admin_sso.arn
+        }
+        Action = "sts:AssumeRole"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = "ap-east-1"
+          }
+        }
       },
     ]
   })
@@ -78,10 +94,16 @@ resource "aws_iam_role_policy" "packer_build" {
           "ec2:DescribeImages",
           "ec2:DescribeInstances",
           "ec2:DescribeSnapshots",
+          "ec2:DescribeRegions",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVolumes",
+          "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
           "ec2:CreateTags",
           "ec2:DeleteTags",
           "ec2:RegisterImage",
           "ec2:DeregisterImage",
+          "ec2:ModifyImageAttribute",
           "ec2:CreateSnapshot",
           "ec2:DeleteSnapshot",
         ]
@@ -93,7 +115,15 @@ resource "aws_iam_role_policy" "packer_build" {
         Action = [
           "iam:PassRole",
         ]
-        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/blitzlog-packer-build-instance-role"
+        Resource = aws_iam_role.packer_build.arn
+      },
+      {
+        Sid    = "AllowReadPackerInstanceProfile"
+        Effect = "Allow"
+        Action = [
+          "iam:GetInstanceProfile",
+        ]
+        Resource = aws_iam_instance_profile.packer_build.arn
       },
       {
         Sid    = "AllowSSMPublishForBothFamilies"
