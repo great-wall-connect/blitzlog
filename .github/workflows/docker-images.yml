@@ -10,9 +10,9 @@ on:
   # by the dev-AMI test workflow (Packer pulls this tag into the AMI).
   # release.yml's v*-tag path covers release publishing — these two
   # publish paths coexist deliberately. The shape was deleted in PR #94
-  # (commit 0990238) as part of the SemVer-via-release-please work and
-  # is being restored here so `gh workflow run docker-images.yml
-  # -f image_tag=<tag>` works again for ad-hoc PR image testing.
+  # (commit 0990238) as part of the SemVer work and is being restored
+  # here so `gh workflow run docker-images.yml -f image_tag=<tag>` works
+  # again for ad-hoc PR image testing.
   workflow_dispatch:
     inputs:
       image_tag:
