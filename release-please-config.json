@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "release-type": "python",
   "package-name": "lambda",
+  "version-file": "lambda/_version.py",
   "extra-files": [
     "lambda/_version.py"
   ],
