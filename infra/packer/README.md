@@ -18,13 +18,48 @@ The AMI itself is minimal:
 
 Total AMI size: ~600MB.
 
+## Release workflow (canonical entry point)
+
+The Packer bake is now driven by the release pipeline
+(`.github/workflows/release.yml`, issue #91). There is no separate
+Packer workflow to run — `release.yml` handles everything:
+
+```bash
+# PR-test: build + push image, bake a dev AMI, post a PR comment.
+# Mode is auto-detected from the ref's open-PR status.
+gh workflow run release.yml --ref <feature-branch>
+
+# Release: bump source + commit + tag + image + :latest, bake a prod AMI.
+gh workflow run release.yml --ref main
+```
+
+Mode → Packer var mapping (see `release.yml`'s "Resolve Packer vars from
+mode" step):
+
+| `release.yml` mode | Packer `environment` | `agent_image_tag`          | SSM param |
+|--------------------|----------------------|----------------------------|-----------|
+| `pr-test`          | `dev`                | `v{X.Y.Z}-pr{N}`           | `/blitzlog/dev/agent-ami-id-docker-ubuntu` |
+| `release`          | `prod`               | `v{X.Y.Z}`                 | `/blitzlog/prod/agent-ami-id-docker-ubuntu` |
+
+The OIDC role (`blitzlog-packer-build-role`) and SSM/S3/EC2 policy
+covering this are in `infra/bootstrap/packer-role.tf`. The workflow
+assumes the repo or org variable `vars.AWS_ACCOUNT_ID` is set.
+
 ## Variable files
 
 - `variables-docker-ubuntu.pkr.hcl` — variables for `agent-docker-ubuntu.pkr.hcl`
-- `docker-images.pkrvars.hcl` — `agent_image_tag` (single source of truth
-  for the container image tag)
+- `docker-images.pkrvars.hcl` — default `agent_image_tag` for local debug
+  builds. `release.yml` overrides this via `-var agent_image_tag=...` at
+  bake time, so the value in this file is only consulted when a maintainer
+  runs `packer build` by hand (see "Local debug build" below).
 
-## Build commands
+## Local debug build
+
+The "Release workflow" section above is the canonical entry point. Use a
+local `packer build` only when you need to inspect a partially-built AMI
+on failure (Packer 1.16.1+ defaults to `--on-error=cleanup`, which
+deregisters the AMI and deletes the snapshot the moment a build fails
+— see the "Build behavior on failure" section below).
 
 ```bash
 # Ubuntu dev
@@ -37,7 +72,11 @@ packer build \
     agent-docker-ubuntu.pkr.hcl
 ```
 
-For prod, replace `dev` with `prod` and use the prod STT bucket.
+For prod, replace `dev` with `prod` and use the prod STT bucket. Add
+`-var "agent_image_tag=<tag>"` to override the pkrvars.hcl default.
+The post-processor (`05-publish-ami-id.sh`) writes the resulting AMI id
+to `/blitzlog/<env>/agent-ami-id-docker-ubuntu`; if you want the build
+to skip that step, add `-except=publish-ami-id`.
 
 ## Build behavior on failure
 
@@ -89,9 +128,11 @@ Four shell scripts in `scripts-docker-ubuntu/`:
 agent_image_tag = "2.0.0"
 ```
 
-The Packer pipeline reads this. Bump the version → push → CI rebuilds the
-image → next monthly Packer cron rebuilds the AMI with the new tag
-baked in.
+This is the **default** for local debug builds. The `release.yml`
+workflow overrides it via `-var agent_image_tag=...` at bake time, so
+bumping this file is no longer the canonical way to ship a new image
+version — the release workflow's image tag is the source of truth. The
+file's value only matters when a maintainer runs `packer build` by hand.
 
 ## See also
 
@@ -99,5 +140,7 @@ baked in.
   the Docker runtime
 - [`../../packages/images/agent/Dockerfile`](../../packages/images/agent/Dockerfile) —
   the container image definition
+- [`../../.github/workflows/release.yml`](../../.github/workflows/release.yml) —
+  the workflow that now drives the bake
 - [`../../lambda/ec2.py`](../../lambda/ec2.py) — `get_agent_ami()` reads
   the SSM parameter this pipeline writes to

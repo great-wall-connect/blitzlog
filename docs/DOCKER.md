@@ -42,15 +42,15 @@ switching models doesn't require an image rebuild.
 
 ## Image version pinning
 
-`infra/packer/docker-images.pkrvars.hcl` is the single source of truth:
+The release workflow (`.github/workflows/release.yml`) is the source of
+truth: it tags each image build with `v{X.Y.Z}` (release) or
+`v{X.Y.Z}-pr{N}` (pr-test) and bakes a corresponding AMI. The Packer
+build receives `agent_image_tag` via `-var` from the workflow.
 
-```hcl
-agent_image_tag = "2.0.0"
-```
-
-The Packer pipeline reads this. Bump the version: edit the file, commit,
-push. CI rebuilds the image and the monthly Packer cron rebuilds the
-AMI with the new tag baked in.
+`infra/packer/docker-images.pkrvars.hcl` is the **default** for local
+debug builds only; the release workflow overrides it. Its current value
+is a relic from before the release pipeline landed — bumping it is no
+longer the canonical way to ship a new image version.
 
 ## AMI
 
@@ -116,22 +116,32 @@ runtime, it shrinks to ~30 lines:
 - **`.github/workflows/docker-images.yml`** — builds the single image,
   pushes to ghcr.io on main, Trivy gate, image-size gate (500MB max
   uncompressed).
-- **`.github/workflows/packer-build.yml`** (TODO) — rebuilds both AMIs
-  monthly and on workflow_dispatch.
+- **`.github/workflows/release.yml`** — the release pipeline. Builds +
+  pushes the agent image and bakes a corresponding AMI (pr-test → dev
+  AMI, release → prod AMI). Replaces what was previously a separate
+  `packer-build.yml` (issue #91).
 
 ## Operational notes
 
 ### Rolling out a new image version
 
-1. Edit `infra/packer/docker-images.pkrvars.hcl`: bump `agent_image_tag`.
-2. Push. CI builds and pushes the image.
-3. Trigger a Packer build for each env (workflow_dispatch). AMIs are
-   rebuilt with the new tag baked in.
-4. New agent runs use the new image. No Lambda or Terraform change.
+1. Open a PR. CI builds and pushes the agent image with tag
+   `v{X}-pr{N}` (no `:latest`).
+2. While the PR is open, dispatch `release.yml` against the PR branch
+   (`gh workflow run release.yml --ref <branch>`). The workflow bakes
+   a dev AMI from the image and publishes its id to
+   `/blitzlog/dev/agent-ami-id-docker-ubuntu`. Dev agents pick up the
+   new image immediately.
+3. Merge the PR. `release-please` opens a release PR; merging that
+   triggers `release.yml` against `main`, which bakes the prod AMI
+   from the `v{X}+:latest` image and publishes its id to
+   `/blitzlog/prod/agent-ami-id-docker-ubuntu`.
+4. No Lambda or Terraform change is required.
 
 ### Rollback
 
-- **Image rollback**: push the previous image tag, rebuild AMIs.
+- **Image rollback**: re-tag or push a previous image tag, then re-dispatch
+  `release.yml` to re-bake the AMI from it.
 - **AMI rollback**: keep old AMIs in the account (Packer tags with
   timestamps; don't deregister old ones until new ones are validated).
 - **Per-launch rollback**: `aws ssm delete-parameter --name
