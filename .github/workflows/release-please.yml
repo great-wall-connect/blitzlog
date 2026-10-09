@@ -3,6 +3,17 @@ name: release-please
 on:
   push:
     branches: [main]
+  # Manual trigger for testing on the PR branch (a v* tag fires the
+  # release.yml workflow, but the user wants a way to drive
+  # release-please directly against a PR branch without needing to
+  # merge first). The `ref` input lets the operator target any branch
+  # or tag.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag to run release-please against (e.g. fix/release-please-version-source). Defaults to main when blank."
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -18,3 +29,7 @@ jobs:
         with:
           config-file: release-please-config.json
           token: ${{ secrets.GITHUB_TOKEN }}
+          # When dispatched manually, run against the operator-supplied
+          # ref. When triggered by push:branches:[main], run against
+          # main (the default).
+          target-branch: ${{ inputs.ref || 'main' }}
