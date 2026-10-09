@@ -44,7 +44,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DOCKER_IMAGES_YML = REPO_ROOT / ".github" / "workflows" / "docker-images.yml"
-COG_TOML = REPO_ROOT / "cog.toml"
 
 
 def _section(text: str, key: str) -> str:
@@ -227,26 +226,10 @@ class TestReleaseWorkflow(unittest.TestCase):
             "release.yml's Detect step must set MODE=pr-test when an open PR is found",
         )
 
-    def test_detect_step_uses_cocogitto_for_bump(self):
-        """The Detect step must auto-detect bump type via cocogitto (a
-        battle-hardened conventional-commits parser), not via a
-        hand-rolled bash regex. We used to parse commits by hand and
-        got the rules wrong (the `\\d+` vs `[0-9]+` bug was one
-        symptom; another was a wrong feat() regex). cocogitto handles
-        all the edge cases — `BREAKING CHANGE:`, `feat!`, `feat(scope):`,
-        etc. — correctly.
-        """
-        self.assertRegex(
-            self.text,
-            r"cog bump --auto",
-            "release.yml's Detect step must use `cog bump --auto` for "
-            "conventional-commit-based bump detection",
-        )
-
     def test_checkout_fetches_tags(self):
         """The Checkout step MUST have ``fetch-tags: true``.
 
-        cocogitto and `git describe` both need the v* tag history to
+        git-cliff and `git describe` both need the v* tag history to
         find the bump base. Without it the Detect step sees an empty
         `LAST_TAG` and fails loud — but we lock the cause in here so a
         future refactor that drops the flag is caught at PR time.
@@ -265,26 +248,85 @@ class TestReleaseWorkflow(unittest.TestCase):
             m.group("with"),
             r"(?m)^\s+fetch-tags:\s+true\s*$",
             "release.yml's Checkout step must have `fetch-tags: true` "
-            "(cocogitto and `git describe` need the v* tag history to "
+            "(git-cliff and `git describe` need the v* tag history to "
             "find the bump base)",
         )
 
-    def test_cocogitto_installed_in_workflow(self):
-        """The Detect step must install cocogitto before using it.
+    def test_git_cliff_installed_in_workflow(self):
+        """The Detect step must install git-cliff before using it.
 
-        cocogitto is a static binary; we download it from the GitHub
-        release. The install must precede any `cog …` invocation in
-        the same step. The COG_VERSION variable is a deliberate pin
-        (not `/latest/`) so the runner is hermetic.
+        Pins four things that have all been wrong at various points
+        in this workflow's history:
+        - the asset name embeds the CLIFF_VERSION (so a CLIFF_VERSION
+          bump can't ship with a stale asset name)
+        - the URL targets aarch64 (the runner is `ubuntu-26.04-arm`,
+          not x86_64 — the wrong arch gives Exec format error)
+        - the URL targets gnu libc (Ubuntu uses glibc)
+        - the URL DOES have a `v` prefix on the tag path (git-cliff
+          tags use `v2.14.2`; without the `v` returns 404)
+        - the CLIFF_VERSION variable is a deliberate pin (not
+          `/latest/`) so the runner is hermetic
+
+        The curl invocation may span multiple lines (line-continuation
+        backslashes), so we collapse whitespace before searching.
+
+        The URL uses the bash variable `${CLIFF_VERSION}` (not the
+        literal value), so the regex matches the variable reference
+        rather than the resolved value.
         """
-        # The curl invocation may span multiple lines (line-continuation
-        # backslashes), so we collapse whitespace before searching.
         collapsed = re.sub(r"\s+", " ", self.text)
+        # Confirm a CLIFF_VERSION variable is declared (the pin).
+        self.assertRegex(
+            self.text,
+            r'CLIFF_VERSION="[^"]+"',
+            "release.yml must declare a CLIFF_VERSION variable for the "
+            "git-cliff install (no `/latest/` — pinned for hermeticity)",
+        )
+        # The curl URL must:
+        # - be a git-cliff releases download URL
+        # - have a `v` prefix on the tag path (git-cliff convention)
+        # - target the git-cliff-${CLIFF_VERSION}-{arch} tarball
+        # - use the right arch (aarch64) and libc (gnu) for the runner
         self.assertRegex(
             collapsed,
-            r"curl [^\n]*?cocogitto[^\n]*?\.tar\.gz",
-            "release.yml's Detect step must install cocogitto via curl "
-            "(download from GitHub releases)",
+            r"curl [^\n]*?orhun/git-cliff/releases/download/v"
+            r"\$\{CLIFF_VERSION\}/git-cliff-\$\{CLIFF_VERSION\}"
+            r"-aarch64-unknown-linux-gnu\.tar\.gz",
+            "release.yml's Detect step must install git-cliff via curl "
+            "from `releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz` "
+            "(version interpolated in the URL, `v` prefix on tag path, "
+            "ARM64 arch, glibc).",
+        )
+
+    def test_detect_step_uses_git_cliff_bumped_version(self):
+        """The Detect step must compute the new version via
+        `git-cliff --bumped-version`. This is the call that actually
+        matters — we use git-cliff because its `--bumped-version`
+        correctly handles BREAKING CHANGE: / `feat!:` / post-breaking
+        `fix:` (which the prior cocogitto 7.0.0 `--auto` did not).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        # Find the line that actually invokes `git-cliff --bumped-version`
+        # (assigned to NEW_VERSION). The Detect step also has lines that
+        # *mention* git-cliff in comments (which we don't want).
+        invocation = next(
+            (ln for ln in body.splitlines() if "git-cliff --bumped-version" in ln),
+            None,
+        )
+        self.assertIsNotNone(
+            invocation,
+            "Detect step must invoke `git-cliff --bumped-version` "
+            "(the subcommand that prints the next SemVer for unreleased "
+            "commits on stdout). The prior cocogitto 7.0.0 `--auto` "
+            "flag did not handle BREAKING CHANGE: or `feat!:` correctly.",
         )
 
     def test_detect_step_fails_loudly_on_missing_tag(self):
@@ -652,65 +694,6 @@ class TestReleaseWorkflow(unittest.TestCase):
             sed_line,
             "release.yml's Bump-step sed must use `[0-9]+` for the "
             "numeric parts of the version regex",
-        )
-
-
-class TestCogToml(unittest.TestCase):
-    """``cog.toml`` MUST exist at the repo root with the
-    ``[bump]`` section configured for blitzlog's tag shape.
-
-    cocogitto reads this file when ``cog bump --auto`` runs in the
-    Detect step. A missing or misconfigured file silently changes
-    the bump semantics (wrong tag prefix, wrong initial base).
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.exists = COG_TOML.exists()
-        cls.text = COG_TOML.read_text() if cls.exists else ""
-
-    def test_cog_toml_exists(self):
-        self.assertTrue(
-            self.exists,
-            f"{COG_TOML} must exist at the repo root (cocogitto's config file)",
-        )
-
-    def test_cog_toml_has_bump_section(self):
-        self.assertRegex(
-            self.text,
-            r"(?ms)^\[bump\][^\n]*\n(?:[^\[]*\n)*?\s*tag_prefix\s*=",
-            "cog.toml must have a [bump] section with a tag_prefix key",
-        )
-
-    def test_cog_toml_tag_prefix_is_v(self):
-        self.assertRegex(
-            self.text,
-            r'(?m)^\s*tag_prefix\s*=\s*"v"\s*$',
-            "cog.toml's tag_prefix must be \"v\" (matches release.yml's "
-            "v* tag shape and the existing v0.1.1 tag)",
-        )
-
-    def test_cog_toml_initial_tag_is_semver(self):
-        """``cog.toml::[bump].initial_tag`` MUST be a SemVer string.
-
-        Pinned by ``tests/test_version.py::TestCogAlignment::
-        test_cog_toml_initial_tag_matches_version_file_when_no_v_tag``:
-        when no v* tag exists, cocogitto uses this value as the
-        bump base, so it must be a parseable SemVer.
-        """
-        m = re.search(
-            r'(?m)^\s*initial_tag\s*=\s*"([^"]+)"',
-            self.text,
-        )
-        self.assertIsNotNone(
-            m,
-            'cog.toml must declare an `initial_tag` (e.g. "0.1.1") '
-            "for the no-v-tag case",
-        )
-        self.assertRegex(
-            m.group(1),
-            r"^\d+\.\d+\.\d+$",
-            f"cog.toml's initial_tag {m.group(1)!r} is not a SemVer string",
         )
 
 

@@ -1,25 +1,24 @@
 """Regression guards for the SemVer version source of truth and the
-release configuration that owns it.
+release workflow that uses it.
 
 These tests are static (string-level checks on lambda/version.py,
-lambda/_version.py, and cog.toml, plus import-level checks for
-``__version__`` and ``get_version()``). They mirror
+lambda/_version.py, and the release workflow YAML, plus import-level
+checks for ``__version__`` and ``get_version()``). They mirror
 tests/test_entrypoint_readiness.py's pattern: read a config file,
 assert the shapes that prevent the bug from regressing. No shell, no
 docker, no AWS.
 
 What this guards against:
 
-- ``lambda.version.__version__`` (the canonical cocogitto target
-  the workflow's Bump step edits) drifting away from a valid
-  SemVer string.
+- ``lambda.version.__version__`` (the canonical target the workflow's
+  Bump step edits) drifting away from a valid SemVer string.
 - ``lambda._version.__version__`` falling out of sync with
   ``lambda.version.__version__`` (re-export chain broken).
 - ``get_version()`` and ``__version__`` falling out of sync.
 - ``lambda.__init__`` losing the ``__version__`` re-export, so callers
   that ``import lambda`` no longer see ``lambda.__version__``.
-- ``cog.toml`` drifting from the file (tag_prefix mismatch, or
-  initial_tag != lambda/version.py when no v* tag exists).
+- The release workflow's Tag step dropping the ``v`` prefix on tags
+  (would not match the existing v0.1.1 tag).
 - The ``null_resource.lambda_build`` filemd5 list in `lambda.tf` losing
   ``lambda/version.py``, so changing the version doesn't trigger a
   rebuild.
@@ -30,7 +29,6 @@ What this guards against:
 """
 
 import re
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -39,7 +37,6 @@ LAMBDA_INIT = REPO_ROOT / "lambda" / "__init__.py"
 LAMBDA_VERSION = REPO_ROOT / "lambda" / "_version.py"
 LAMBDA_VERSION_PY = REPO_ROOT / "lambda" / "version.py"
 LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
-COG_TOML = REPO_ROOT / "cog.toml"
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -181,44 +178,33 @@ class TestLambdaVersion(unittest.TestCase):
         )
 
 
-class TestCogAlignment(unittest.TestCase):
-    """Static checks that lock in the alignment between ``cog.toml``,
-    ``release.yml``'s Tag step, and ``lambda/version.py``.
+class TestTagPrefixAlignment(unittest.TestCase):
+    """Static check that locks in the alignment between release.yml's
+    Tag step and the ``v*`` tag shape the rest of the project uses.
 
-    These are the Layer-1 alignment invariants. The runtime check
-    (Layer 2) lives in ``release.yml``'s Detect step and fires on
-    every dispatch; these tests catch the config drift at PR time.
+    With git-cliff (replacing the prior cocogitto config), there's no
+    in-repo config file to align with — the workflow's Tag step is
+    the only place ``v`` is hardcoded. This test pins that the Tag
+    step's prefix matches the convention (and the existing v0.1.1 tag).
     """
 
     @classmethod
     def setUpClass(cls):
-        cls.cog_text = COG_TOML.read_text() if COG_TOML.is_file() else ""
         cls.release_yml_text = (
             REPO_ROOT / ".github" / "workflows" / "release.yml"
         ).read_text()
-        # Resolve the version literal in lambda/version.py once.
         m = re.search(
             r'(?m)^__version__\s*=\s*["\'](\d+\.\d+\.\d+)["\']',
             LAMBDA_VERSION_PY.read_text(),
         )
         cls.file_version = m.group(1) if m else None
 
-    def test_cog_toml_tag_prefix_matches_workflow_tag_step(self):
-        """``cog.toml::[bump].tag_prefix`` MUST match the prefix
-        release.yml's Tag step writes.
-
-        cocogitto reads ``LAST_TAG`` via ``git describe`` using its
-        configured tag_prefix. release.yml's Tag step writes
-        ``v${NEW_VERSION}``. If they disagree, cocogitto never sees
-        the workflow's tags and falls into the no-tag branch.
+    def test_tag_step_uses_v_prefix(self):
+        """release.yml's Tag step MUST write ``v${NEW_VERSION}`` (the
+        project's tag shape). If a future refactor drops the ``v``
+        prefix, git-cliff's `--bumped-version` would still work but
+        the tag would not match the existing v0.1.1.
         """
-        m = re.search(r'(?m)^\s*tag_prefix\s*=\s*"([^"]+)"', self.cog_text)
-        self.assertIsNotNone(
-            m,
-            f'{COG_TOML} must declare a tag_prefix (e.g. "v")',
-        )
-        cog_prefix = m.group(1)
-
         tag_step = re.search(
             r"(?ms)- name: Tag the release.*?run: \|\n(?P<body>(?:          .*\n)+)",
             self.release_yml_text,
@@ -228,58 +214,10 @@ class TestCogAlignment(unittest.TestCase):
             "release.yml must have a 'Tag the release' step",
         )
         self.assertIn(
-            f'git tag -a "{cog_prefix}',
+            'git tag -a "v${NEW_VERSION}"',
             tag_step.group("body"),
-            f"release.yml's Tag step must use tag_prefix {cog_prefix!r} "
-            f"to match cog.toml",
-        )
-
-    def test_cog_toml_initial_tag_matches_version_file_when_no_v_tag(self):
-        """When no v* tag exists, cocogitto uses ``[bump].initial_tag``
-        as the bump base. That base MUST equal the version in
-        ``lambda/version.py`` so a fresh-clone bump doesn't compute
-        a backwards version.
-
-        When a v* tag IS reachable, the runtime drift check in
-        release.yml's Detect step covers that case — this test
-        is a no-op then.
-        """
-        if self.file_version is None:
-            self.skipTest(f"{LAMBDA_VERSION_PY} has no parseable __version__ literal")
-
-        # Is a v* tag reachable? If yes, skip — the runtime check
-        # in release.yml covers the in-tag case.
-        result = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            capture_output=True,
-            text=True,
-            cwd=REPO_ROOT,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip().startswith("v"):
-            self.skipTest(
-                "v* tag exists; runtime alignment check in release.yml's "
-                "Detect step covers this case"
-            )
-
-        # No v* tag: assert equality between initial_tag and the file.
-        m = re.search(r'(?m)^\s*initial_tag\s*=\s*"([^"]+)"', self.cog_text)
-        self.assertIsNotNone(
-            m,
-            f"{COG_TOML} must declare initial_tag for the no-v-tag case",
-        )
-        initial_tag = m.group(1)
-        self.assertRegex(
-            initial_tag,
-            SEMVER_RE,
-            f"cog.toml initial_tag {initial_tag!r} is not a SemVer string",
-        )
-        self.assertEqual(
-            initial_tag,
-            self.file_version,
-            f"cog.toml initial_tag {initial_tag!r} must equal "
-            f"__version__ in lambda/version.py ({self.file_version!r}) "
-            "so a fresh-clone bump doesn't go backwards",
+            "release.yml's Tag step must use the `v` prefix on tags "
+            "(matches the existing v0.1.1 tag and the project's tag shape)",
         )
 
 

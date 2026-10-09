@@ -7,9 +7,9 @@ name: release
 #                                       * reads version from lambda/version.py
 #                                       * auto-detects bump type from the
 #                                         conventional commits in the PR's diff
-#                                         via cocogitto (BREAKING CHANGE:/
-#                                         feat!:/feat(...):/default
-#                                         = major/minor/minor/patch)
+#                                         via git-cliff (BREAKING CHANGE:/
+#                                         feat!:/feat(...):/fix:/
+#                                         default = major/minor/minor/patch)
 #                                       * builds and pushes the agent image
 #                                         with tag v{X}-pr{N} (no :latest)
 #                                       * posts a PR comment describing the
@@ -23,7 +23,7 @@ name: release
 #                                       * auto-detects bump type from the
 #                                         conventional commits in the diff
 #                                         range (last release tag -> ref)
-#                                         via cocogitto
+#                                         via git-cliff
 #                                       * updates lambda/version.py
 #                                       * commits with [skip ci]
 #                                       * pushes (with fallback to a
@@ -77,7 +77,7 @@ jobs:
       # Decide the mode (pr-test vs release) by whether $BUILD_REF has
       # an open PR. The bump type is auto-detected from the conventional
       # commits in the diff (last release tag -> $BUILD_REF) via
-      # cocogitto (a battle-hardened conventional-commits parser). The
+      # git-cliff (a battle-hardened conventional-commits parser). The
       # single dispatch input is `ref`; everything else is computed.
       - name: Detect mode and bump type
         id: detect
@@ -86,20 +86,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Install cocogitto. The Detect step uses `cog bump --auto
-          # --dry-run` to compute the new version from the conventional
-          # commits between the last v* tag and $BUILD_REF. cocogitto
-          # handles all the edge cases (BREAKING CHANGE:, feat!,
-          # feat(scope):, etc.) correctly — we used to do this by hand
-          # in bash and got it wrong (see the prior `\\d+` bug).
+          # Install git-cliff. The Detect step uses `git-cliff
+          # --bumped-version` to compute the new version from the
+          # conventional commits since the last v* tag. git-cliff
+          # correctly handles all edge cases (BREAKING CHANGE: in
+          # body, `feat!:` subject, post-breaking fix: commits, etc.)
+          # — which is the correctness we couldn't get from a
+          # hand-rolled bash parser or from cocogitto 7.0.0's
+          # `--auto` flag.
           #
           # Pinned to a specific release rather than `/latest/` so the
-          # runner is hermetic; bump the version here when upgrading.
-          COG_VERSION="6.4.0"
+          # runner is hermetic; bump CLIFF_VERSION here when upgrading.
+          #
+          # URL notes (verified against the actual GitHub release):
+          # - git-cliff tags use the `v` prefix (`v2.14.2`), so the
+          #   download path is `releases/download/v${CLIFF_VERSION}/...`
+          #   (without the `v` would 404).
+          # - Asset name embeds the version AND the target triple.
+          #   The runner is `ubuntu-26.04-arm` (ARM64, glibc), so we
+          #   download the `aarch64-unknown-linux-gnu` tarball.
+          CLIFF_VERSION="2.14.2"
           curl -fsSL \
-            "https://github.com/cocogitto/cocogitto/releases/download/v${COG_VERSION}/cocogitto-x86_64-unknown-linux-musl.tar.gz" \
-            | tar xz -C /usr/local/bin cocogitto
-          cog --version
+            "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin git-cliff
+          git-cliff --version
 
           # Mode: open PR on $BUILD_REF -> pr-test, else release.
           PR_NUMBER=$(gh pr list --state open \
@@ -111,10 +121,9 @@ jobs:
             MODE=release
           fi
 
-          # Bump type: ask cocogitto. It reads the conventional commits
-          # between --from (last v* tag) and --to ($BUILD_REF) and
-          # outputs the next SemVer on stdout. Fail loud if no v* tag
-          # is reachable.
+          # Bump type: ask git-cliff. It reads the conventional commits
+          # since the last v* tag and outputs the next SemVer on stdout.
+          # Fail loud if no v* tag is reachable.
           LAST_TAG=$(git describe --tags --abbrev=0 "${{ env.BUILD_REF }}" 2>/dev/null || true)
           if [ -z "$LAST_TAG" ]; then
             echo "FATAL: no v* release tag reachable from ${{ env.BUILD_REF }}; cannot determine bump base." >&2
@@ -123,13 +132,15 @@ jobs:
           fi
           BUMP_BASE="${LAST_TAG#v}"
 
-          # cocogitto outputs the new version on the last line. We
-          # don't let it write to disk or create commits — the Bump
-          # step below does the file update + commit + tag explicitly
-          # so the workflow's behavior is fully visible and testable.
-          NEW_VERSION=$(cog bump --auto --from "$LAST_TAG" --to "${{ env.BUILD_REF }}" --dry-run 2>/dev/null | tail -1)
+          # git-cliff's --bumped-version prints the next SemVer for
+          # the unreleased commits (everything since the last v* tag)
+          # on stdout. We don't let git-cliff write to disk or create
+          # commits — the Bump step below does the file update + commit
+          # + tag explicitly so the workflow's behavior is fully
+          # visible and testable.
+          NEW_VERSION=$(git-cliff --bumped-version 2>/dev/null | tail -1)
           if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "FATAL: cocogitto did not return a semver: '$NEW_VERSION'" >&2
+            echo "FATAL: git-cliff did not return a semver: '$NEW_VERSION'" >&2
             exit 1
           fi
 
