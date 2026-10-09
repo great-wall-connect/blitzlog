@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once the project reaches `1.0.0`.
 
+## [0.1.1](https://github.com/great-wall-connect/blitzlog/compare/v0.1.0...v0.1.1) (2026-10-09)
+
+
+### Features
+
+* **agent:** capture autonomous WIP on exit + restore PR-image dispatch ([#100](https://github.com/great-wall-connect/blitzlog/issues/100)) ([2caa675](https://github.com/great-wall-connect/blitzlog/commit/2caa675cb020af5af6960f8f454488a717a882aa))
+* dev/prod segregation so unstable branches cannot break production agents ([#51](https://github.com/great-wall-connect/blitzlog/issues/51)) ([d15ea32](https://github.com/great-wall-connect/blitzlog/commit/d15ea32175a6b095f7c5545486a9100e6e5e8fc6))
+* introduce SemVer versioning with release-please (closes [#93](https://github.com/great-wall-connect/blitzlog/issues/93)) ([#94](https://github.com/great-wall-connect/blitzlog/issues/94)) ([0990238](https://github.com/great-wall-connect/blitzlog/commit/09902388c3ff786b04f01934d460edeae1b6f8d0))
+* make opencode agent max-steps a Terraform variable (default 500) ([#66](https://github.com/great-wall-connect/blitzlog/issues/66)) ([30ec4be](https://github.com/great-wall-connect/blitzlog/commit/30ec4be3040d859ad78ad4500801ded60ff26936))
+* per-run EC2 Tailscale enrollment for local-LLM transport (closes [#24](https://github.com/great-wall-connect/blitzlog/issues/24)) ([#49](https://github.com/great-wall-connect/blitzlog/issues/49)) ([d0d93e0](https://github.com/great-wall-connect/blitzlog/commit/d0d93e00ff853854812e551ab33ace9566c8969a))
+* pre-built agent AMI with baked-in Docker image (AL2023 + Ubuntu 24.04) ([#58](https://github.com/great-wall-connect/blitzlog/issues/58)) ([c3acf49](https://github.com/great-wall-connect/blitzlog/commit/c3acf49b420f527bf6e8169330baeb94e0f776ba))
+* **scripts:** operator cleanup scripts for blitzlog-agent GHCR versions and self-owned AMIs ([#96](https://github.com/great-wall-connect/blitzlog/issues/96)) ([57deea5](https://github.com/great-wall-connect/blitzlog/commit/57deea5fb2cc3f16bb3edefeea51e34287bab9d7)), closes [#95](https://github.com/great-wall-connect/blitzlog/issues/95)
+* split lambda/handler.py into focused package (closes [#17](https://github.com/great-wall-connect/blitzlog/issues/17)) ([#56](https://github.com/great-wall-connect/blitzlog/issues/56)) ([252e052](https://github.com/great-wall-connect/blitzlog/commit/252e05295d5bf7e87da5d0de231332fcf3dc7f1a))
+* Telegram voice note prompts (STT) for assisted agents ([dbfce62](https://github.com/great-wall-connect/blitzlog/commit/dbfce62b3add4b0d3fee5070cd2f11cf8cdbb260))
+* Telegram voice note prompts (STT) for assisted agents ([a4099c5](https://github.com/great-wall-connect/blitzlog/commit/a4099c52c59eac59cdb07cbbefaf9093a42bd331))
+
+
+### Bug Fixes
+
+* add release-please manifest required by action@v4 ([#99](https://github.com/great-wall-connect/blitzlog/issues/99)) ([5cffa61](https://github.com/great-wall-connect/blitzlog/commit/5cffa619d2506c62a49a15db5d48264d46c0ccf9))
+* **agent:** cap opencode-serve readiness wait with curl --max-time ([#74](https://github.com/great-wall-connect/blitzlog/issues/74)) ([22f4dd2](https://github.com/great-wall-connect/blitzlog/commit/22f4dd25766b01d082237c39615d4ad204f117b2)), closes [#73](https://github.com/great-wall-connect/blitzlog/issues/73)
+* **agent:** make entrypoint.sh POSIX-clean for /bin/sh (dash) ([#90](https://github.com/great-wall-connect/blitzlog/issues/90)) ([5a4b449](https://github.com/great-wall-connect/blitzlog/commit/5a4b449f55dd8ac004e66d6b14c28c8ed0539ae9))
+* bootstrap exports PATH so npx resolves to the freshly-installed Node 24 ([#43](https://github.com/great-wall-connect/blitzlog/issues/43)) ([b2e7775](https://github.com/great-wall-connect/blitzlog/commit/b2e777559b99aa750e5d3028e728fdd4784837d1))
+* bootstrap installs Node 24 via tarball, bypassing AL2023 dnf repo gaps ([a28f26e](https://github.com/great-wall-connect/blitzlog/commit/a28f26e3387ecd05af52114e34257b4ffd799f84))
+* complete local-LLM transport integration ([#49](https://github.com/great-wall-connect/blitzlog/issues/49) follow-ups) ([#57](https://github.com/great-wall-connect/blitzlog/issues/57)) ([5243aed](https://github.com/great-wall-connect/blitzlog/commit/5243aed9afc115b6e1e5f782c8499d58cef43c84))
+* get lint CI green (fix pip path, apply black) ([#2](https://github.com/great-wall-connect/blitzlog/issues/2)) ([6801b60](https://github.com/great-wall-connect/blitzlog/commit/6801b602ac45fe6ea07a629d4ef9b41de0f773f2)), closes [#1](https://github.com/great-wall-connect/blitzlog/issues/1)
+* install Node 24 system-wide via dnf, run bot via npx ([#14](https://github.com/great-wall-connect/blitzlog/issues/14)) ([37d8a1e](https://github.com/great-wall-connect/blitzlog/commit/37d8a1efcd9b78e3299658afd2d08f756b98da3b))
+* Lambda zip includes whisper-stt-shim source; drop stray heredoc wrapping ([cd66965](https://github.com/great-wall-connect/blitzlog/commit/cd66965bed34d5a4c61faa533edfa78246723214))
+* quote /etc/blitzlog.env heredoc values so the bootstrap survives source ([#82](https://github.com/great-wall-connect/blitzlog/issues/82)) ([f04eae3](https://github.com/great-wall-connect/blitzlog/commit/f04eae3c5cbda8fbb1d4e34de5ef1536dee94cb8))
+* **release-please:** add version-file so release PRs open ([#105](https://github.com/great-wall-connect/blitzlog/issues/105)) ([70db4ca](https://github.com/great-wall-connect/blitzlog/commit/70db4cabe4862d1e76436701b27be50fedb45c0e)), closes [#104](https://github.com/great-wall-connect/blitzlog/issues/104)
+* **release-please:** add version-file so release PRs open ([#107](https://github.com/great-wall-connect/blitzlog/issues/107)) ([7f75b47](https://github.com/great-wall-connect/blitzlog/commit/7f75b471638c06cf99d959ded5b719026b735217)), closes [#104](https://github.com/great-wall-connect/blitzlog/issues/104)
+* **release-please:** use manifest mode + simple release-type + monorepo-tags: false ([#108](https://github.com/great-wall-connect/blitzlog/issues/108)) ([c7e1811](https://github.com/great-wall-connect/blitzlog/commit/c7e1811a1344756c1a5cfc30385b65c3f170b867)), closes [#104](https://github.com/great-wall-connect/blitzlog/issues/104)
+* replace Node whisper-stt-shim with Python (pywhispercpp) ([cd4a969](https://github.com/great-wall-connect/blitzlog/commit/cd4a969e5468ba6a32c50c1b5fb6f691c0b61cb8))
+* unblock autonomous agents (env tag, log-path env prefix, mise bootstrap) ([#64](https://github.com/great-wall-connect/blitzlog/issues/64)) ([6bbbcc3](https://github.com/great-wall-connect/blitzlog/commit/6bbbcc30b9de25c0bef7d9b5dbc8071d08a61770)), closes [#62](https://github.com/great-wall-connect/blitzlog/issues/62)
+* **watchdog:** prevent set -u crash in autonomous mode ([#98](https://github.com/great-wall-connect/blitzlog/issues/98)) ([133efce](https://github.com/great-wall-connect/blitzlog/commit/133efce81439fb7b664f9d2b36550371c87b49fe)), closes [#97](https://github.com/great-wall-connect/blitzlog/issues/97)
+
 ## [Unreleased]
 
 ### Added
