@@ -273,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           NEW_VERSION="${{ steps.detect.outputs.new_version }}"
-          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.\\d+\\.\\d+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
+          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
           python3 -c "import json; p='.release-please-manifest.json'; d=json.load(open(p)); d['lambda/']='${NEW_VERSION}'; json.dump(d, open(p,'w'), indent=2); open(p,'a').write('\\n')"
           git config user.name "release-bot"
           git config user.email "release-bot@users.noreply.github.com"
