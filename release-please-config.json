@@ -4,12 +4,8 @@
   "bump-patch-for-minor-pre-major": true,
   "packages": {
     ".": {
-      "release-type": "simple",
-      "monorepo-tags": false,
-      "version-file": "lambda/_version.py",
-      "extra-files": [
-        "lambda/_version.py"
-      ]
+      "release-type": "python",
+      "version-file": "version.py"
     }
   }
 }

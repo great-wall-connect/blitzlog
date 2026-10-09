@@ -35,10 +35,11 @@ data "archive_file" "lambda_zip" {
 resource "null_resource" "lambda_build" {
   triggers = {
     # Package entrypoint + modules
-    handler_py   = filemd5("${path.module}/../../../lambda/handler.py")
-    init_py      = filemd5("${path.module}/../../../lambda/__init__.py")
-    version_py   = filemd5("${path.module}/../../../lambda/_version.py")
-    env_py       = filemd5("${path.module}/../../../lambda/_env.py")
+    handler_py         = filemd5("${path.module}/../../../lambda/handler.py")
+    init_py            = filemd5("${path.module}/../../../lambda/__init__.py")
+    root_version_py    = filemd5("${path.module}/../../../version.py")
+    lambda_version_py  = filemd5("${path.module}/../../../lambda/_version.py")
+    env_py             = filemd5("${path.module}/../../../lambda/_env.py")
     auth_py      = filemd5("${path.module}/../../../lambda/auth.py")
     bot_pool_py  = filemd5("${path.module}/../../../lambda/bot_pool.py")
     llm_guard_py = filemd5("${path.module}/../../../lambda/llm_guard.py")
