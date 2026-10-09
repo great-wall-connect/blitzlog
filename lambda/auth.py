@@ -6,16 +6,25 @@ Two responsibilities:
     `X-Hub-Signature-256` header against the per-repo webhook secret stored
     in SSM.
 
-    get_github_app_token — mints a short-lived (1 h) installation token
-    scoped to a single repository. Builds a GitHub App JWT with the App's
-    private key, then POSTs to `/app/installations/<id>/access_tokens`
-    with `{"repositories": [<repo_name>]}` so the issued token has only
-    the permissions the worker needs.
+    get_github_app_token — mints an installation token scoped to a single
+    repository, with a custom lifetime (default 8 h, configurable via the
+    GITHUB_TOKEN_LIFETIME_HOURS Lambda env var). Builds a GitHub App JWT
+    with the App's private key, then POSTs to
+    `/app/installations/<id>/access_tokens` with
+    `{"repositories": [<repo_name>], "expires_at": "<ISO 8601>"}` so the
+    issued token has only the permissions the worker needs and lasts
+    long enough to cover an overnight assisted run.
+
+    The 8 h default is wider than the watchdog (the EC2 `timeout` plus
+    the `idle_watchdog` 3 h hard-shutdown) on purpose: a single static
+    token keeps `git push` and `gh auth login` both alive without giving
+    the agent AWS credentials to refresh them.
 """
 
 import base64
 import hashlib
 import hmac
+import os
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -25,6 +34,37 @@ from _env import SSM_PATH, logger
 from botocore.config import Config
 
 _ssm = boto3.client("ssm", config=Config(retries={"max_attempts": 1}))
+
+# Installation-token lifetime in hours. Read from the Lambda env on every
+# call so the Terraform `github_token_lifetime_hours` variable can tune
+# it per-env (e.g. below 8 h for GitHub Apps whose org policy caps
+# installation tokens). Default matches the README's "up to 8h lifetime"
+# promise. Must be >= 1 — non-positive values fall back to the default
+# with a warning so a misconfigured env var can't mint a 0-second token.
+GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT = 8
+
+
+def _get_github_token_lifetime_hours() -> int:
+    raw = os.environ.get("GITHUB_TOKEN_LIFETIME_HOURS")
+    if raw is None or raw == "":
+        return GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT
+    try:
+        hours = int(raw)
+    except ValueError:
+        logger.warning(
+            "GITHUB_TOKEN_LIFETIME_HOURS=%r is not an integer; falling back to %d",
+            raw,
+            GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT,
+        )
+        return GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT
+    if hours < 1:
+        logger.warning(
+            "GITHUB_TOKEN_LIFETIME_HOURS=%d must be >= 1; falling back to %d",
+            hours,
+            GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT,
+        )
+        return GITHUB_TOKEN_LIFETIME_HOURS_DEFAULT
+    return hours
 
 
 def get_ssm_param(name: str, with_decryption: bool = True) -> str:
@@ -53,7 +93,12 @@ def get_github_app_token(repo: str) -> str:
     )
 
     repo_name = repo.split("/", 1)[-1] if "/" in repo else repo
-    request_body = {"repositories": [repo_name]}
+    lifetime_hours = _get_github_token_lifetime_hours()
+    expires_at = now + timedelta(hours=lifetime_hours)
+    request_body = {
+        "repositories": [repo_name],
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
     resp = requests.post(
         f"https://api.github.com/app/installations/{installation_id}/access_tokens",

@@ -34,9 +34,12 @@ three shutdown paths terminate via the same mechanism.
 ## Component overview
 
 ### Lambda (`lambda/`)
-- `handler.py` — webhook entrypoint. Mints a GitHub App installation token,
-  acquires a free bot from the user's pool (assisted mode), launches an EC2
-  spot instance.
+- `handler.py` — webhook entrypoint. Mints a GitHub App installation token
+  (default 8 h, lifetime configurable via the `GITHUB_TOKEN_LIFETIME_HOURS`
+  Lambda env var — see `lambda/auth.py` for the `expires_at` request body
+  and `infra/modules/core/lambda.tf` for the Terraform wiring), acquires a
+  free bot from the user's pool (assisted mode), launches an EC2 spot
+  instance.
 - `scripts/assisted.py` / `scripts/autonomous.py` — user-data builders.
 - `scripts/_common.py` — shared bootstrap helpers.
 
