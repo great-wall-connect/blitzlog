@@ -7,16 +7,19 @@ docker, no AWS.
 
 What this guards against:
 
-- ``release-please.yml`` losing its `workflow_dispatch` trigger
-  (operators need a way to drive release-please against a PR
-  branch without merging first).
 - ``release.yml`` losing its `workflow_dispatch` trigger — the
   flow is fully manual. There is no `push: tags:` trigger.
 - ``release.yml`` accidentally keeping the obsolete `mode` / `bump`
   / `suffix` dispatch inputs. The design auto-detects the mode
   from the ref's open-PR status and the bump type from the
-  conventional commits in the diff. The only operator input
-  is ``ref``; everything else is computed.
+  conventional commits in the diff (via cocogitto). The only
+  operator input is ``ref``; everything else is computed.
+- ``release.yml`` losing the cocogitto-based bump detection
+  (regression to a hand-rolled bash parser that got the
+  conventional-commit rules wrong).
+- ``release.yml`` losing the tag/version-file alignment check
+  (the runtime invariant that fails loud when the last v* tag
+  and lambda/version.py disagree).
 - ``release.yml`` accidentally pushing the wrong image tag, or
   failing to skip ``:latest`` on the pr-test path.
 - ``docker-images.yml`` losing its ``workflow_dispatch`` block or
@@ -39,7 +42,6 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RELEASE_PLEASE_YML = REPO_ROOT / ".github" / "workflows" / "release-please.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DOCKER_IMAGES_YML = REPO_ROOT / ".github" / "workflows" / "docker-images.yml"
 
@@ -67,62 +69,6 @@ def _section(text: str, key: str) -> str:
             end = j
             break
     return "\n".join(lines[start:end])
-
-
-class TestReleasePleaseWorkflow(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.text = RELEASE_PLEASE_YML.read_text()
-        cls.on_block = _section(cls.text, "on")
-
-    def test_triggers_on_main_push(self):
-        """release-please.yml MUST trigger on push to main.
-
-        Without this trigger, release-please never opens a release PR
-        and the project stays unversioned indefinitely.
-        """
-        self.assertRegex(
-            self.on_block,
-            r"(?m)^\s+branches:\s*\[main\]\s*$",
-            "release-please.yml must trigger on push to main",
-        )
-
-    def test_uses_official_release_please_action(self):
-        """release-please.yml MUST invoke googleapis/release-please-action@v4.
-
-        The repo name is the source of truth for which action the workflow
-        actually runs. Switching it (e.g. to a fork) silently changes
-        release semantics.
-        """
-        self.assertRegex(
-            self.text,
-            r"(?m)^\s+uses:\s+googleapis/release-please-action@v\d+",
-            "release-please.yml must use googleapis/release-please-action",
-        )
-
-    def test_references_repo_config(self):
-        """release-please.yml MUST pass config-file: release-please-config.json."""
-        self.assertIn(
-            "config-file: release-please-config.json",
-            self.text,
-            "release-please.yml must reference release-please-config.json",
-        )
-
-    def test_has_workflow_dispatch_input(self):
-        """release-please.yml MUST have a workflow_dispatch trigger with
-        a `ref` input so operators can drive release-please against a
-        PR branch without merging first.
-        """
-        self.assertIn(
-            "workflow_dispatch",
-            self.text,
-            "release-please.yml must have a workflow_dispatch trigger",
-        )
-        self.assertRegex(
-            self.text,
-            r"(?ms)^  workflow_dispatch:.*?inputs:.*?ref:",
-            "release-please.yml's workflow_dispatch must declare a `ref` input",
-        )
 
 
 class TestReleaseWorkflow(unittest.TestCase):
@@ -280,23 +226,186 @@ class TestReleaseWorkflow(unittest.TestCase):
             "release.yml's Detect step must set MODE=pr-test when an open PR is found",
         )
 
-    def test_detect_bump_type_from_commits(self):
-        """The Detect step must auto-detect bump type from conventional
-        commits in the diff range. The standard release-please rules:
-        a `BREAKING CHANGE:` in any commit body -> major; a `feat:` or
-        `feat!:` or `feat(scope):` in any subject -> minor; else patch.
+    def test_checkout_fetches_tags(self):
+        """The Checkout step MUST have ``fetch-tags: true``.
+
+        git-cliff and `git describe` both need the v* tag history to
+        find the bump base. Without it the Detect step sees an empty
+        `LAST_TAG` and fails loud — but we lock the cause in here so a
+        future refactor that drops the flag is caught at PR time.
         """
-        self.assertRegex(
+        # Scope to the Checkout step's `with:` block so a stray
+        # `fetch-tags: true` in some other step can't pass this test.
+        m = re.search(
+            r"(?ms)- name: Checkout\s*\n\s+uses: actions/checkout@v\d+\s*\n\s+with:\s*\n(?P<with>(?:\s+[^\n]*\n)+)",
             self.text,
-            r"\[Bb\]reaking \[Cc\]hange:",
-            "release.yml's Detect step must check for a 'BREAKING CHANGE:' "
-            "footer in the diff to pick the major bump type",
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a Checkout step with a `with:` block",
         )
         self.assertRegex(
+            m.group("with"),
+            r"(?m)^\s+fetch-tags:\s+true\s*$",
+            "release.yml's Checkout step must have `fetch-tags: true` "
+            "(git-cliff and `git describe` need the v* tag history to "
+            "find the bump base)",
+        )
+
+    def test_git_cliff_installed_in_workflow(self):
+        """The Detect step must install git-cliff before using it.
+
+        Pins four things that have all been wrong at various points
+        in this workflow's history:
+        - the asset name embeds the CLIFF_VERSION (so a CLIFF_VERSION
+          bump can't ship with a stale asset name)
+        - the URL targets aarch64 (the runner is `ubuntu-26.04-arm`,
+          not x86_64 — the wrong arch gives Exec format error)
+        - the URL targets gnu libc (Ubuntu uses glibc)
+        - the URL DOES have a `v` prefix on the tag path (git-cliff
+          tags use `v2.14.2`; without the `v` returns 404)
+        - the tar extract must use `--strip-components=1` (the
+          tarball's top-level directory is `git-cliff-${CLIFF_VERSION}/`,
+          so without the strip the binary lands at the wrong path
+          and the workflow fails with `tar: git-cliff: Not found in
+          archive`)
+        - the CLIFF_VERSION variable is a deliberate pin (not
+          `/latest/`) so the runner is hermetic
+
+        The curl invocation may span multiple lines (line-continuation
+        backslashes), so we collapse whitespace before searching.
+
+        The URL uses the bash variable `${CLIFF_VERSION}` (not the
+        literal value), so the regex matches the variable reference
+        rather than the resolved value.
+        """
+        collapsed = re.sub(r"\s+", " ", self.text)
+        # Confirm a CLIFF_VERSION variable is declared (the pin).
+        self.assertRegex(
             self.text,
-            r"feat\(\(|!\|:",
-            "release.yml's Detect step must check for a 'feat' (or 'feat!'/'feat(...)') "
-            "subject to pick the minor bump type",
+            r'CLIFF_VERSION="[^"]+"',
+            "release.yml must declare a CLIFF_VERSION variable for the "
+            "git-cliff install (no `/latest/` — pinned for hermeticity)",
+        )
+        # The curl URL must:
+        # - be a git-cliff releases download URL
+        # - have a `v` prefix on the tag path (git-cliff convention)
+        # - target the git-cliff-${CLIFF_VERSION}-{arch} tarball
+        # - use the right arch (aarch64) and libc (gnu) for the runner
+        self.assertRegex(
+            collapsed,
+            r"curl [^\n]*?orhun/git-cliff/releases/download/v"
+            r"\$\{CLIFF_VERSION\}/git-cliff-\$\{CLIFF_VERSION\}"
+            r"-aarch64-unknown-linux-gnu\.tar\.gz",
+            "release.yml's Detect step must install git-cliff via curl "
+            "from `releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz` "
+            "(version interpolated in the URL, `v` prefix on tag path, "
+            "ARM64 arch, glibc).",
+        )
+        # The tar extract must drop the leading `git-cliff-${VERSION}/`
+        # directory; otherwise the binary lands at a wrong path and
+        # the workflow fails with `tar: git-cliff: Not found in archive`.
+        self.assertRegex(
+            collapsed,
+            r"tar [^\n]*?--strip-components=1[^\n]*?-C /usr/local/bin",
+            "release.yml's tar extract must use `--strip-components=1` "
+            "so the `git-cliff` binary lands at `/usr/local/bin/git-cliff` "
+            "(the tarball's top-level directory is `git-cliff-${VERSION}/`)",
+        )
+
+    def test_detect_step_uses_git_cliff_bumped_version(self):
+        """The Detect step must compute the new version via
+        `git-cliff --bumped-version`. This is the call that actually
+        matters — we use git-cliff because its `--bumped-version`
+        correctly handles BREAKING CHANGE: / `feat!:` / post-breaking
+        `fix:` (which the prior cocogitto 7.0.0 `--auto` did not).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        # Find the line that actually invokes `git-cliff --bumped-version`
+        # (assigned to NEW_VERSION). The Detect step also has lines that
+        # *mention* git-cliff in comments (which we don't want).
+        invocation = next(
+            (ln for ln in body.splitlines() if "git-cliff --bumped-version" in ln),
+            None,
+        )
+        self.assertIsNotNone(
+            invocation,
+            "Detect step must invoke `git-cliff --bumped-version` "
+            "(the subcommand that prints the next SemVer for unreleased "
+            "commits on stdout). The prior cocogitto 7.0.0 `--auto` "
+            "flag did not handle BREAKING CHANGE: or `feat!:` correctly.",
+        )
+        # git-cliff echoes the tag's prefix (so for tag `v0.1.1` it
+        # returns `v0.1.2`); the Detect step must strip the `v` so
+        # the SemVer regex below matches. Regression guard: a future
+        # refactor that drops the strip will fail the regex below.
+        self.assertRegex(
+            invocation,
+            r"sed ['\"]s/\^v//['\"]",
+            "Detect step must strip the `v` prefix from git-cliff's "
+            "`--bumped-version` output (git-cliff echoes the tag prefix; "
+            "without the strip, the SemVer regex below rejects the result)",
+        )
+
+    def test_detect_step_fails_loudly_on_missing_tag(self):
+        """If no v* tag is reachable from $BUILD_REF, the Detect step
+        must fail with a clear error — NOT silently fall back to the
+        manifest value (which isn't a valid git ref and was the
+        root cause of a prior broken-bump regression).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        self.assertIn(
+            "FATAL: no v* release tag reachable",
+            body,
+            "release.yml's Detect step must fail loud when no v* tag is "
+            "reachable from $BUILD_REF (the prior manifest-value fallback "
+            "is broken because the manifest value isn't a ref)",
+        )
+
+    def test_detect_step_aligns_tag_and_version_file(self):
+        """The Detect step must compare the last v* tag's version to
+        the literal in lambda/version.py and exit 1 on mismatch.
+
+        This is the runtime alignment check that catches drift where
+        someone tags or bumps one without the other, before the Bump
+        step makes any changes.
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        self.assertIn(
+            "tag/version drift",
+            body,
+            "release.yml's Detect step must print 'tag/version drift' "
+            "when the last v* tag and lambda/version.py disagree",
+        )
+        self.assertRegex(
+            body,
+            r'\[ "\$FILE_VERSION" != "\$BUMP_BASE" \]',
+            "release.yml's Detect step must compare FILE_VERSION to "
+            "BUMP_BASE and exit 1 on mismatch",
         )
 
     def test_image_tag_pr_test_uses_pr_number_suffix(self):

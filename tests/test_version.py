@@ -1,8 +1,8 @@
 """Regression guards for the SemVer version source of truth and the
-release-please config that owns it.
+release workflow that uses it.
 
 These tests are static (string-level checks on lambda/version.py,
-lambda/_version.py, and release-please-config.json, plus import-level
+lambda/_version.py, and the release workflow YAML, plus import-level
 checks for ``__version__`` and ``get_version()``). They mirror
 tests/test_entrypoint_readiness.py's pattern: read a config file,
 assert the shapes that prevent the bug from regressing. No shell, no
@@ -10,18 +10,15 @@ docker, no AWS.
 
 What this guards against:
 
-- ``lambda.version.__version__`` (the canonical release-please target)
-  drifting away from the release-please seed.
-- release-please losing its ``version-file`` entry (so a bump no longer
-  edits ``lambda/version.py``).
-- release-please losing its pre-major bump flags (so a `feat:` on the
-  0.x line jumps a published minor instead of releasing 1.x
-  prematurely).
+- ``lambda.version.__version__`` (the canonical target the workflow's
+  Bump step edits) drifting away from a valid SemVer string.
 - ``lambda._version.__version__`` falling out of sync with
   ``lambda.version.__version__`` (re-export chain broken).
 - ``get_version()`` and ``__version__`` falling out of sync.
 - ``lambda.__init__`` losing the ``__version__`` re-export, so callers
   that ``import lambda`` no longer see ``lambda.__version__``.
+- The release workflow's Tag step dropping the ``v`` prefix on tags
+  (would not match the existing v0.1.1 tag).
 - The ``null_resource.lambda_build`` filemd5 list in `lambda.tf` losing
   ``lambda/version.py``, so changing the version doesn't trigger a
   rebuild.
@@ -31,7 +28,6 @@ What this guards against:
   prompted the lambda/ prefix move).
 """
 
-import json
 import re
 import unittest
 from pathlib import Path
@@ -41,23 +37,21 @@ LAMBDA_INIT = REPO_ROOT / "lambda" / "__init__.py"
 LAMBDA_VERSION = REPO_ROOT / "lambda" / "_version.py"
 LAMBDA_VERSION_PY = REPO_ROOT / "lambda" / "version.py"
 LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
-RELEASE_PLEASE_CONFIG = REPO_ROOT / "release-please-config.json"
-RELEASE_PLEASE_MANIFEST = REPO_ROOT / ".release-please-manifest.json"
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 class TestVersionSource(unittest.TestCase):
     """The canonical version literal MUST live in ``lambda/version.py``,
-    where release-please's ``PythonFileWithVersion`` updater preserves
-    the file structure and only edits the ``__version__ = "..."`` line.
+    where the release workflow's Bump step edits it in place via a
+    one-line ``sed`` (preserves the file structure and only edits the
+    ``__version__ = "..."`` line). cocogitto handles the bump-type
+    detection in the Detect step; ``lambda/version.py`` is the
+    source of truth that the Bump step writes to.
 
     Earlier configs pointed at a root-level ``version.py`` (a path the
-    zip build excludes — the runtime error from the dev deployment
-    that prompted this fix) or at ``lambda/_version.py`` (a non-standard
-    path that release-please's python release-type does not recognize,
-    so it fell back to the generic updater, which wiped the file on
-    every bump — see #109).
+    zip build excludes — the runtime error from the dev deployment that
+    prompted the lambda/ prefix move).
     """
 
     @classmethod
@@ -67,11 +61,11 @@ class TestVersionSource(unittest.TestCase):
     def test_version_is_semver_string(self):
         """``lambda.version.__version__`` MUST match ^\\d+\\.\\d+\\.\\d+$.
 
-        release-please will only edit it if it's a plain SemVer
-        string; anything else (a tuple, a leading 'v', a PEP 440
-        '0.1.0a1' suffix) trips its parser and either no-ops or
-        errors. Anchored regex, not ``re.search`` — we want the
-        entire string to be the version.
+        The Bump step's sed only matches a plain SemVer string;
+        anything else (a tuple, a leading 'v', a PEP 440 '0.1.0a1'
+        suffix) trips the sed and the Bump step silently no-ops.
+        Anchored regex, not ``re.search`` — we want the entire string
+        to be the version.
         """
         m = re.search(
             r'(?m)^__version__\s*=\s*["\'](\d+\.\d+\.\d+)["\']', self.version_text
@@ -90,9 +84,9 @@ class TestVersionSource(unittest.TestCase):
 class TestLambdaVersion(unittest.TestCase):
     """``lambda/_version.py`` re-exports from ``lambda.version`` and
     adds a stable ``get_version()`` helper. The literal MUST NOT live
-    in ``_version.py`` itself — release-please only knows how to edit
-    the canonical version file (``lambda/version.py``); if the literal
-    moved to ``_version.py``, the bump would no-op.
+    in ``_version.py`` itself — the release workflow's Bump step only
+    knows how to edit the canonical version file (``lambda/version.py``);
+    if the literal moved to ``_version.py``, the bump would no-op.
     """
 
     @classmethod
@@ -184,140 +178,46 @@ class TestLambdaVersion(unittest.TestCase):
         )
 
 
-class TestReleasePleaseConfig(unittest.TestCase):
+class TestTagPrefixAlignment(unittest.TestCase):
+    """Static check that locks in the alignment between release.yml's
+    Tag step and the ``v*`` tag shape the rest of the project uses.
+
+    With git-cliff (replacing the prior cocogitto config), there's no
+    in-repo config file to align with — the workflow's Tag step is
+    the only place ``v`` is hardcoded. This test pins that the Tag
+    step's prefix matches the convention (and the existing v0.1.1 tag).
+    """
+
     @classmethod
     def setUpClass(cls):
-        cls.config = json.loads(RELEASE_PLEASE_CONFIG.read_text())
-        # In manifest mode the per-package settings live under
-        # ``packages.{"<path>": {...}}``; release-type / version-file /
-        # extra-files are scoped to the package entry. Top-level keys
-        # still hold the bump flags and (deprecated) shared options.
-        # The package path is the ``lambda/`` directory (so
-        # release-please finds ``lambda/version.py`` as
-        # ``<path>/version.py`` — the file the python updater
-        # recognizes).
-        cls.packages = cls.config.get("packages", {}).get("lambda/", {})
+        cls.release_yml_text = (
+            REPO_ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text()
+        m = re.search(
+            r'(?m)^__version__\s*=\s*["\'](\d+\.\d+\.\d+)["\']',
+            LAMBDA_VERSION_PY.read_text(),
+        )
+        cls.file_version = m.group(1) if m else None
 
-    def test_release_type_is_python(self):
-        """release-type MUST be `python` for the per-package entry.
-
-        With ``version-file: version.py`` in the ``lambda/`` package,
-        only the python release-type's ``PythonFileWithVersion``
-        updater is used (preserves file structure, edits only the
-        version line). ``release-type: simple`` falls back to the
-        generic updater and wipes the file — see #109 for the
-        failure mode.
+    def test_tag_step_uses_v_prefix(self):
+        """release.yml's Tag step MUST write ``v${NEW_VERSION}`` (the
+        project's tag shape). If a future refactor drops the ``v``
+        prefix, git-cliff's `--bumped-version` would still work but
+        the tag would not match the existing v0.1.1.
         """
-        self.assertEqual(
-            self.packages.get("release-type"),
-            "python",
-            "release-please per-package release-type must be 'python' "
-            "(simple mode wipes the version file on every bump)",
+        tag_step = re.search(
+            r"(?ms)- name: Tag the release.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.release_yml_text,
         )
-
-    def test_version_file_points_at_lambda_root(self):
-        """``version-file`` MUST be ``version.py`` (relative to the
-        package path ``lambda/``, so the literal target is
-        ``lambda/version.py``).
-
-        The release-please Python file updater recognizes
-        ``<prefix>/version.py`` (where prefix is the package path).
-        With ``packages.{"lambda/": {...}}`` and ``prefix = "lambda/"``,
-        the canonical file is ``lambda/version.py`` — the file that
-        release-please's python updater edits in place. Keeping the
-        version literal in the zip requires the file to be inside
-        the package directory (the zip only contains ``lambda/...``,
-        not the repo root).
-        """
-        self.assertEqual(
-            self.packages.get("version-file"),
-            "version.py",
-            "release-please per-package version-file must be 'version.py' "
-            "(a path that PythonFileWithVersion recognizes, inside the lambda/ package)",
-        )
-
-    def test_pre_major_minor_bump_is_enabled(self):
-        """bump-minor-pre-major MUST be true so 0.1.0 → 0.2.0 on `feat:`.
-
-        Without it, release-please under 0.x treats `feat:` as a major
-        bump (0.1.0 → 1.0.0), which violates the project's stated
-        "stay on 0.x until API stability" contract.
-        """
-        self.assertTrue(
-            self.config.get("bump-minor-pre-major"),
-            "release-please bump-minor-pre-major must be true under 0.x",
-        )
-
-    def test_pre_major_patch_bump_is_enabled(self):
-        """bump-patch-for-minor-pre-major MUST be true so 0.1.0 → 0.1.1 on `fix:`.
-
-        Without it, release-please under 0.x treats `fix:` as a minor
-        bump (0.1.0 → 0.2.0), inflating patch-only fixes into
-        feature bumps.
-        """
-        self.assertTrue(
-            self.config.get("bump-patch-for-minor-pre-major"),
-            "release-please bump-patch-for-minor-pre-major must be true under 0.x",
-        )
-
-    def test_manifest_file_exists_and_is_json(self):
-        """.release-please-manifest.json MUST exist and parse as JSON.
-
-        ``googleapis/release-please-action@v4`` defaults to manifest mode
-        and hard-errors with "Missing required manifest versions" when
-        this file is absent. The manifest is the canonical source of
-        truth for the current package version; release-please edits it
-        on every release, and reviewers rely on its API in PRs to spot
-        version drift.
-        """
-        self.assertTrue(
-            RELEASE_PLEASE_MANIFEST.is_file(),
-            f"{RELEASE_PLEASE_MANIFEST} must exist; release-please-action@v4 "
-            "fails without it",
-        )
-        try:
-            parsed = json.loads(RELEASE_PLEASE_MANIFEST.read_text())
-        except json.JSONDecodeError as exc:
-            self.fail(f"{RELEASE_PLEASE_MANIFEST} is not valid JSON: {exc}")
-        self.assertIsInstance(
-            parsed,
-            dict,
-            f"{RELEASE_PLEASE_MANIFEST} must be a JSON object at the top level",
-        )
-        self.assertNotEqual(
-            parsed,
-            {},
-            f"{RELEASE_PLEASE_MANIFEST} must declare at least one package version",
-        )
-
-    def test_seed_version_is_semver(self):
-        """The seeded version in the manifest MUST be a plain SemVer string.
-
-        ``release-please-config.json`` no longer carries a top-level
-        ``"version"`` key — that field was the legacy non-manifest
-        convention and is ignored when ``release-please-action@v4``
-        runs in manifest mode. The seed now lives in
-        ``.release-please-manifest.json`` and must match ``^\\d+\\.\\d+\\.\\d+$``;
-        anything else (a tuple, a leading 'v', a PEP 440 '0.1.0a1'
-        suffix) trips release-please's parser and either no-ops or
-        errors.
-        """
-        self.assertTrue(
-            RELEASE_PLEASE_MANIFEST.is_file(),
-            f"{RELEASE_PLEASE_MANIFEST} must exist; see test_manifest_file_exists_and_is_json",
-        )
-        manifest = json.loads(RELEASE_PLEASE_MANIFEST.read_text())
-        # Single-package repo: the version lives under the "lambda/"
-        # key (the package path), not the root "." key.
-        version = manifest.get("lambda/")
         self.assertIsNotNone(
-            version,
-            f"{RELEASE_PLEASE_MANIFEST} must declare a version under the 'lambda/' key",
+            tag_step,
+            "release.yml must have a 'Tag the release' step",
         )
-        self.assertRegex(
-            version,
-            SEMVER_RE,
-            f"manifest version {version!r} is not a SemVer string",
+        self.assertIn(
+            'git tag -a "v${NEW_VERSION}"',
+            tag_step.group("body"),
+            "release.yml's Tag step must use the `v` prefix on tags "
+            "(matches the existing v0.1.1 tag and the project's tag shape)",
         )
 
 
