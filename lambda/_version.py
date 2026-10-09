@@ -1,12 +1,13 @@
 """Re-export the package's SemVer version literal.
 
-The literal lives in ``lambda/version.py`` so that release-please's
-``PythonFileWithVersion`` updater (with the manifest-mode config
-pointing at ``lambda/`` as the package path) edits it in place —
-preserving the file structure and only changing the version line.
-This module exposes the literal as ``__version__`` and ``get_version()``
-(the stable import surface for test mocks and the handler's startup
-log).
+The literal lives in ``lambda/version.py`` so that the release
+workflow (``release.yml``) can edit it in place via a one-line
+``sed`` (preserving the file structure and only changing the
+version line). cocogitto handles the bump-type detection in the
+Detect step; this file is the source of truth that the Bump step
+writes to. This module exposes the literal as ``__version__`` and
+``get_version()`` (the stable import surface for test mocks and
+the handler's startup log).
 
 The ``from .version`` form is a relative import that resolves
 within the ``lambda`` package, so it works at Lambda runtime where

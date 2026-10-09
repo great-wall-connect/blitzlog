@@ -7,16 +7,19 @@ docker, no AWS.
 
 What this guards against:
 
-- ``release-please.yml`` losing its `workflow_dispatch` trigger
-  (operators need a way to drive release-please against a PR
-  branch without merging first).
 - ``release.yml`` losing its `workflow_dispatch` trigger — the
   flow is fully manual. There is no `push: tags:` trigger.
 - ``release.yml`` accidentally keeping the obsolete `mode` / `bump`
   / `suffix` dispatch inputs. The design auto-detects the mode
   from the ref's open-PR status and the bump type from the
-  conventional commits in the diff. The only operator input
-  is ``ref``; everything else is computed.
+  conventional commits in the diff (via cocogitto). The only
+  operator input is ``ref``; everything else is computed.
+- ``release.yml`` losing the cocogitto-based bump detection
+  (regression to a hand-rolled bash parser that got the
+  conventional-commit rules wrong).
+- ``release.yml`` losing the tag/version-file alignment check
+  (the runtime invariant that fails loud when the last v* tag
+  and lambda/version.py disagree).
 - ``release.yml`` accidentally pushing the wrong image tag, or
   failing to skip ``:latest`` on the pr-test path.
 - ``docker-images.yml`` losing its ``workflow_dispatch`` block or
@@ -39,9 +42,9 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RELEASE_PLEASE_YML = REPO_ROOT / ".github" / "workflows" / "release-please.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DOCKER_IMAGES_YML = REPO_ROOT / ".github" / "workflows" / "docker-images.yml"
+COG_TOML = REPO_ROOT / "cog.toml"
 
 
 def _section(text: str, key: str) -> str:
@@ -67,62 +70,6 @@ def _section(text: str, key: str) -> str:
             end = j
             break
     return "\n".join(lines[start:end])
-
-
-class TestReleasePleaseWorkflow(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.text = RELEASE_PLEASE_YML.read_text()
-        cls.on_block = _section(cls.text, "on")
-
-    def test_triggers_on_main_push(self):
-        """release-please.yml MUST trigger on push to main.
-
-        Without this trigger, release-please never opens a release PR
-        and the project stays unversioned indefinitely.
-        """
-        self.assertRegex(
-            self.on_block,
-            r"(?m)^\s+branches:\s*\[main\]\s*$",
-            "release-please.yml must trigger on push to main",
-        )
-
-    def test_uses_official_release_please_action(self):
-        """release-please.yml MUST invoke googleapis/release-please-action@v4.
-
-        The repo name is the source of truth for which action the workflow
-        actually runs. Switching it (e.g. to a fork) silently changes
-        release semantics.
-        """
-        self.assertRegex(
-            self.text,
-            r"(?m)^\s+uses:\s+googleapis/release-please-action@v\d+",
-            "release-please.yml must use googleapis/release-please-action",
-        )
-
-    def test_references_repo_config(self):
-        """release-please.yml MUST pass config-file: release-please-config.json."""
-        self.assertIn(
-            "config-file: release-please-config.json",
-            self.text,
-            "release-please.yml must reference release-please-config.json",
-        )
-
-    def test_has_workflow_dispatch_input(self):
-        """release-please.yml MUST have a workflow_dispatch trigger with
-        a `ref` input so operators can drive release-please against a
-        PR branch without merging first.
-        """
-        self.assertIn(
-            "workflow_dispatch",
-            self.text,
-            "release-please.yml must have a workflow_dispatch trigger",
-        )
-        self.assertRegex(
-            self.text,
-            r"(?ms)^  workflow_dispatch:.*?inputs:.*?ref:",
-            "release-please.yml's workflow_dispatch must declare a `ref` input",
-        )
 
 
 class TestReleaseWorkflow(unittest.TestCase):
@@ -281,22 +228,118 @@ class TestReleaseWorkflow(unittest.TestCase):
         )
 
     def test_detect_bump_type_from_commits(self):
-        """The Detect step must auto-detect bump type from conventional
-        commits in the diff range. The standard release-please rules:
-        a `BREAKING CHANGE:` in any commit body -> major; a `feat:` or
-        `feat!:` or `feat(scope):` in any subject -> minor; else patch.
+        """The Detect step must auto-detect bump type via cocogitto (a
+        battle-hardened conventional-commits parser), not via a
+        hand-rolled bash regex. We used to parse commits by hand and
+        got the rules wrong (the `\\d+` vs `[0-9]+` bug was one
+        symptom; another was a wrong feat() regex). cocogitto handles
+        all the edge cases — `BREAKING CHANGE:`, `feat!`, `feat(scope):`,
+        etc. — correctly.
         """
         self.assertRegex(
             self.text,
-            r"\[Bb\]reaking \[Cc\]hange:",
-            "release.yml's Detect step must check for a 'BREAKING CHANGE:' "
-            "footer in the diff to pick the major bump type",
+            r"cog bump --auto",
+            "release.yml's Detect step must use `cog bump --auto` for "
+            "conventional-commit-based bump detection",
+        )
+
+    def test_checkout_fetches_tags(self):
+        """The Checkout step MUST have ``fetch-tags: true``.
+
+        cocogitto and `git describe` both need the v* tag history to
+        find the bump base. Without it the Detect step sees an empty
+        `LAST_TAG` and fails loud — but we lock the cause in here so a
+        future refactor that drops the flag is caught at PR time.
+        """
+        # Scope to the Checkout step's `with:` block so a stray
+        # `fetch-tags: true` in some other step can't pass this test.
+        m = re.search(
+            r"(?ms)- name: Checkout\s*\n\s+uses: actions/checkout@v\d+\s*\n\s+with:\s*\n(?P<with>(?:\s+[^\n]*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a Checkout step with a `with:` block",
         )
         self.assertRegex(
+            m.group("with"),
+            r"(?m)^\s+fetch-tags:\s+true\s*$",
+            "release.yml's Checkout step must have `fetch-tags: true` "
+            "(cocogitto and `git describe` need the v* tag history to "
+            "find the bump base)",
+        )
+
+    def test_cocogitto_installed_in_workflow(self):
+        """The Detect step must install cocogitto before using it.
+
+        cocogitto is a static binary; we download it from the GitHub
+        release. The install must precede any `cog …` invocation in
+        the same step. We don't pin to /latest/ — the COG_VERSION
+        variable is a deliberate pin.
+        """
+        # The curl invocation may span multiple lines (line-continuation
+        # backslashes), so we collapse whitespace before searching.
+        collapsed = re.sub(r"\s+", " ", self.text)
+        self.assertRegex(
+            collapsed,
+            r"curl [^\n]*?cocogitto[^\n]*?\.tar\.gz",
+            "release.yml's Detect step must install cocogitto via curl "
+            "(download from GitHub releases)",
+        )
+
+    def test_detect_step_fails_loudly_on_missing_tag(self):
+        """If no v* tag is reachable from $BUILD_REF, the Detect step
+        must fail with a clear error — NOT silently fall back to the
+        manifest value (which isn't a valid git ref and was the
+        root cause of a prior broken-bump regression).
+        """
+        # Pull the Detect step's `run:` block and assert it contains a
+        # fail-loud on empty LAST_TAG.
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
             self.text,
-            r"feat\(\(|!\|:",
-            "release.yml's Detect step must check for a 'feat' (or 'feat!'/'feat(...)') "
-            "subject to pick the minor bump type",
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        self.assertIn(
+            "FATAL: no v* release tag reachable",
+            body,
+            "release.yml's Detect step must fail loud when no v* tag is "
+            "reachable from $BUILD_REF (the prior manifest-value fallback "
+            "is broken because the manifest value isn't a ref)",
+        )
+
+    def test_detect_step_aligns_tag_and_version_file(self):
+        """The Detect step must compare the last v* tag's version to
+        the literal in lambda/version.py and exit 1 on mismatch.
+
+        This is the runtime alignment check that catches drift where
+        someone tags or bumps one without the other, before the Bump
+        step makes any changes.
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Detect mode and bump type' step",
+        )
+        body = m.group("body")
+        self.assertIn(
+            "tag/version drift",
+            body,
+            "release.yml's Detect step must print 'tag/version drift' "
+            "when the last v* tag and lambda/version.py disagree",
+        )
+        self.assertRegex(
+            body,
+            r"\[ \"\$FILE_VERSION\" != \"\$BUMP_BASE\" \]",
+            "release.yml's Detect step must compare FILE_VERSION to "
+            "BUMP_BASE and exit 1 on mismatch",
         )
 
     def test_image_tag_pr_test_uses_pr_number_suffix(self):
@@ -611,6 +654,65 @@ class TestReleaseWorkflow(unittest.TestCase):
             sed_line,
             "release.yml's Bump-step sed must use `[0-9]+` for the "
             "numeric parts of the version regex",
+        )
+
+
+class TestCogToml(unittest.TestCase):
+    """``cog.toml`` MUST exist at the repo root with the
+    ``[bump]`` section configured for blitzlog's tag shape.
+
+    cocogitto reads this file when ``cog bump --auto`` runs in the
+    Detect step. A missing or misconfigured file silently changes
+    the bump semantics (wrong tag prefix, wrong initial base).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exists = COG_TOML.exists()
+        cls.text = COG_TOML.read_text() if cls.exists else ""
+
+    def test_cog_toml_exists(self):
+        self.assertTrue(
+            self.exists,
+            f"{COG_TOML} must exist at the repo root (cocogitto's config file)",
+        )
+
+    def test_cog_toml_has_bump_section(self):
+        self.assertRegex(
+            self.text,
+            r"(?ms)^\[bump\][^\n]*\n(?:[^\[]*\n)*?\s*tag_prefix\s*=",
+            "cog.toml must have a [bump] section with a tag_prefix key",
+        )
+
+    def test_cog_toml_tag_prefix_is_v(self):
+        self.assertRegex(
+            self.text,
+            r"(?m)^\s*tag_prefix\s*=\s*\"v\"\s*$",
+            "cog.toml's tag_prefix must be \"v\" (matches release.yml's "
+            "v* tag shape and the existing v0.1.1 tag)",
+        )
+
+    def test_cog_toml_initial_tag_is_semver(self):
+        """``cog.toml::[bump].initial_tag`` MUST be a SemVer string.
+
+        Pinned by ``tests/test_version.py::TestCogAlignment::
+        test_cog_toml_initial_tag_matches_version_file_when_no_v_tag``:
+        when no v* tag exists, cocogitto uses this value as the
+        bump base, so it must be a parseable SemVer.
+        """
+        m = re.search(
+            r'(?m)^\s*initial_tag\s*=\s*"([^"]+)"',
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            'cog.toml must declare an `initial_tag` (e.g. "0.1.1") '
+            "for the no-v-tag case",
+        )
+        self.assertRegex(
+            m.group(1),
+            r"^\d+\.\d+\.\d+$",
+            f"cog.toml's initial_tag {m.group(1)!r} is not a SemVer string",
         )
 
 

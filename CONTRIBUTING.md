@@ -90,16 +90,32 @@ Otherwise `terraform init` should be a no-op — the lockfile is the source of t
 
 ## Releases
 
-Releases are cut automatically by [release-please](https://github.com/googleapis/release-please)
-based on Conventional Commits. After each merge to `main`, release-please opens a
-"release-please: pending release" PR that bumps `lambda.__version__` (in
-`lambda/__init__.py`) and moves the `[Unreleased]` entries in `CHANGELOG.md`
-into a dated section.
+Releases are cut by the `.github/workflows/release.yml` workflow,
+dispatched manually. There is no automated release-on-merge.
 
-Merging that release PR cuts the tag (`vX.Y.Z`), creates the GitHub Release,
-and triggers `.github/workflows/release.yml` to build + push the
-`blitzlog-agent` container image and attach the Lambda zip as a release asset.
-A maintainer (not the agent) merges release-please's release PRs.
+The bump type is auto-detected from the conventional commits in
+`git log LAST_TAG..BUILD_REF` by
+[cocogitto](https://github.com/cocogitto/cocogitto) (a battle-hardened
+conventional-commits parser). The same workflow handles both shapes:
+
+- **PR-test path** (`gh workflow run release.yml --ref <branch-with-open-PR>`):
+  builds the `blitzlog-agent` image with tag `v{X}-pr{N}` (no `:latest`),
+  posts a PR comment summarizing the bump, and does not touch the source.
+  Source is NOT modified by this run.
+
+- **Release path** (`gh workflow run release.yml --ref main`):
+  bumps `lambda/version.py` + `version-manifest.json`, commits with
+  `[skip ci]`, pushes (with a fallback to a `release/vX.Y.Z-<ts>` branch +
+  `gh pr create` if direct push to `main` is rejected by branch protection),
+  creates the `vX.Y.Z` tag, pushes the image with `v{X}` + `:latest`, and
+  uploads `infra/blitzlog-lambda.zip` to the GitHub Release.
+
+Before any file is touched, the Detect step enforces an alignment invariant:
+the version literal in `lambda/version.py` must equal the version in the
+last `v*` tag. If they diverge, the workflow fails loudly. A misconfigured
+`cog.toml` (`tag_prefix` mismatch with the workflow's tag step, or
+`initial_tag` drift from the file) is caught at PR time by
+`tests/test_version.py::TestCogAlignment`.
 
 While the project is pre-1.0, `feat:` bumps the minor version (`0.1.0 → 0.2.0`)
 and `fix:` bumps the patch (`0.1.0 → 0.1.1`). The 1.0 cut is a deliberate
