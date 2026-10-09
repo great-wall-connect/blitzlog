@@ -106,9 +106,13 @@ jobs:
           #   The runner is `ubuntu-26.04-arm` (ARM64, glibc), so we
           #   download the `aarch64-unknown-linux-gnu` tarball.
           CLIFF_VERSION="2.14.2"
+          # The tarball's top-level directory is `git-cliff-${CLIFF_VERSION}/`,
+          # with the binary at `git-cliff-${CLIFF_VERSION}/git-cliff`. Use
+          # --strip-components=1 to drop the leading directory and extract
+          # `git-cliff` (plus the LICENSE files) directly into /usr/local/bin.
           curl -fsSL \
             "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz" \
-            | tar xz -C /usr/local/bin git-cliff
+            | tar -xz --strip-components=1 -C /usr/local/bin
           git-cliff --version
 
           # Mode: open PR on $BUILD_REF -> pr-test, else release.

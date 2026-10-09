@@ -264,6 +264,11 @@ class TestReleaseWorkflow(unittest.TestCase):
         - the URL targets gnu libc (Ubuntu uses glibc)
         - the URL DOES have a `v` prefix on the tag path (git-cliff
           tags use `v2.14.2`; without the `v` returns 404)
+        - the tar extract must use `--strip-components=1` (the
+          tarball's top-level directory is `git-cliff-${CLIFF_VERSION}/`,
+          so without the strip the binary lands at the wrong path
+          and the workflow fails with `tar: git-cliff: Not found in
+          archive`)
         - the CLIFF_VERSION variable is a deliberate pin (not
           `/latest/`) so the runner is hermetic
 
@@ -296,6 +301,16 @@ class TestReleaseWorkflow(unittest.TestCase):
             "from `releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-aarch64-unknown-linux-gnu.tar.gz` "
             "(version interpolated in the URL, `v` prefix on tag path, "
             "ARM64 arch, glibc).",
+        )
+        # The tar extract must drop the leading `git-cliff-${VERSION}/`
+        # directory; otherwise the binary lands at a wrong path and
+        # the workflow fails with `tar: git-cliff: Not found in archive`.
+        self.assertRegex(
+            collapsed,
+            r"tar [^\n]*?--strip-components=1[^\n]*?-C /usr/local/bin",
+            "release.yml's tar extract must use `--strip-components=1` "
+            "so the `git-cliff` binary lands at `/usr/local/bin/git-cliff` "
+            "(the tarball's top-level directory is `git-cliff-${VERSION}/`)",
         )
 
     def test_detect_step_uses_git_cliff_bumped_version(self):
