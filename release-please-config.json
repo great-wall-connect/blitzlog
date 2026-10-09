@@ -3,7 +3,7 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "packages": {
-    ".": {
+    "lambda/": {
       "release-type": "python",
       "version-file": "version.py"
     }

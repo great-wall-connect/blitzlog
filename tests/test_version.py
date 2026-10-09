@@ -1,7 +1,7 @@
 """Regression guards for the SemVer version source of truth and the
 release-please config that owns it.
 
-These tests are static (string-level checks on version.py,
+These tests are static (string-level checks on lambda/version.py,
 lambda/_version.py, and release-please-config.json, plus import-level
 checks for ``__version__`` and ``get_version()``). They mirror
 tests/test_entrypoint_readiness.py's pattern: read a config file,
@@ -10,32 +10,36 @@ docker, no AWS.
 
 What this guards against:
 
-- ``version.__version__`` (the canonical release-please target)
+- ``lambda.version.__version__`` (the canonical release-please target)
   drifting away from the release-please seed.
-- release-please losing its ``version-file`` entry (so a bump no
-  longer edits ``version.py``).
+- release-please losing its ``version-file`` entry (so a bump no longer
+  edits ``lambda/version.py``).
 - release-please losing its pre-major bump flags (so a `feat:` on the
   0.x line jumps a published minor instead of releasing 1.x
   prematurely).
 - ``lambda._version.__version__`` falling out of sync with
-  ``version.__version__`` (re-export chain broken).
+  ``lambda.version.__version__`` (re-export chain broken).
 - ``get_version()`` and ``__version__`` falling out of sync.
 - ``lambda.__init__`` losing the ``__version__`` re-export, so callers
   that ``import lambda`` no longer see ``lambda.__version__``.
 - The ``null_resource.lambda_build`` filemd5 list in `lambda.tf` losing
-  `version.py`, so changing the version doesn't trigger a rebuild.
+  ``lambda/version.py``, so changing the version doesn't trigger a
+  rebuild.
+- A bare ``from version`` import in ``lambda/_version.py`` (which
+  fails at Lambda runtime because the zip's task root only contains
+  ``lambda/...`` — the actual error from the dev deployment that
+  prompted the lambda/ prefix move).
 """
 
 import json
 import re
-import sys
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAMBDA_INIT = REPO_ROOT / "lambda" / "__init__.py"
 LAMBDA_VERSION = REPO_ROOT / "lambda" / "_version.py"
-VERSION_PY = REPO_ROOT / "version.py"
+LAMBDA_VERSION_PY = REPO_ROOT / "lambda" / "version.py"
 LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
 RELEASE_PLEASE_CONFIG = REPO_ROOT / "release-please-config.json"
 RELEASE_PLEASE_MANIFEST = REPO_ROOT / ".release-please-manifest.json"
@@ -44,30 +48,24 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 class TestVersionSource(unittest.TestCase):
-    """The canonical version literal MUST live in ``version.py`` at the
-    repo root, where release-please's ``PythonFileWithVersion`` updater
-    preserves the file structure and only edits the
-    ``__version__ = "..."`` line. Earlier configs pointed at
-    ``lambda/_version.py`` (a non-standard path that release-please's
-    python release-type does not recognize, so it fell back to the
-    generic updater, which wiped the file on every bump — see #109).
+    """The canonical version literal MUST live in ``lambda/version.py``,
+    where release-please's ``PythonFileWithVersion`` updater preserves
+    the file structure and only edits the ``__version__ = "..."`` line.
+
+    Earlier configs pointed at a root-level ``version.py`` (a path the
+    zip build excludes — the runtime error from the dev deployment
+    that prompted this fix) or at ``lambda/_version.py`` (a non-standard
+    path that release-please's python release-type does not recognize,
+    so it fell back to the generic updater, which wiped the file on
+    every bump — see #109).
     """
 
     @classmethod
     def setUpClass(cls):
-        # Importing ``version`` requires the repo root on sys.path.
-        # The conftest adds ``lambda/`` and ``lambda/scripts/`` but not
-        # the repo root, so we add it here for the test process.
-        # (Lambda runtime: the zip's task root IS on sys.path, so
-        # ``from version import __version__`` works there without
-        # any conftest-style fixup.)
-        repo_root = str(REPO_ROOT)
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-        cls.version_text = VERSION_PY.read_text()
+        cls.version_text = LAMBDA_VERSION_PY.read_text()
 
     def test_version_is_semver_string(self):
-        """``version.__version__`` MUST match ^\\d+\\.\\d+\\.\\d+$.
+        """``lambda.version.__version__`` MUST match ^\\d+\\.\\d+\\.\\d+$.
 
         release-please will only edit it if it's a plain SemVer
         string; anything else (a tuple, a leading 'v', a PEP 440
@@ -80,7 +78,7 @@ class TestVersionSource(unittest.TestCase):
         )
         self.assertIsNotNone(
             m,
-            f"__version__ literal missing from {VERSION_PY}",
+            f"__version__ literal missing from {LAMBDA_VERSION_PY}",
         )
         self.assertRegex(
             m.group(1),
@@ -90,10 +88,10 @@ class TestVersionSource(unittest.TestCase):
 
 
 class TestLambdaVersion(unittest.TestCase):
-    """``lambda/_version.py`` re-exports from ``version.py`` and adds
-    a stable ``get_version()`` helper. The literal MUST NOT live in
-    ``_version.py`` itself — release-please only knows how to edit
-    the canonical version file (``version.py``); if the literal
+    """``lambda/_version.py`` re-exports from ``lambda.version`` and
+    adds a stable ``get_version()`` helper. The literal MUST NOT live
+    in ``_version.py`` itself — release-please only knows how to edit
+    the canonical version file (``lambda/version.py``); if the literal
     moved to ``_version.py``, the bump would no-op.
     """
 
@@ -111,20 +109,37 @@ class TestLambdaVersion(unittest.TestCase):
         cls.init_text = LAMBDA_INIT.read_text()
         cls.version_text = LAMBDA_VERSION.read_text()
 
-    def test_version_module_constant_present_in_version_module(self):
-        """``__version__`` re-export MUST live in ``lambda/_version.py``.
+    def test_version_module_uses_relative_import(self):
+        """``lambda/_version.py`` MUST prefer a relative import for ``__version__``.
 
-        release-please's ``version-file`` config points at the root
-        ``version.py``; ``_version.py`` re-exports that literal so
-        existing import paths (``lambda.__version__``,
-        ``from _version import __version__``) keep working. If the
-        re-export breaks, the handler's startup log and the test
-        mocks stop matching the manifest version.
+        The lambda zip task root only contains ``lambda/...`` (the
+        build does ``cp -r lambda/ build/``), so a bare
+        ``from version import __version__`` would fail at runtime
+        with ``ModuleNotFoundError: No module named 'version'`` —
+        the actual error that triggered this fix. The relative
+        ``from .version`` form resolves within the ``lambda`` package
+        regardless of what's on ``sys.path``.
+
+        The try/except ImportError fallback (a bare ``from version``
+        import) is for the test suite only, where pytest's
+        ``sys.modules`` isolation clears the package cache between
+        tests and ``_version`` gets re-imported as a top-level
+        module. The relative form works at runtime; the absolute
+        form keeps the tests working. The test pins the runtime
+        form as the primary path.
         """
-        self.assertRegex(
+        m = re.search(
+            r"(?m)^\s*from \.version import .*\b__version__\b",
             self.version_text,
-            r"(?m)^from version import .*\b__version__\b",
-            "lambda/_version.py must re-export __version__ from version.py",
+        )
+        self.assertIsNotNone(
+            m,
+            "lambda/_version.py must re-export __version__ via "
+            "`from .version` (relative import; bare `from version` fails "
+            "at lambda runtime). An absolute `from version` fallback is "
+            "allowed for test contexts where the module is loaded as a "
+            "top-level after pytest's sys.modules isolation, but the "
+            "runtime form must be the primary path.",
         )
 
     def test_get_version_helper_present(self):
@@ -174,19 +189,24 @@ class TestReleasePleaseConfig(unittest.TestCase):
     def setUpClass(cls):
         cls.config = json.loads(RELEASE_PLEASE_CONFIG.read_text())
         # In manifest mode the per-package settings live under
-        # `packages.{".": {...}}`; release-type / version-file /
+        # ``packages.{"<path>": {...}}``; release-type / version-file /
         # extra-files are scoped to the package entry. Top-level keys
         # still hold the bump flags and (deprecated) shared options.
-        cls.packages = cls.config.get("packages", {}).get(".", {})
+        # The package path is the ``lambda/`` directory (so
+        # release-please finds ``lambda/version.py`` as
+        # ``<path>/version.py`` — the file the python updater
+        # recognizes).
+        cls.packages = cls.config.get("packages", {}).get("lambda/", {})
 
     def test_release_type_is_python(self):
         """release-type MUST be `python` for the per-package entry.
 
-        With ``version-file: version.py`` at the repo root, only the
-        python release-type's ``PythonFileWithVersion`` updater is
-        used (preserves file structure, edits only the version line).
-        ``release-type: simple`` falls back to the generic updater
-        and wipes the file — see #109 for the failure mode.
+        With ``version-file: version.py`` in the ``lambda/`` package,
+        only the python release-type's ``PythonFileWithVersion``
+        updater is used (preserves file structure, edits only the
+        version line). ``release-type: simple`` falls back to the
+        generic updater and wipes the file — see #109 for the
+        failure mode.
         """
         self.assertEqual(
             self.packages.get("release-type"),
@@ -195,21 +215,25 @@ class TestReleasePleaseConfig(unittest.TestCase):
             "(simple mode wipes the version file on every bump)",
         )
 
-    def test_version_file_points_at_root(self):
-        """``version-file`` MUST point at ``version.py`` at the repo root.
+    def test_version_file_points_at_lambda_root(self):
+        """``version-file`` MUST be ``version.py`` (relative to the
+        package path ``lambda/``, so the literal target is
+        ``lambda/version.py``).
 
         The release-please Python file updater recognizes
         ``<prefix>/version.py`` (where prefix is the package path).
-        With ``packages.{".": {...}}`` and ``prefix = "."``, the
-        canonical file is ``./version.py``. ``lambda/_version.py``
-        does not match the Python updater's pattern; the generic
-        updater is then selected and the file is wiped (see #109).
+        With ``packages.{"lambda/": {...}}`` and ``prefix = "lambda/"``,
+        the canonical file is ``lambda/version.py`` — the file that
+        release-please's python updater edits in place. Keeping the
+        version literal in the zip requires the file to be inside
+        the package directory (the zip only contains ``lambda/...``,
+        not the repo root).
         """
         self.assertEqual(
             self.packages.get("version-file"),
             "version.py",
             "release-please per-package version-file must be 'version.py' "
-            "(a path that PythonFileWithVersion recognizes)",
+            "(a path that PythonFileWithVersion recognizes, inside the lambda/ package)",
         )
 
     def test_pre_major_minor_bump_is_enabled(self):
@@ -283,11 +307,12 @@ class TestReleasePleaseConfig(unittest.TestCase):
             f"{RELEASE_PLEASE_MANIFEST} must exist; see test_manifest_file_exists_and_is_json",
         )
         manifest = json.loads(RELEASE_PLEASE_MANIFEST.read_text())
-        # Single-package repo: the version lives under the "." key.
-        version = manifest.get(".")
+        # Single-package repo: the version lives under the "lambda/"
+        # key (the package path), not the root "." key.
+        version = manifest.get("lambda/")
         self.assertIsNotNone(
             version,
-            f"{RELEASE_PLEASE_MANIFEST} must declare a version under the '.' key",
+            f"{RELEASE_PLEASE_MANIFEST} must declare a version under the 'lambda/' key",
         )
         self.assertRegex(
             version,
@@ -312,7 +337,7 @@ class TestHandlerVersionLog(unittest.TestCase):
     def test_handler_imports_get_version(self):
         """handler.py MUST import get_version from _version."""
         self.assertRegex(
-            self.text,
+            (REPO_ROOT / "lambda" / "handler.py").read_text(),
             r"(?m)^from _version import .*\bget_version\b",
             "handler.py must import get_version from _version",
         )
@@ -320,33 +345,42 @@ class TestHandlerVersionLog(unittest.TestCase):
     def test_handler_logs_version_at_module_load(self):
         """handler.py MUST log the version at module load."""
         self.assertRegex(
-            self.text,
+            (REPO_ROOT / "lambda" / "handler.py").read_text(),
             r"logger\.info\(\s*[\"']blitzlog-agent %s[\"'],\s*get_version\(\)\s*\)",
             "handler.py must log blitzlog-agent <version> at module load",
         )
 
 
 class TestLambdaTfTriggersOnVersionChange(unittest.TestCase):
-    """The Terraform ``null_resource.lambda_build`` MUST watch ``_version.py``.
+    """The Terraform ``null_resource.lambda_build`` MUST watch the
+    canonical version file so a bump invalidates the ``null_resource``
+    and the Lambda zip gets rebuilt with the new version baked in.
 
-    Without a ``filemd5`` trigger on ``_version.py``, bumping the version
-    string won't invalidate the ``null_resource`` and the Lambda zip
-    won't be rebuilt with the new version baked in. (The function
-    ``lambda`` runtime never reads ``__version__`` at execution, but the
-    value is logged at module load — CloudWatch log correlation breaks
-    if the rebuild doesn't happen.)
+    The function ``lambda`` runtime never reads ``__version__`` at
+    execution, but the value is logged at module load — CloudWatch
+    log correlation breaks if the rebuild doesn't happen.
     """
 
     @classmethod
     def setUpClass(cls):
         cls.text = LAMBDA_TF.read_text()
 
-    def test_version_py_in_filemd5_triggers(self):
-        """lambda.tf MUST list ``_version.py`` in null_resource.lambda_build triggers."""
+    def test_lambda_version_py_in_filemd5_triggers(self):
+        """lambda.tf MUST list ``lambda/version.py`` in
+        ``null_resource.lambda_build`` triggers."""
         self.assertRegex(
             self.text,
-            r"version_py\s*=\s*filemd5\(.*lambda/_version\.py",
-            "lambda.tf must filemd5() _version.py in null_resource.lambda_build triggers",
+            r"version_py\s*=\s*filemd5\(.*lambda/version\.py",
+            "lambda.tf must filemd5() lambda/version.py in null_resource.lambda_build triggers",
+        )
+
+    def test_lambda_version_re_export_in_filemd5_triggers(self):
+        """lambda.tf MUST also list ``lambda/_version.py`` (the re-export
+        module) so changes to its body invalidate the zip too."""
+        self.assertRegex(
+            self.text,
+            r"lambda_version_py\s*=\s*filemd5\(.*lambda/_version\.py",
+            "lambda.tf must filemd5() lambda/_version.py in null_resource.lambda_build triggers",
         )
 
 
