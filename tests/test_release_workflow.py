@@ -13,6 +13,12 @@ What this guards against:
   ``MAJOR``) alongside ``vX.Y.Z`` and ``latest``. Rolling tags
   collide with the snok retention policy that prunes by digest.
 - ``release.yml`` losing its tag-push trigger.
+- ``docker-images.yml`` losing its ``workflow_dispatch`` block or
+  its ``packages: write`` permission — both are required for
+  ``gh workflow run docker-images.yml -f image_tag=<tag>`` to push
+  the agent image to GHCR (PR-test image path). release.yml covers
+  release publishing on tag pushes; the dispatcher here covers
+  ad-hoc PR image testing. Both publish paths coexist.
 - ``docker-images.yml`` regaining a ``push: branches: [main]`` build,
   which would publish the same SHA twice on merge (once via the PR
   path's no-push step and once via the new push path).
@@ -230,31 +236,65 @@ class TestDockerImagesWorkflow(unittest.TestCase):
             "docker-images.yml must not have a `push:` block with branches: [main]",
         )
 
-    def test_no_workflow_dispatch_trigger(self):
-        """docker-images.yml MUST NOT have a workflow_dispatch trigger.
+    def test_has_workflow_dispatch_trigger_with_image_tag_input(self):
+        """docker-images.yml MUST have a `workflow_dispatch` trigger
+        with an `image_tag` input.
 
-        Manual image builds are handled by release.yml (cut a tag) —
-        keeping a dispatch trigger here duplicates the publish
-        pathway.
+        Operators use the manual dispatcher to push an agent image
+        under a custom tag (e.g. ``pr-100-final``) so Packer can pull
+        it during a dev-AMI bake. release.yml's v*-tag path covers
+        release publishing; this dispatcher covers ad-hoc PR image
+        testing. Both publish paths coexist deliberately.
         """
-        self.assertNotIn(
+        self.assertIn(
             "workflow_dispatch",
             self.text,
-            "docker-images.yml must not have a workflow_dispatch trigger",
+            "docker-images.yml must have a workflow_dispatch trigger",
+        )
+        # Loose regex: anchors the `workflow_dispatch:` block to the
+        # presence of an `inputs:` block declaring `image_tag:`.
+        self.assertRegex(
+            self.text,
+            r"(?ms)^  workflow_dispatch:.*?inputs:.*?image_tag:",
+            "docker-images.yml's workflow_dispatch must declare an `image_tag` input",
         )
 
-    def test_no_packages_write_permission(self):
-        """docker-images.yml MUST NOT request packages: write.
+    def test_has_packages_write_permission(self):
+        """docker-images.yml MUST request `packages: write` so the
+        manual-dispatch step can push the agent image to GHCR.
 
-        The PR-only build never pushes to GHCR (push: false on the
-        docker/build-push-action step). Requesting packages: write
-        expands the blast radius of any token compromise for no
-        benefit.
+        Declared at workflow scope to keep the token scope consistent
+        across both the PR-only build (no push) and the dispatch
+        build (push). Belt-and-braces against someone tightening it
+        to `read` later and accidentally breaking the push path.
         """
-        self.assertNotRegex(
+        self.assertRegex(
             self.permissions_block,
             r"(?m)^\s+packages:\s+write\s*$",
-            "docker-images.yml must not request packages: write",
+            "docker-images.yml must request packages: write (needed for the manual-dispatch push)",
+        )
+
+    def test_manual_dispatch_logs_into_ghcr(self):
+        """docker-images.yml MUST log into GHCR on the non-PR path so
+        buildx can push to a private package.
+
+        Without a `docker/login-action` step ahead of the
+        manual-dispatch push, buildx falls back to anonymous auth and
+        GHCR returns 403 on the anonymous-token endpoint for packages
+        the workflow has never published. Run `37791630137` on
+        2026-10-08 failed exactly that way: ``failed to fetch
+        anonymous token ... 403 Forbidden``. This test pins the
+        login step back in so a future PR can't re-introduce the
+        regression. (`packages: write` alone is not enough — it
+        authorizes the post-build API calls, but the docker client
+        still needs an authenticated session to push.)
+        """
+        self.assertRegex(
+            self.text,
+            r"(?ms)^\s+- name: Login to GHCR\s*\n"
+            r"\s+if: github\.event_name != 'pull_request'\s*\n"
+            r"\s+uses: docker/login-action@v\d+",
+            "docker-images.yml must log into GHCR on the non-PR path (workflow_dispatch / push)",
         )
 
 
