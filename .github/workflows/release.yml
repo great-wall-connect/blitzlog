@@ -308,13 +308,13 @@ jobs:
             # PR mode -> dev env (PR images get baked into the dev AMI;
             # last-writer-wins on /blitzlog/dev/agent-ami-id-docker-ubuntu).
             BLITZLOG_ENV=dev
-            STT_BUCKET=blitzlog-dev-stt-models
+            STT_BUCKET=gwc-blitzlog-stt-models
             AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
             SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
           else
             # release mode -> prod env
             BLITZLOG_ENV=prod
-            STT_BUCKET=blitzlog-prod-stt-models
+            STT_BUCKET=gwc-blitzlog-stt-models
             AGENT_IMAGE_TAG="v${NEW_VERSION}"
             SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
           fi
