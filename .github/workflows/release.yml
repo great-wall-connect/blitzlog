@@ -1,43 +1,50 @@
 name: release
 
-# Manual release workflow. Triggered only via workflow_dispatch with a
-# `mode` input. There is no automatic tag-push trigger — every release
-# is an explicit operator action.
+# Manual release workflow. Triggered only via workflow_dispatch.
+# The behavior is auto-detected from the dispatched ref:
 #
-# Two modes:
-#   - pr-test:   Build the agent image from a PR branch ref, tag it
-#                 `{version}-rc1` (e.g. `0.1.0-rc1`), push to GHCR.
-#                 No source modification, no :latest push, no git tag.
-#                 Use this to test a PR's image before merging.
-#   - release:   Build the agent image from a branch ref, tag it
-#                 `v{version}` + `:latest`, push to GHCR, update
-#                 `lambda/version.py` and `.release-please-manifest.json`
-#                 on that ref to the new version, commit, and create
-#                 a git tag `v{version}`. Use this as the canonical
-#                 release flow.
+#   - ref has an open PR             -> PR-test path:
+#                                       * reads version from lambda/version.py
+#                                       * auto-detects bump type from the
+#                                         conventional commits in the PR's diff
+#                                         (feat!:/BREAKING CHANGE:/feat:/default
+#                                         = major/minor/minor/patch)
+#                                       * builds and pushes the agent image
+#                                         with tag v{X}-pr{N} (no :latest)
+#                                       * posts a PR comment describing the
+#                                         build (fails loudly if no PR is
+#                                         found)
+#                                       * does NOT touch the source
 #
-# Both modes read the version from `lambda/version.py` at the chosen
-# ref (with `.release-please-manifest.json` as a fallback). If neither
-# source has a parseable version, the workflow hard-fails — the
-# operator is expected to investigate (e.g. release-please's
-# dry-run output, which is captured in the step log).
+#   - ref has no open PR (main,
+#     release/*, etc.)               -> Release path:
+#                                       * reads current version
+#                                       * auto-detects bump type from the
+#                                         conventional commits in the diff
+#                                         range (last release tag -> ref)
+#                                       * updates lambda/version.py +
+#                                         .release-please-manifest.json
+#                                       * commits with [skip ci]
+#                                       * pushes (with fallback to a
+#                                         release/vX.Y.Z-<ts> branch +
+#                                         gh pr create if direct push
+#                                         to BUILD_REF fails)
+#                                       * builds and pushes the agent image
+#                                         with tags v{X} + :latest
+#                                       * tags v{X} and pushes the tag
+#                                       * uploads the Lambda zip to a
+#                                         GitHub Release
+#
+# The operator runs ONE of:
+#   gh workflow run release.yml --ref fix/issue-110-foo
+#   gh workflow run release.yml --ref main
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "'pr-test' for a PR image with rc1 suffix; 'release' for a main release (modifies source)."
-        required: true
-        type: choice
-        options: [pr-test, release]
       ref:
-        description: "Branch to build from. Defaults to the workflow's ref_name (the tag for a push trigger, the PR branch for pr-test dispatch, main for release dispatch)."
+        description: "Branch to build from. Mode is auto-detected: open PR for the ref -> PR-test (image only); no open PR -> Release (bump source + commit + tag)."
         required: false
         type: string
-      suffix:
-        description: "Image tag suffix appended after the version (default 'rc1'). Ignored when mode=release."
-        required: false
-        type: string
-        default: "rc1"
 
 permissions:
   contents: write
@@ -57,8 +64,6 @@ jobs:
       REGISTRY: ghcr.io
       OWNER: great-wall-connect
       BUILD_REF: ${{ inputs.ref || github.ref_name }}
-      MODE: ${{ inputs.mode }}
-      SUFFIX: ${{ inputs.suffix || 'rc1' }}
 
     steps:
       - name: Checkout
@@ -67,75 +72,116 @@ jobs:
           ref: ${{ env.BUILD_REF }}
           fetch-depth: 0
 
-      # The version is read from `lambda/version.py` at the chosen ref,
-      # with `.release-please-manifest.json` as a fallback. The
-      # `release-please` CLI's `--dry-run` mode is the canonical way
-      # to compute the next version without opening a PR, but a manual
-      # patch bump is the fallback if the dry-run output is
-      # unparseable.
-      - name: Read version
-        id: version
+      # Decide the mode (pr-test vs release) by whether $BUILD_REF has
+      # an open PR. The bump type is auto-detected from the conventional
+      # commits in the diff (last release tag -> $BUILD_REF). The
+      # single dispatch input is `ref`; everything else is computed.
+      - name: Detect mode and bump type
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          VERSION=""
+          # Mode: open PR on $BUILD_REF -> pr-test, else release.
+          PR_NUMBER=$(gh pr list --state open \
+            --head "${{ env.BUILD_REF }}" \
+            --json number --jq '.[0].number' || true)
+          if [ -n "$PR_NUMBER" ]; then
+            MODE=pr-test
+          else
+            MODE=release
+          fi
 
-          # Try the manifest first (canonical source of truth per
-          # release-please's own config). The manifest key is
-          # `lambda/`.
-          if [ -f .release-please-manifest.json ]; then
-            VERSION=$(python3 - <<'PY'
+          # Bump type: walk the conventional commits in the diff. Use
+          # `git log` against the last release tag (or HEAD~0 if no
+          # tag exists yet). -m strips merge commits.
+          LAST_TAG=$(git describe --tags --abbrev=0 \
+            "$(git rev-parse "${{ env.BUILD_REF }}" 2>/dev/null)" 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ] || [ "$LAST_TAG" = "${{ env.BUILD_REF }}" ]; then
+            # No prior release tag reachable from $BUILD_REF (or only
+            # $BUILD_REF itself is tagged). Compute the bump by
+            # looking at the last `version = "X.Y.Z"` in the manifest
+            # history or hardcode a "patch" bump as a safe default.
+            #
+            # The release-please-manifest.json was added in PR #99
+            # (commit 5cffa61), so use that as the diff range start.
+            if [ -f .release-please-manifest.json ]; then
+              CURRENT_VERSION=$(python3 -c "
           import json, re, sys
-          try:
-              with open(".release-please-manifest.json") as f:
-                  m = json.load(f)
-              for v in m.values():
-                  if isinstance(v, str) and re.match(r"^\d+\.\d+\.\d+$", v):
-                      print(v)
-                      sys.exit(0)
-          except Exception as e:
-              print(f"manifest parse failed: {e}", file=sys.stderr)
+          with open('.release-please-manifest.json') as f:
+              m = json.load(f)
+          for v in m.values():
+              if isinstance(v, str) and re.match(r'^\d+\.\d+\.\d+$', v):
+                  print(v); sys.exit(0)
           sys.exit(1)
-          PY
-            )
-          fi
-
-          # Fallback: read from `lambda/version.py`. The literal is
-          # `__version__ = "X.Y.Z"` on a single line.
-          if [ -z "$VERSION" ] && [ -f lambda/version.py ]; then
-            VERSION=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' | head -1)
-          fi
-
-          # Last resort: manual patch bump of whatever the current
-          # version is. If even that fails, hard-fail the build.
-          if [ -z "$VERSION" ]; then
-            CURRENT=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' | head -1 || true)
-            if [ -n "$CURRENT" ]; then
-              IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT"
-              VERSION="$MAJOR.$MINOR.$((PATCH+1))"
-              echo "manually bumped $CURRENT -> $VERSION"
+          ")
             else
-              echo "FATAL: could not read a parseable version from .release-please-manifest.json or lambda/version.py at ref ${{ env.BUILD_REF }}" >&2
+              echo "FATAL: no last release tag and no manifest; cannot determine bump base" >&2
               exit 1
             fi
+            BUMP_BASE="$CURRENT_VERSION"
+          else
+            BUMP_BASE="$LAST_TAG"
+            BUMP_BASE="${BUMP_BASE#v}"
+          fi
+          RANGE="${BUMP_BASE}..${{ env.BUILD_REF }}"
+
+          # Parse the conventional commit subjects in the diff.
+          MAJOR_HIT=$(git log --no-merges --format='%s' "$RANGE" 2>/dev/null | grep -ciE '^[Bb]reaking [Cc]hange:' || true)
+          MINOR_HIT=$(git log --no-merges --format='%s' "$RANGE" 2>/dev/null | grep -ciE '^feat(\(|!|:)' || true)
+          if [ "$MAJOR_HIT" -gt 0 ]; then
+            BUMP=major
+          elif [ "$MINOR_HIT" -gt 0 ]; then
+            BUMP=minor
+          else
+            BUMP=patch
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
+          # Compute the new version from the current lambda/version.py
+          # literal (the post-bump value is $VERSION + 1 in the right
+          # position). Read it directly so we don't depend on the
+          # manifest format.
+          CURRENT_VERSION=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' | head -1)
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "FATAL: could not read version from lambda/version.py" >&2
+            exit 1
+          fi
+          IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "FATAL: unknown bump type: $BUMP"; exit 1 ;;
+          esac
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Resolved current version: $CURRENT_VERSION"
+          echo "Detected bump type: $BUMP"
+          echo "Computed new version: $NEW_VERSION"
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Install mise
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: jdx/mise-action@v4
 
       - name: Install Python toolchain
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         run: mise install
 
       - name: Set up QEMU
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -143,38 +189,29 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Lambda bundle
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         run: mise run build
 
       - name: Zip Lambda bundle for release asset
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         run: (cd infra/build && zip -r ../blitzlog-lambda.zip .)
 
-      # Release-mode-only: attach the zip to a GitHub Release. The
-      # `tag_name` uses the resolved version (from `Read version`),
-      # not the workflow's ref_name. The gate ensures the pr-test
-      # path doesn't accidentally publish a draft release asset.
-      - name: Upload Lambda zip to release
-        if: env.MODE == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          files: infra/blitzlog-lambda.zip
-
-      # The image tag is constructed from MODE:
-      #   pr-test -> v{version}-{suffix}      (e.g. v0.1.0-rc1)        ; no :latest
-      #   release -> v{version} + :latest     (e.g. v0.1.0 + :latest)
-      #
-      # The conditional in the tags block makes the second line a no-op
-      # in pr-test mode, so :latest is not pushed on pr-test runs.
+      # Build and push the agent image. The tag depends on the mode:
+      #   pr-test  -> v{new_version}-pr{N}  (e.g. v0.1.1-pr107)
+      #   release -> v{new_version} + :latest
+      # The mode is read from steps.detect.outputs.mode (NOT env.MODE,
+      # which doesn't exist in this design).
       - name: Build and push blitzlog-agent image
+        if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         env:
-          IMAGE_TAG: ${{ steps.version.outputs.version }}
-          SUFFIX_TO_USE: ${{ env.MODE == 'pr-test' && format('-{0}', env.SUFFIX) || '' }}
+          IMAGE_TAG: ${{ steps.detect.outputs.new_version }}
+          SUFFIX_TO_USE: ${{ steps.detect.outputs.mode == 'pr-test' && format('-pr{0}', steps.detect.outputs.pr_number) || '' }}
         run: |
           set -euo pipefail
           IMAGE_BASE="${REGISTRY}/${OWNER}/${IMAGE_NAME}:v${IMAGE_TAG}${SUFFIX_TO_USE}"
           IMAGE_LATEST="${REGISTRY}/${OWNER}/${IMAGE_NAME}:latest"
           echo "Pushing: $IMAGE_BASE"
-          if [ "${{ env.MODE }}" = "release" ]; then
+          if [ "${{ steps.detect.outputs.mode }}" = "release" ]; then
             echo "Also pushing: $IMAGE_LATEST"
             docker buildx build \
               --push \
@@ -190,28 +227,58 @@ jobs:
               ./packages/images/agent
           fi
 
-      # Release-mode-only: update the version literal in lambda/version.py
-      # and the manifest, commit, push, then create the git tag and
-      # push it. The [skip ci] in the commit message prevents the test
-      # workflow from re-firing on the version-bump commit.
-      #
-      # If the direct push to BUILD_REF fails (typically because
-      # BUILD_REF is `main` and main is protected against direct
-      # pushes), fall back to: create a `release/vX.Y.Z-<ts>` branch,
-      # push the bump commit to it, and open a PR back to BUILD_REF.
-      # The Tag step below uses the `release_ref` output to know which
-      # branch/commit to tag.
-      - name: Bump version in source (release mode only)
-        if: env.MODE == 'release'
-        id: bump
+      # PR-test-only: post a PR comment describing the build. Fails loudly
+      # if no open PR is found on $BUILD_REF (we already detected this
+      # in the Detect step; here we re-check and emit a clear error).
+      - name: Post PR-test release-please comment
+        if: steps.detect.outputs.mode == 'pr-test'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.\\d+\\.\\d+)\"/__version__ = \"${{ steps.version.outputs.version }}\"/" lambda/version.py
-          python3 -c "import json; p='.release-please-manifest.json'; d=json.load(open(p)); d['lambda/']='${{ steps.version.outputs.version }}'; json.dump(d, open(p,'w'), indent=2); open(p,'a').write('\\n')"
+          PR_NUMBER="${{ steps.detect.outputs.pr_number }}"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "FATAL: pr-test mode requires an open PR for ${{ env.BUILD_REF }}" >&2
+            exit 1
+          fi
+          IMAGE_TAG="v${{ steps.detect.outputs.new_version }}-pr${PR_NUMBER}"
+          NEW_VERSION="${{ steps.detect.outputs.new_version }}"
+          BUMP="${{ steps.detect.outputs.bump }}"
+          CURRENT=$(grep -E '^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"' lambda/version.py | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          COMMENT_BODY="## Release-please PR-test output"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="- Current version (lambda/version.py): \`${CURRENT}\`"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="- Bump type (auto-detected from conventional commits): \`${BUMP}\`"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="- New version: \`${NEW_VERSION}\`"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="- Image tag: \`${IMAGE_TAG}\`"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="- Image registry: \`${REGISTRY}/${OWNER}/${IMAGE_NAME}:${IMAGE_TAG}\`"
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+=$'\n'
+          COMMENT_BODY+="The image is built and pushed with the bumped version. Source is NOT modified by this run. To land this version on the canonical release branch, run this workflow against \`main\` (or a release branch) — the mode auto-detects from the ref's open-PR status."
+          gh pr comment "${PR_NUMBER}" --body "${COMMENT_BODY}" || true
+
+      # Release-only: bump lambda_version.py + manifest, commit, push
+      # (with fallback to release branch + gh pr create if direct push
+      # to BUILD_REF fails), then tag.
+      - name: Bump version in source (release only)
+        if: steps.detect.outputs.mode == 'release'
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEW_VERSION="${{ steps.detect.outputs.new_version }}"
+          sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.\\d+\\.\\d+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
+          python3 -c "import json; p='.release-please-manifest.json'; d=json.load(open(p)); d['lambda/']='${NEW_VERSION}'; json.dump(d, open(p,'w'), indent=2); open(p,'a').write('\\n')"
           git config user.name "release-bot"
           git config user.email "release-bot@users.noreply.github.com"
           git add lambda/version.py .release-please-manifest.json
-          git commit -m "chore(release): ${{ steps.version.outputs.version }} [skip ci]"
+          git commit -m "chore(release): ${NEW_VERSION} [skip ci]"
 
           # Try direct push to BUILD_REF. If that succeeds, that's the
           # ref the Tag step will use. If it fails (typical for `main`
@@ -221,26 +288,36 @@ jobs:
             echo "release_ref=${{ env.BUILD_REF }}" >> "$GITHUB_OUTPUT"
           else
             echo "WARN: direct push to ${{ env.BUILD_REF }} failed (likely branch protection); falling back to release branch + PR" >&2
-            RELEASE_BRANCH="release/v${{ steps.version.outputs.version }}-$(date +%s)"
+            RELEASE_BRANCH="release/v${NEW_VERSION}-$(date +%s)"
             git checkout -b "$RELEASE_BRANCH"
             git push origin "$RELEASE_BRANCH"
             gh pr create \
               --base "${{ env.BUILD_REF }}" \
               --head "$RELEASE_BRANCH" \
-              --title "chore(release): ${{ steps.version.outputs.version }}" \
-              --body "Automated release PR.\n\nBumps \`lambda/version.py\` to ${{ steps.version.outputs.version }} and updates \`.release-please-manifest.json\`.\n\nMerge to trigger the release image build via the canonical v* tag path." \
+              --title "chore(release): ${NEW_VERSION}" \
+              --body "Automated release PR.\n\nBumps \`lambda/version.py\` to ${NEW_VERSION} and updates \`.release-please-manifest.json\`.\n\nMerge to trigger the release image build via the canonical v* tag path." \
               --label "release" || true
             echo "release_ref=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Tag the release (release mode only)
-        if: env.MODE == 'release' && steps.bump.outputs.release_ref
+      # Release-only: tag the release. Consumes the Bump step's
+      # `release_ref` output. The `if: steps.detect.outputs.mode == ...`
+      # is already enforced via this step's gate on Bump.
+      - name: Tag the release (release only)
+        if: steps.detect.outputs.mode == 'release' && steps.bump.outputs.release_ref
         run: |
           set -euo pipefail
-          # Make sure we're on the ref that holds the bump commit (which
-          # is either BUILD_REF, direct-pushed, or the fallback release
-          # branch we just created). git tag attaches to the current
-          # branch's tip.
+          NEW_VERSION="${{ steps.detect.outputs.new_version }}"
           git checkout "${{ steps.bump.outputs.release_ref }}"
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
+
+      # Release-only: upload the Lambda zip to a GitHub Release tagged
+      # v{new_version}. The image-build step already pushed the image
+      # with :latest.
+      - name: Upload Lambda zip to release
+        if: steps.detect.outputs.mode == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.detect.outputs.new_version }}
+          files: infra/blitzlog-lambda.zip

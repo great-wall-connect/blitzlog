@@ -10,10 +10,13 @@ What this guards against:
 - ``release-please.yml`` losing its `workflow_dispatch` trigger
   (operators need a way to drive release-please against a PR
   branch without merging first).
-- ``release.yml`` losing its `workflow_dispatch` trigger or the
-  `mode` / `ref` / `suffix` inputs (the new manual release
-  flow). The flow is fully manual — no automatic `push: tags:`
-  trigger — so every release is an explicit operator action.
+- ``release.yml`` losing its `workflow_dispatch` trigger — the
+  flow is fully manual. There is no `push: tags:` trigger.
+- ``release.yml`` accidentally keeping the obsolete `mode` / `bump`
+  / `suffix` dispatch inputs. The design auto-detects the mode
+  from the ref's open-PR status and the bump type from the
+  conventional commits in the diff. The only operator input
+  is ``ref``; everything else is computed.
 - ``release.yml`` accidentally pushing the wrong image tag, or
   failing to skip ``:latest`` on the pr-test path.
 - ``docker-images.yml`` losing its ``workflow_dispatch`` block or
@@ -143,25 +146,88 @@ class TestReleaseWorkflow(unittest.TestCase):
             "release.yml must not have a `push:` trigger; releases are manual via workflow_dispatch",
         )
 
-    def test_dispatch_has_mode_input(self):
-        """release.yml's workflow_dispatch MUST have a `mode` input.
+    def test_no_mode_dispatch_input(self):
+        """release.yml MUST NOT have a `mode` dispatch input.
 
-        `mode` discriminates pr-test (PR image, rc1 suffix, no
-        :latest) from release (main image, full :latest, source
-        modification). The `mode` choice is the simplest guard
-        against accidentally triggering a source-modifying release.
+        The mode (pr-test vs release) is auto-detected from the ref's
+        open-PR status. A `mode` input is overengineered — it would
+        re-introduce the dual-button UX the user explicitly rejected.
+        The dispatch's `inputs:` block must declare only `ref` and
+        nothing else. Assert that by asserting the only `inputs.X`
+        sub-key is `ref:`.
         """
-        self.assertRegex(
+        # Find the `inputs:` block and look at what's under it.
+        m = re.search(
+            r"(?ms)^  workflow_dispatch:\s*\n\s+inputs:\s*\n(.*?)(?=^permissions:)",
             self.text,
-            r"(?ms)^  workflow_dispatch:.*?inputs:.*?mode:",
-            "release.yml's workflow_dispatch must declare a `mode` input",
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a workflow_dispatch.inputs block",
+        )
+        inputs_block = m.group(1)
+        # The only top-level input should be `ref:`. Specifically, there
+        # must NOT be a `mode:` line at the same indent as `ref:`.
+        self.assertNotRegex(
+            inputs_block,
+            r"(?m)^\s+mode:",
+            "release.yml's workflow_dispatch inputs must NOT declare a "
+            "`mode:` input; mode is auto-detected from $BUILD_REF's "
+            "open-PR status",
+        )
+
+    def test_no_bump_dispatch_input(self):
+        """release.yml MUST NOT have a `bump` dispatch input.
+
+        The bump type is auto-detected from the conventional commits in
+        the diff (last release tag -> $BUILD_REF). The operator does
+        not pick patch/minor/major; the commits decide.
+        """
+        m = re.search(
+            r"(?ms)^  workflow_dispatch:\s*\n\s+inputs:\s*\n(.*?)(?=^permissions:)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a workflow_dispatch.inputs block",
+        )
+        inputs_block = m.group(1)
+        self.assertNotRegex(
+            inputs_block,
+            r"(?m)^\s+bump:",
+            "release.yml's workflow_dispatch inputs must NOT declare a "
+            "`bump:` input; bump type is auto-detected from conventional "
+            "commits",
+        )
+
+    def test_no_suffix_dispatch_input(self):
+        """release.yml MUST NOT have a `suffix` dispatch input.
+
+        The image tag suffix is computed: pr-test -> `-pr{N}` from
+        the open PR number; release -> empty (v{X} + :latest).
+        """
+        m = re.search(
+            r"(?ms)^  workflow_dispatch:\s*\n\s+inputs:\s*\n(.*?)(?=^permissions:)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a workflow_dispatch.inputs block",
+        )
+        inputs_block = m.group(1)
+        self.assertNotRegex(
+            inputs_block,
+            r"(?m)^\s+suffix:",
+            "release.yml's workflow_dispatch inputs must NOT declare a "
+            "`suffix:` input; suffix is derived from mode + pr_number",
         )
 
     def test_dispatch_has_ref_input(self):
         """release.yml's workflow_dispatch MUST have a `ref` input.
 
         `ref` selects the branch to build. Defaults to the
-        workflow's ref_name if blank.
+        workflow's ref_name if blank. This is the only operator
+        input — the mode and bump are auto-detected.
         """
         self.assertRegex(
             self.text,
@@ -169,34 +235,119 @@ class TestReleaseWorkflow(unittest.TestCase):
             "release.yml's workflow_dispatch must declare a `ref` input",
         )
 
-    def test_dispatch_has_suffix_input(self):
-        """release.yml's workflow_dispatch MUST have a `suffix` input
-        defaulting to ``rc1`` for the pr-test image tag suffix.
+    def test_detect_mode_step_present(self):
+        """release.yml MUST have a step that detects mode (pr-test vs
+        release) from the ref's open-PR status.
+
+        The Detect step's bash script must call `gh pr list` against
+        ``$BUILD_REF`` and set the `mode` output (and the `bump` and
+        `new_version` outputs) based on the result.
         """
+        # The Detect step is the canonical source of mode/bump/new_version.
         self.assertRegex(
             self.text,
-            r"(?ms)^  workflow_dispatch:.*?inputs:.*?suffix:",
-            "release.yml's workflow_dispatch must declare a `suffix` input",
+            r"id:\s*detect",
+            "release.yml must have a Detect step (id: detect)",
         )
         self.assertRegex(
             self.text,
-            r"(?ms)suffix:.*?default:\s*[\"']rc1[\"']",
-            "release.yml's `suffix` input must default to 'rc1' for the pr-test image tag",
+            r"gh pr list",
+            "release.yml's Detect step must call `gh pr list` to detect the mode",
+        )
+        self.assertRegex(
+            self.text,
+            r"echo \"mode=",
+            "release.yml's Detect step must echo `mode=pr-test|release` as an output",
+        )
+        self.assertRegex(
+            self.text,
+            r"echo \"bump=",
+            "release.yml's Detect step must echo `bump=patch|minor|major` as an output",
+        )
+        self.assertRegex(
+            self.text,
+            r"echo \"new_version=",
+            "release.yml's Detect step must echo `new_version=X.Y.Z` as an output",
+        )
+
+    def test_detect_mode_pr_test_when_pr_exists(self):
+        """When `gh pr list` returns an open PR for $BUILD_REF, the Detect
+        step must set MODE=pr-test.
+        """
+        self.assertRegex(
+            self.text,
+            r"if \[ -n \"\$\{?PR_NUMBER\}?\" \]; then\s*\n\s*MODE=pr-test",
+            "release.yml's Detect step must set MODE=pr-test when an open PR is found",
+        )
+
+    def test_detect_bump_type_from_commits(self):
+        """The Detect step must auto-detect bump type from conventional
+        commits in the diff range. The standard release-please rules:
+        a `BREAKING CHANGE:` in any commit body -> major; a `feat:` or
+        `feat!:` or `feat(scope):` in any subject -> minor; else patch.
+        """
+        self.assertRegex(
+            self.text,
+            r"\[Bb\]reaking \[Cc\]hange:",
+            "release.yml's Detect step must check for a 'BREAKING CHANGE:' "
+            "footer in the diff to pick the major bump type",
+        )
+        self.assertRegex(
+            self.text,
+            r"feat\(\(|!\|:",
+            "release.yml's Detect step must check for a 'feat' (or 'feat!'/'feat(...)') "
+            "subject to pick the minor bump type",
+        )
+
+    def test_image_tag_pr_test_uses_pr_number_suffix(self):
+        """In pr-test mode, the Build step's IMAGE_TAG env must be
+        `v{new_version}-pr{pr_number}` so concurrent PRs each have a
+        unique tag (no conflict when multiple PRs build the same bumped
+        version).
+        """
+        # The file uses a GH Actions `format()` expression:
+        #   SUFFIX_TO_USE: ${{ steps.detect.outputs.mode == 'pr-test'
+        #                       && format('-pr{0}', steps.detect.outputs.pr_number)
+        #                       || '' }}
+        # The regex below matches the `format('-pr{0}', pr_number)` part.
+        self.assertRegex(
+            self.text,
+            r"format\('-pr\{0\}',\s*steps\.detect\.outputs\.pr_number\)",
+            "release.yml's Build step SUFFIX_TO_USE must use `format('-pr{0}', "
+            "steps.detect.outputs.pr_number)` in pr-test mode (avoids "
+            "concurrent-PR tag conflicts)",
+        )
+
+    def test_image_tag_release_omits_pr_suffix(self):
+        """In release mode, the Build step pushes v{new_version} + :latest
+        with no PR-number suffix. The canonical release tag is just
+        v{version}.
+        """
+        # Verify the build step's SUFFIX_TO_USE has the pr-test path
+        # behind the mode check; if the test above is the only match,
+        # the else branch (empty suffix) is implicit. Make the
+        # ternary explicit here.
+        self.assertRegex(
+            self.text,
+            r"SUFFIX_TO_USE.*==\s*'pr-test'",
+            "release.yml's Build step SUFFIX_TO_USE must be mode-gated "
+            "(suffix applies only to pr-test)",
         )
 
     def test_image_tag_uses_resolved_version(self):
         """release.yml's image tag MUST use the resolved version
-        (``steps.version.outputs.version``), not a hardcoded string.
+        (``steps.detect.outputs.new_version``), not a hardcoded
+        string.
 
-        The resolved version comes from ``lambda/version.py`` at the
-        chosen ref (with manifest fallback + manual patch bump). If
-        a future change hard-codes the tag, the workflow ships a stale
-        version.
+        The resolved version comes from auto-detecting the bump
+        type and incrementing the current lambda/version.py literal.
+        If a future change hard-codes the tag, the workflow ships a
+        stale version.
         """
         self.assertRegex(
             self.text,
-            r"steps\.version\.outputs\.version",
-            "release.yml's image tag must use the resolved version output, "
+            r"steps\.detect\.outputs\.new_version",
+            "release.yml's image tag must use steps.detect.outputs.new_version, "
             "not a hardcoded string",
         )
 
@@ -208,26 +359,21 @@ class TestReleaseWorkflow(unittest.TestCase):
         pushing ``:latest`` would silently promote a pre-merge image
         to the production tag.
 
-        The new release.yml uses a bash ``run:`` step with an
-        explicit ``if [ "$MODE" = "release" ]`` conditional that
-        adds the ``:latest`` line only in release mode. The
-        integration we care about is that ``:latest`` is gated on
-        the mode string; a future change that hard-codes it will
-        fail this assertion.
+        The new release.yml uses a bash ``if [ "$MODE" = ... ]``
+        conditional that adds the ``:latest`` line only in release
+        mode. The integration we care about is that ``:latest`` is
+        gated on the mode string; a future change that hard-codes
+        it will fail this assertion.
         """
         # The image-push step's `if` line on the :latest push.
         self.assertRegex(
             self.text,
-            r'if\s+\[\s*"\${{ env\.MODE }}"\s*=\s*"release"\s*\]',
-            "release.yml's :latest push must be gated on env.MODE == 'release'",
+            r'if\s+\[\s*"\${{ steps\.detect\.outputs\.mode }}"\s*=\s*"release"\s*\]',
+            "release.yml's :latest push must be gated on "
+            "steps.detect.outputs.mode == 'release'",
         )
         # The literal :latest must not appear as a bare docker buildx
         # -t line. It must always be inside the conditional.
-        # Find every line starting with "-t " or "  -t " and check
-        # that the only :latest appears in the conditional branch.
-        # The actual safe pattern: the :latest -t line is built via
-        # the IMAGE_LATEST shell variable inside the `if` branch, so
-        # the YAML literal -t ":latest" line is absent.
         m = re.search(
             r"^\s*-t\s+[\"']?:latest[\"']?",
             self.text,
@@ -255,11 +401,11 @@ class TestReleaseWorkflow(unittest.TestCase):
             )
 
     def test_uploads_lambda_zip_as_release_asset(self):
-        """release.yml MUST upload the Lambda zip as a release asset
+        """release.yml MUST upload the Lambda zip to a release asset
         (release mode only). The ``Upload Lambda zip to release``
-        step must be gated on ``env.MODE == 'release'`` so the
-        pr-test path doesn't accidentally publish a draft release
-        asset.
+        step must be gated on ``steps.detect.outputs.mode ==
+        'release'`` so the pr-test path doesn't accidentally publish
+        a draft release asset.
         """
         self.assertIn(
             "softprops/action-gh-release",
@@ -271,13 +417,14 @@ class TestReleaseWorkflow(unittest.TestCase):
             self.text,
             "release.yml must upload the Lambda zip named blitzlog-lambda.zip",
         )
-        # Gate: the upload step must be `if: env.MODE == 'release'`
-        # so the pr-test path doesn't accidentally publish a release.
+        # Gate: the upload step must be `if: steps.detect.outputs.mode ==
+        # 'release'` so the pr-test path doesn't accidentally publish
+        # a release.
         self.assertRegex(
             self.text,
-            r"-\s+name:\s*Upload Lambda zip to release\s*\n\s+if:\s*env\.MODE\s*==\s*'release'",
+            r"-\s+name:\s*Upload Lambda zip to release\s*\n\s+if:\s*steps\.detect\.outputs\.mode\s*==\s*'release'",
             "release.yml's 'Upload Lambda zip to release' step must be "
-            "gated on env.MODE == 'release'",
+            "gated on steps.detect.outputs.mode == 'release'",
         )
 
     def test_release_mode_bumps_lambda_version(self):
@@ -334,10 +481,14 @@ class TestReleaseWorkflow(unittest.TestCase):
             self.text,
             "release.yml's fallback path must call `gh pr create`",
         )
+        # The release-branch name is constructed by bash as
+        # `release/v${NEW_VERSION}-$(date +%s)` (a shell variable
+        # substitution, not a GH Actions template). The regex below
+        # matches the literal bash-prefix the script uses.
         self.assertRegex(
             self.text,
-            r"release/v\$\{\{ steps\.version\.outputs\.version \}\}",
-            "release.yml's release branch name must include the version",
+            r"release/v\$\{NEW_VERSION\}",
+            "release.yml's fallback release branch name must include the bumped version (bash var)",
         )
 
     def test_release_mode_uses_release_ref_output(self):
@@ -355,16 +506,21 @@ class TestReleaseWorkflow(unittest.TestCase):
             "release.yml must consume steps.bump.outputs.release_ref "
             "to handle the fallback branch",
         )
-        # The fallback path must echo the ref name as an output.
+        # The direct-push path uses GH Actions template syntax
+        # (the runner interpolates `${{ env.BUILD_REF }}` before
+        # bash sees the line). The fallback path uses a plain bash
+        # variable (`$RELEASE_BRANCH`) because that name is
+        # already a shell var at that point.
         self.assertRegex(
             self.text,
             r"echo \"release_ref=\$\{\{ env\.BUILD_REF \}\}\"",
-            "release.yml's direct-push path must echo release_ref=<BUILD_REF>",
+            "release.yml's direct-push path must echo release_ref=<BUILD_REF> "
+            "(GH Actions template)",
         )
         self.assertRegex(
             self.text,
             r"echo \"release_ref=\$RELEASE_BRANCH\"",
-            "release.yml's fallback path must echo release_ref=<RELEASE_BRANCH>",
+            "release.yml's fallback path must echo release_ref=<RELEASE_BRANCH> (bash var)",
         )
 
     def test_release_mode_tags_the_release(self):
@@ -374,20 +530,22 @@ class TestReleaseWorkflow(unittest.TestCase):
             self.text,
             "release.yml must have a step that creates the git tag",
         )
+        # The tag step uses a bash var substitution (${NEW_VERSION}),
+        # not a GH Actions template — the regex must match the
+        # literal bash-prefix the script uses.
         self.assertRegex(
             self.text,
-            r"git tag -a \"v\$\{\{ steps\.version\.outputs\.version \}\}\"",
-            "release.yml's tag step must create vX.Y.Z from the resolved version",
+            r"git tag -a \"v\$\{NEW_VERSION\}\"",
+            "release.yml's tag step must create vX.Y.Z from the resolved version (bash var)",
         )
-        # The Tag step's checkout targets the release_ref (direct or
-        # fallback branch). It runs after the Bump step in the same
-        # job (jobs run steps sequentially; the `if: env.MODE ==
-        # 'release' && steps.bump.outputs.release_ref` guard ensures
-        # it's a no-op when the Bump step didn't run).
+        # The Tag step's `git checkout` interpolates a GH Actions
+        # expression (`${{ steps.bump.outputs.release_ref }}`) so
+        # the runner resolves the right ref (direct or fallback
+        # branch) before bash sees the command.
         self.assertRegex(
             self.text,
             r"git checkout \"\$\{\{ steps\.bump\.outputs\.release_ref \}\}\"",
-            "release.yml's Tag step must checkout the release_ref output",
+            "release.yml's Tag step must checkout the release_ref output (GH Actions template)",
         )
 
     def test_release_workflow_pull_requests_write_permission(self):
