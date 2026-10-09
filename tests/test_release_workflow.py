@@ -343,6 +343,17 @@ class TestReleaseWorkflow(unittest.TestCase):
             "commits on stdout). The prior cocogitto 7.0.0 `--auto` "
             "flag did not handle BREAKING CHANGE: or `feat!:` correctly.",
         )
+        # git-cliff echoes the tag's prefix (so for tag `v0.1.1` it
+        # returns `v0.1.2`); the Detect step must strip the `v` so
+        # the SemVer regex below matches. Regression guard: a future
+        # refactor that drops the strip will fail the regex below.
+        self.assertRegex(
+            invocation,
+            r"sed ['\"]s/\^v//['\"]",
+            "Detect step must strip the `v` prefix from git-cliff's "
+            "`--bumped-version` output (git-cliff echoes the tag prefix; "
+            "without the strip, the SemVer regex below rejects the result)",
+        )
 
     def test_detect_step_fails_loudly_on_missing_tag(self):
         """If no v* tag is reachable from $BUILD_REF, the Detect step

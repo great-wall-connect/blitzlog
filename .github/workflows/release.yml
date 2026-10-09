@@ -138,11 +138,13 @@ jobs:
 
           # git-cliff's --bumped-version prints the next SemVer for
           # the unreleased commits (everything since the last v* tag)
-          # on stdout. We don't let git-cliff write to disk or create
-          # commits — the Bump step below does the file update + commit
-          # + tag explicitly so the workflow's behavior is fully
-          # visible and testable.
-          NEW_VERSION=$(git-cliff --bumped-version 2>/dev/null | tail -1)
+          # on stdout, with the same prefix as the previous tag
+          # (so for a `v0.1.1` tag, it returns `v0.1.2`). We don't
+          # let git-cliff write to disk or create commits — the Bump
+          # step below does the file update + commit + tag explicitly
+          # so the workflow's behavior is fully visible and testable.
+          # Strip the `v` prefix so the regex below is a plain SemVer.
+          NEW_VERSION=$(git-cliff --bumped-version 2>/dev/null | tail -1 | sed 's/^v//')
           if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "FATAL: git-cliff did not return a semver: '$NEW_VERSION'" >&2
             exit 1
