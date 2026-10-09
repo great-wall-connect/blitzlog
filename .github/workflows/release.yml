@@ -234,8 +234,7 @@ jobs:
           fi
 
       - name: Tag the release (release mode only)
-        if: env.MODE == 'release'
-        needs: bump
+        if: env.MODE == 'release' && steps.bump.outputs.release_ref
         run: |
           set -euo pipefail
           # Make sure we're on the ref that holds the bump commit (which

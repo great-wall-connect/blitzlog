@@ -379,13 +379,14 @@ class TestReleaseWorkflow(unittest.TestCase):
             r"git tag -a \"v\$\{\{ steps\.version\.outputs\.version \}\}\"",
             "release.yml's tag step must create vX.Y.Z from the resolved version",
         )
-        # The Tag step depends on the Bump step's output, and the
-        # checkout targets the release_ref (direct or fallback branch).
-        # `run: |` is YAML's multi-line bash literal; allow whitespace
-        # between the colon and the pipe.
+        # The Tag step's checkout targets the release_ref (direct or
+        # fallback branch). It runs after the Bump step in the same
+        # job (jobs run steps sequentially; the `if: env.MODE ==
+        # 'release' && steps.bump.outputs.release_ref` guard ensures
+        # it's a no-op when the Bump step didn't run).
         self.assertRegex(
             self.text,
-            r"needs:\s*bump[\s\S]*?run:\s*\|[\s\S]*?git checkout \"\$\{\{ steps\.bump\.outputs\.release_ref \}\}\"",
+            r"git checkout \"\$\{\{ steps\.bump\.outputs\.release_ref \}\}\"",
             "release.yml's Tag step must checkout the release_ref output",
         )
 
