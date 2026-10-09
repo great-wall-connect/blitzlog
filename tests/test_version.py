@@ -128,14 +128,28 @@ class TestReleasePleaseConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.config = json.loads(RELEASE_PLEASE_CONFIG.read_text())
+        # In manifest mode the per-package settings live under
+        # `packages.{".": {...}}`; release-type / version-file /
+        # extra-files are scoped to the package entry. Top-level keys
+        # still hold the bump flags and (deprecated) shared options.
+        cls.packages = cls.config.get("packages", {}).get(".", {})
 
-    def test_release_type_is_python(self):
-        """release-type MUST be python.
+    def test_release_type_is_simple(self):
+        """release-type MUST be `simple` for the per-package entry.
 
-        Drives the changelog section ordering and the bump logic. Switching
-        to `go` / `node` / etc. silently breaks the version parsing.
+        `release-type: python` (the historical choice) requires
+        pyproject.toml / setup.py and reads the version from there;
+        this repo has neither. `release-type: simple` is the only
+        mode that works with the current repo layout (manifest-mode
+        + `version-file`/`extra-files` pointing at
+        `lambda/_version.py`).
         """
-        self.assertEqual(self.config.get("release-type"), "python")
+        self.assertEqual(
+            self.packages.get("release-type"),
+            "simple",
+            "release-please per-package release-type must be 'simple' "
+            "(python mode requires pyproject.toml this repo doesn't have)",
+        )
 
     def test_extra_files_includes_lambda_version(self):
         """extra-files MUST list ``lambda/_version.py``.
@@ -143,13 +157,15 @@ class TestReleasePleaseConfig(unittest.TestCase):
         release-please only edits files explicitly listed here. Without
         this entry, the version string in ``lambda/_version.py`` is
         frozen forever and release-please opens release PRs with no
-        actual version bump.
+        actual version bump. In manifest mode this lives under
+        `packages.{".": { "extra-files": [...] }}` — looking at the
+        top-level field would always be empty.
         """
-        extra_files = self.config.get("extra-files", [])
+        extra_files = self.packages.get("extra-files", [])
         self.assertIn(
             "lambda/_version.py",
             extra_files,
-            "release-please extra-files missing lambda/_version.py",
+            "release-please per-package extra-files missing lambda/_version.py",
         )
 
     def test_pre_major_minor_bump_is_enabled(self):
