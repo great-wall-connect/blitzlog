@@ -564,6 +564,55 @@ class TestReleaseWorkflow(unittest.TestCase):
             "fallback `gh pr create` path in the Bump step)",
         )
 
+    def test_bump_step_sed_pattern_matches_digits(self):
+        """release.yml's Bump step updates lambda/version.py via sed. The
+        version literal is ``__version__ = "X.Y.Z"`` and the sed regex
+        must match the three numeric parts.
+
+        Regression guard: an earlier version used ``\\d+`` in the
+        pattern, which in GNU sed ERE matches a literal ``d``, not a
+        digit. The sed then silently no-op'd, ``git commit`` had
+        nothing to stage, and the Bump step exited 1 under
+        ``set -e``. The pattern must use POSIX character classes
+        (``[0-9]+``) instead.
+        """
+        # Pull the Bump step's `run:` block and inspect the sed line.
+        # The block is the one that contains the `sed -i -E` command.
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Bump version in source' step",
+        )
+        sed_line = next(
+            (ln for ln in m.group("body").splitlines() if "sed -i -E" in ln),
+            None,
+        )
+        self.assertIsNotNone(
+            sed_line,
+            "Bump step must contain a `sed -i -E` command that updates "
+            "lambda/version.py",
+        )
+        # Negative: the sed pattern must NOT use `\d` (matches literal d
+        # in GNU sed ERE, not a digit).
+        self.assertNotIn(
+            "\\d",
+            sed_line,
+            "release.yml's Bump-step sed must not use `\\d` in the "
+            "version regex — in GNU sed ERE, `\\d` matches a literal "
+            "`d`, not a digit. Use `[0-9]+` instead.",
+        )
+        # Positive: the sed pattern must use `[0-9]+` (POSIX class) for
+        # each of the three numeric parts.
+        self.assertIn(
+            "[0-9]+",
+            sed_line,
+            "release.yml's Bump-step sed must use `[0-9]+` for the "
+            "numeric parts of the version regex",
+        )
+
 
 class TestDockerImagesWorkflow(unittest.TestCase):
     @classmethod
