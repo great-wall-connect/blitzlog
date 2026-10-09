@@ -78,6 +78,7 @@ resource "aws_iam_role_policy" "packer_build" {
           "ec2:DescribeImages",
           "ec2:DescribeInstances",
           "ec2:DescribeSnapshots",
+          "ec2:DescribeRegions",
           "ec2:CreateTags",
           "ec2:DeleteTags",
           "ec2:RegisterImage",
