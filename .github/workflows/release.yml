@@ -277,8 +277,12 @@ jobs:
       - name: Install Packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: hashicorp/setup-packer@v2
+        # v2 of hashicorp/setup-packer renamed the input from
+        # `packer_version` (v1) to `version`. Passing the old name fails
+        # the step with "Unexpected input(s) 'packer_version', valid
+        # inputs are ['version']" before any Packer command runs.
         with:
-          packer_version: 1.16.1
+          version: 1.16.1
 
       - name: Configure AWS credentials (OIDC) for Packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
