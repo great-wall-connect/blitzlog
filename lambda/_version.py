@@ -1,22 +1,33 @@
-"""Single source of truth for the package's SemVer version.
+"""Re-export the package's SemVer version literal.
 
-`release-please` (release-please-config.json, extra-files) edits this
-file on every release PR. The constant is also re-exported from
-``lambda.__init__`` so callers that ``import lambda`` still see
-``lambda.__version__`` without needing to import the submodule by name
-(which is awkward: ``lambda`` is a reserved word and can't appear in
-``import`` statements).
+The literal lives in ``lambda/version.py`` so that release-please's
+``PythonFileWithVersion`` updater (with the manifest-mode config
+pointing at ``lambda/`` as the package path) edits it in place —
+preserving the file structure and only changing the version line.
+This module exposes the literal as ``__version__`` and ``get_version()``
+(the stable import surface for test mocks and the handler's startup
+log).
 
-Keep the literal in this file in sync with the ``version`` seed in
-release-please-config.json — they should always match between releases
-(release-please updates both atomically).
+The ``from .version`` form is a relative import that resolves
+within the ``lambda`` package, so it works at Lambda runtime where
+the zip's task root only contains ``lambda/...`` and the bare name
+``version`` is NOT on ``sys.path``. A bare ``from version``
+import would fail with ``ModuleNotFoundError: No module named
+'version'`` on Lambda — the runtime error from the dev deployment
+that prompted this fix.
 
-Module-level ``__version__`` is the contract; ``get_version()`` exists
-so callers (handler, tests, scripts) have a stable import surface and
-can mock the version in tests without touching the global.
+The ``except ImportError`` fallback lets the test suite (which
+loads ``_version`` as a top-level module after pytest's
+``sys.modules`` isolation clears the package cache) still find
+``lambda/version.py`` via the absolute name on ``sys.path`` (the
+conftest adds ``lambda/``). At runtime the relative form succeeds
+first and the absolute fallback is never hit.
 """
 
-__version__ = "0.1.0"
+try:
+    from .version import __version__
+except ImportError:
+    from version import __version__
 
 
 def get_version() -> str:
