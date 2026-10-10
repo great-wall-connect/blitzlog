@@ -1131,6 +1131,46 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "ignore_changes would mask intentional updates.",
             )
 
+    def test_value_precondition_fails_fast_on_null(self):
+        """Both SSM resources MUST have a ``lifecycle.precondition``
+        that fails the apply when ``local.env_values[env][leaf]`` is
+        null (i.e., the operator's per-env tfvars doesn't supply the
+        leaf AND there's no default in ``leaf_defaults``).
+
+        Without the precondition, the AWS provider errors mid-apply
+        with the cryptic "one of insecure_value, value, value_wo
+        must be specified" — the operator can't tell which SSM
+        parameter is at fault or where to fix it. The precondition
+        fires at plan time with an actionable message.
+        """
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertRegex(
+                body,
+                r"lifecycle\s*\{[^}]*precondition\s*\{[^}]*condition\s*=\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*null",
+                f"secrets.tf's {resource_name} must have a "
+                "`lifecycle { precondition { condition = local.env_values[...] != null } }` "
+                "so a missing per-env tfvars value fails at plan time with a clear error, "
+                "not mid-apply with the AWS provider's cryptic value-required message.",
+            )
+            # The error message must name the missing key and point
+            # at the per-env tfvars the operator needs to edit.
+            self.assertRegex(
+                body,
+                r"\$\{each\.value\.env\}/\$\{each\.value\.leaf\}\s+has no value",
+                f"secrets.tf's {resource_name} precondition error_message must "
+                "name the missing SSM parameter and tell the operator which per-env "
+                "tfvars to edit.",
+            )
+
     def test_parameter_names_match_ssm_layout(self):
         """The parameter names MUST be exactly
         ``/blitzlog/<env>/<leaf>`` so the deploy workflow's

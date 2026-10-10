@@ -141,6 +141,20 @@ resource "aws_ssm_parameter" "deploy_string" {
   type  = "String"
   value = local.env_values[each.value.env][each.value.leaf]
 
+  # Fail fast at plan time if a value resolved to null (the 5
+  # required keys have no default in `leaf_defaults`; if the
+  # operator's per-env tfvars doesn't supply them, the lookup
+  # yields `null` and the AWS provider otherwise errors with the
+  # cryptic "one of insecure_value, value, value_wo must be
+  # specified" mid-apply). The error message tells the operator
+  # exactly which key to add and where.
+  lifecycle {
+    precondition {
+      condition     = local.env_values[each.value.env][each.value.leaf] != null
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+    }
+  }
+
   tags = {
     Purpose     = "blitzlog-deploy-${each.value.env}"
     ManagedBy   = "blitzlog-bootstrap"
@@ -166,6 +180,16 @@ resource "aws_ssm_parameter" "deploy_secure" {
   type   = "SecureString"
   value  = local.env_values[each.value.env][each.value.leaf]
   key_id = "alias/aws/ssm"
+
+  # Same precondition as deploy_string — the AWS provider's
+  # mid-apply "value: one of ..." error doesn't tell the operator
+  # which key is missing or where to add it.
+  lifecycle {
+    precondition {
+      condition     = local.env_values[each.value.env][each.value.leaf] != null
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+    }
+  }
 
   tags = {
     Purpose     = "blitzlog-deploy-${each.value.env}"
