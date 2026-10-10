@@ -23,6 +23,13 @@ variable "tf_backend_bucket" {
   default     = "gwc-infra-tf-state"
 }
 
+# `local.regions` is declared in main.tf so it's shared between
+# the deploy and packer role policies. The deploy role is a
+# single role assumed by both dev and prod workflows; if the two
+# envs run in different regions, every IAM ARN in this file must
+# be issued for both regions. Each ARN is emitted once per
+# region via `for r in local.regions : ...`.
+
 # The shared `aws_caller_identity.current` and
 # `aws_iam_role.admin_sso` data sources live in
 # infra/bootstrap/data-sources.tf so the trust policy here
@@ -128,10 +135,12 @@ resource "aws_iam_role_policy" "deploy" {
           "s3:GetObject",
           "s3:HeadObject",
         ]
-        Resource = [
-          aws_s3_bucket.stt_models.arn,
-          "${aws_s3_bucket.stt_models.arn}/*",
-        ]
+        Resource = flatten([
+          for bucket in aws_s3_bucket.stt_models : [
+            bucket.arn,
+            "${bucket.arn}/*",
+          ]
+        ])
       },
       {
         # Lambda: create/update the blitzlog-<env>-handler function,
@@ -160,7 +169,10 @@ resource "aws_iam_role_policy" "deploy" {
           "lambda:RemovePermission",
           "lambda:GetPolicy",
         ]
-        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:blitzlog-*"
+        Resource = [
+          for r in local.regions :
+          "arn:aws:lambda:${r}:${data.aws_caller_identity.current.account_id}:function:blitzlog-*"
+        ]
       },
       {
         # Lambda: pass the execution role when creating/updating
@@ -271,18 +283,20 @@ resource "aws_iam_role_policy" "deploy" {
           "apigateway:DELETE",
           "apigateway:PUT",
         ]
-        Resource = [
-          "arn:aws:apigateway:${var.aws_region}::/apis",
-          "arn:aws:apigateway:${var.aws_region}::/apis/*",
-          "arn:aws:apigateway:${var.aws_region}::/integrations",
-          "arn:aws:apigateway:${var.aws_region}::/integrations/*",
-          "arn:aws:apigateway:${var.aws_region}::/routes",
-          "arn:aws:apigateway:${var.aws_region}::/routes/*",
-          "arn:aws:apigateway:${var.aws_region}::/deployments",
-          "arn:aws:apigateway:${var.aws_region}::/deployments/*",
-          "arn:aws:apigateway:${var.aws_region}::/stages",
-          "arn:aws:apigateway:${var.aws_region}::/stages/*",
-        ]
+        Resource = flatten([
+          for r in local.regions : [
+            "arn:aws:apigateway:${r}::/apis",
+            "arn:aws:apigateway:${r}::/apis/*",
+            "arn:aws:apigateway:${r}::/integrations",
+            "arn:aws:apigateway:${r}::/integrations/*",
+            "arn:aws:apigateway:${r}::/routes",
+            "arn:aws:apigateway:${r}::/routes/*",
+            "arn:aws:apigateway:${r}::/deployments",
+            "arn:aws:apigateway:${r}::/deployments/*",
+            "arn:aws:apigateway:${r}::/stages",
+            "arn:aws:apigateway:${r}::/stages/*",
+          ]
+        ])
       },
       {
         # SQS: the blitzlog-<env>-lambda-dlq. The Lambda pushes
@@ -301,7 +315,10 @@ resource "aws_iam_role_policy" "deploy" {
           "sqs:TagQueue",
           "sqs:UntagQueue",
         ]
-        Resource = "arn:aws:sqs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:blitzlog-*-lambda-dlq"
+        Resource = [
+          for r in local.regions :
+          "arn:aws:sqs:${r}:${data.aws_caller_identity.current.account_id}:blitzlog-*-lambda-dlq"
+        ]
       },
       {
         # SNS: blitzlog-<env>-alerts topic + email subscription.
@@ -320,10 +337,12 @@ resource "aws_iam_role_policy" "deploy" {
           "sns:TagResource",
           "sns:UntagResource",
         ]
-        Resource = [
-          "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts",
-          "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts:*",
-        ]
+        Resource = flatten([
+          for r in local.regions : [
+            "arn:aws:sns:${r}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts",
+            "arn:aws:sns:${r}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts:*",
+          ]
+        ])
       },
       {
         # CloudWatch: the blitzlog-<env>-lambda-errors alarm and
@@ -342,7 +361,8 @@ resource "aws_iam_role_policy" "deploy" {
           "cloudwatch:UntagResource",
         ]
         Resource = [
-          "arn:aws:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:blitzlog-*-lambda-errors",
+          for r in local.regions :
+          "arn:aws:cloudwatch:${r}:${data.aws_caller_identity.current.account_id}:alarm:blitzlog-*-lambda-errors"
         ]
       },
       {
@@ -361,7 +381,10 @@ resource "aws_iam_role_policy" "deploy" {
           "logs:TagResource",
           "logs:UntagResource",
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/blitzlog-*-handler"
+        Resource = [
+          for r in local.regions :
+          "arn:aws:logs:${r}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/blitzlog-*-handler"
+        ]
       },
       {
         # SSM Parameter Store: per-env credentials and runtime
@@ -382,10 +405,12 @@ resource "aws_iam_role_policy" "deploy" {
           "ssm:RemoveTagsFromResource",
           "ssm:ListTagsForResource",
         ]
-        Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/dev/*",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/prod/*",
-        ]
+        Resource = flatten([
+          for r in local.regions : [
+            "arn:aws:ssm:${r}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/dev/*",
+            "arn:aws:ssm:${r}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/prod/*",
+          ]
+        ])
       },
     ]
   })

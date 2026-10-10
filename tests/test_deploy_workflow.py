@@ -294,11 +294,16 @@ class TestDeployRole(unittest.TestCase):
         user-pool namespace (/blitzlog/users/*) is env-independent
         and per-env stacks don't write there, so it's intentionally
         NOT in this grant.
+
+        The ARN is templated over `local.regions` (a list of
+        distinct regions the bootstrap is active in) so the
+        policy works whether dev and prod are in the same region
+        or different ones.
         """
         body = _policy_body_for_role("deploy", self.text)
         for env in ("dev", "prod"):
             arn = (
-                f'"arn:aws:ssm:${{var.aws_region}}:${{data.aws_caller_identity.current.account_id}}:'
+                f'"arn:aws:ssm:${{r}}:${{data.aws_caller_identity.current.account_id}}:'
                 f'parameter/blitzlog/{env}/*"'
             )
             self.assertIn(
@@ -1245,6 +1250,45 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "(currently ['dev', 'prod']); hard-coding the env list defeats the cycle-through pattern.",
             )
 
+    def test_deploy_parameter_types_includes_per_env_shared_leaves(self):
+        """``local.deploy_parameter_types`` MUST include the three
+        per-env leaves that used to be standalone vars:
+        ``aws-region``, ``agent-logs-bucket-name``,
+        ``stt-models-bucket-name``.
+
+        A regression that drops one of these (e.g. moves them
+        back to standalone ``variable`` blocks in variables.tf)
+        would silently leave the per-env stacks without
+        ``TF_VAR_agent_logs_bucket_name`` at apply time, causing
+        a confusing "data source returned no result" error from
+        the per-env stack's ``aws_s3_bucket`` data source.
+        """
+        # Pull the deploy_parameter_types map literal.
+        m = re.search(
+            r"deploy_parameter_types\s*=\s*\{(.*?)\n  \}",
+            self.text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            m,
+            "secrets.tf must declare a `deploy_parameter_types` local",
+        )
+        body = m.group(1)
+        for required_leaf in (
+            "aws-region",
+            "agent-logs-bucket-name",
+            "stt-models-bucket-name",
+        ):
+            with self.subTest(leaf=required_leaf):
+                # Match `"leaf" = "String"` (these are all String,
+                # never SecureString).
+                self.assertRegex(
+                    body,
+                    rf'"{re.escape(required_leaf)}"\s*=\s*"String"',
+                    f"secrets.tf's deploy_parameter_types must include "
+                    f'`"{required_leaf}" = "String"` (per-env shared leaf)',
+                )
+
     def test_string_resource_has_no_key_id(self):
         """The String-typed resource MUST NOT have a ``key_id``
         attribute (the AWS provider rejects it for `String` type).
@@ -1271,42 +1315,35 @@ class TestDeploySecretsParameters(unittest.TestCase):
 
     def test_outputs_do_not_expose_reference_param_lists(self):
         """infra/bootstrap/outputs.tf MUST NOT expose
-        ``deploy_parameter_names`` or ``deploy_parameter_types``.
+        ``deploy_parameter_names``, ``deploy_parameter_types``, or
+        any of the per-bucket ``*_bucket_arn`` / ``*_bucket_name``
+        outputs.
 
-        Those outputs were references for the (now-deleted)
-        one-time ``aws ssm put-parameter`` populate step. With
-        Option B the bootstrap apply writes values directly, so
-        the reference outputs are dead code. Dropping them keeps
-        the bootstrap's surface small and prevents a future
-        refactor from re-introducing the placeholder flow.
+        The reference param-list outputs were references for the
+        (now-deleted) one-time ``aws ssm put-parameter`` populate
+        step. The bucket outputs were references for the old
+        shared-bucket design. With per-env bucket names supplied
+        via the bootstrap tfvars and consumed by the per-env stacks
+        via SSM, none of these outputs are needed -- keeping the
+        bootstrap's output surface small prevents a future
+        refactor from re-introducing coupling.
         """
         outputs_text = BOOTSTRAP_OUTPUTS_TF.read_text()
-        self.assertNotRegex(
-            outputs_text,
-            r'output\s+"deploy_parameter_names"',
-            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_names"` '
-            "(removed: the operator no longer needs a reference list of parameter names; "
-            "values come from the bootstrap tfvars).",
-        )
-        self.assertNotRegex(
-            outputs_text,
-            r'output\s+"deploy_parameter_types"',
-            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_types"` '
-            "(removed: the operator no longer needs a reference type map; "
-            "the per-leaf type is hard-coded in secrets.tf).",
-        )
-        # The original bucket-name outputs must still be there.
-        for must_still_be_there in (
+        for must_be_absent in (
+            "deploy_parameter_names",
+            "deploy_parameter_types",
             "agent_logs_bucket_arn",
             "agent_logs_bucket_name",
             "stt_models_bucket_arn",
             "stt_models_bucket_name",
         ):
-            self.assertRegex(
+            self.assertNotRegex(
                 outputs_text,
-                rf'output\s+"{must_still_be_there}"',
-                f'infra/bootstrap/outputs.tf must still declare `output "{must_still_be_there}"` '
-                "(the bucket outputs are still useful for the per-env stacks).",
+                rf'output\s+"{must_be_absent}"',
+                f'infra/bootstrap/outputs.tf must NOT declare `output "{must_be_absent}"` '
+                "(removed: the bootstrap no longer exposes reference data; "
+                "the per-env stacks read bucket names and per-env config straight "
+                "from SSM via the deploy workflow's get-parameters-by-path fetch).",
             )
 
 

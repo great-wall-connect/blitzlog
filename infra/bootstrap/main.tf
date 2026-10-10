@@ -15,16 +15,58 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = var.aws_region
+# Per-env map of { <env> = <bucket-name> }. The provider region is
+# taken from var.dev (per-env; the operator can run dev and prod in
+# different regions if they want).
+locals {
+  agent_logs_bucket_names = {
+    dev  = var.dev["agent-logs-bucket-name"]
+    prod = var.prod["agent-logs-bucket-name"]
+  }
+  stt_models_bucket_names = {
+    dev  = var.dev["stt-models-bucket-name"]
+    prod = var.prod["stt-models-bucket-name"]
+  }
+  # Distinct list of AWS regions the bootstrap is active in.
+  # Used by the IAM role policies (deploy-role.tf, packer-role.tf)
+  # to scope ARNs to every region the bootstrap touches — if
+  # dev and prod run in the same region this list has one
+  # element; if they differ, it has two.
+  regions = toset([
+    var.dev["aws-region"],
+    var.prod["aws-region"],
+  ])
 }
 
+provider "aws" {
+  region = var.dev["aws-region"]
+}
+
+# ----------------------------------------------------------------------------
+# Per-env S3 buckets
+#
+# One bucket pair (agent_logs + stt_models) per env, keyed on env.
+# Names come from `var.<env>["...-bucket-name"]`; the operator
+# supplies them via the bootstrap tfvars. The per-env stacks consume
+# the same names from SSM via the deploy workflow's
+# get-parameters-by-path fetch — no shared-name coupling between
+# the bootstrap and the per-env stacks.
+# ----------------------------------------------------------------------------
+
 resource "aws_s3_bucket" "agent_logs" {
-  bucket = var.agent_logs_bucket_name
+  for_each = local.agent_logs_bucket_names
+  bucket   = each.value
+
+  tags = {
+    Purpose   = "blitzlog-agent-logs-${each.key}"
+    ManagedBy = "blitzlog-bootstrap"
+    Env       = each.key
+  }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "agent_logs" {
-  bucket = aws_s3_bucket.agent_logs.id
+  for_each = aws_s3_bucket.agent_logs
+  bucket   = each.key
 
   rule {
     apply_server_side_encryption_by_default {
@@ -34,19 +76,28 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "agent_logs" {
 }
 
 resource "aws_s3_bucket" "stt_models" {
-  bucket        = var.stt_models_bucket_name
+  for_each      = local.stt_models_bucket_names
+  bucket        = each.value
   force_destroy = false
+
+  tags = {
+    Purpose   = "blitzlog-stt-models-${each.key}"
+    ManagedBy = "blitzlog-bootstrap"
+    Env       = each.key
+  }
 }
 
 resource "aws_s3_bucket_versioning" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
+  for_each = aws_s3_bucket.stt_models
+  bucket   = each.key
   versioning_configuration {
     status = "Enabled"
   }
 }
 
 resource "aws_s3_bucket_public_access_block" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
+  for_each = aws_s3_bucket.stt_models
+  bucket   = each.key
 
   block_public_acls       = true
   block_public_policy     = true
@@ -55,7 +106,8 @@ resource "aws_s3_bucket_public_access_block" "stt_models" {
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
+  for_each = aws_s3_bucket.stt_models
+  bucket   = each.key
 
   rule {
     apply_server_side_encryption_by_default {
@@ -65,7 +117,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "stt_models" {
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "stt_models" {
-  bucket = aws_s3_bucket.stt_models.id
+  for_each = aws_s3_bucket.stt_models
+  bucket   = each.key
 
   rule {
     id     = "expire-noncurrent"

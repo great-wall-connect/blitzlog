@@ -34,8 +34,15 @@ locals {
   # Parameter leaf name -> SSM type. Mirrors infra/<env>/variables.tf
   # 1:1. Adding a new TF var requires adding the corresponding
   # entry here (with the same leaf name, hyphens-not-underscores).
+  # The first three (aws-region, agent-logs-bucket-name,
+  # stt-models-bucket-name) used to be standalone vars in
+  # variables.tf; they're per-env now (each env can have its own
+  # region / bucket names), so they live in the dev / prod maps
+  # and the bootstrap creates per-env bucket pairs.
   deploy_parameter_types = {
     "aws-region"                 = "String"
+    "agent-logs-bucket-name"     = "String"
+    "stt-models-bucket-name"     = "String"
     "vpc-id"                     = "String"
     "ec2-subnet-id"              = "String"
     "ssh-allowed-cidrs"          = "String"
@@ -47,14 +54,12 @@ locals {
     "opencode-model"             = "String"
     "opencode-agent-max-steps"   = "String"
     "opencode-api-key"           = "SecureString"
-    "agent-logs-bucket-name"     = "String"
     "stt-api-url"                = "String"
     "stt-api-key"                = "SecureString"
     "stt-model"                  = "String"
     "stt-language"               = "String"
     "upload-stt-model"           = "String"
     "stt-model-source-url"       = "String"
-    "stt-models-bucket-name"     = "String"
     "aws-profile"                = "String"
     "spot-instance-types"        = "String"
   }
@@ -72,12 +77,13 @@ locals {
   deploy_envs = ["dev", "prod"]
 
   # Per-leaf defaults. Used when a key is absent from `var.dev` (or
-  # `var.prod`). The five required keys (github-app-id,
+  # `var.prod`). The seven required keys (github-app-id,
   # github-app-private-key, github-app-installation-id,
-  # github-webhook-secret, opencode-api-key) are intentionally
-  # absent — if the operator omits them, the apply fails with
-  # "value is required" and the one-time-setup error points at the
-  # bootstrap tfvars.
+  # github-webhook-secret, opencode-api-key,
+  # agent-logs-bucket-name, stt-models-bucket-name) are
+  # intentionally absent — if the operator omits any, the apply
+  # fails with "value is required" and the one-time-setup error
+  # points at the bootstrap tfvars.
   #
   # `map(string)` means non-string values (lists, bools) must be
   # stringified in the default. We use the same canonical HCL
@@ -93,14 +99,12 @@ locals {
     "alert-email"              = ""
     "opencode-model"           = "minimax-coding-plan/MiniMax-M3"
     "opencode-agent-max-steps" = "500"
-    "agent-logs-bucket-name"   = ""
     "stt-api-url"              = "http://127.0.0.1:7878/v1"
     "stt-api-key"              = "placeholder-not-used-by-localhost-shim"
     "stt-model"                = "base.en"
     "stt-language"             = "en"
     "upload-stt-model"         = "false"
     "stt-model-source-url"     = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-    "stt-models-bucket-name"   = ""
     "aws-profile"              = ""
     "spot-instance-types"      = "[\"t4g.medium\", \"t4g.large\", \"t4g.xlarge\"]"
   }

@@ -1,24 +1,3 @@
-variable "aws_region" {
-  description = "AWS region for the bootstrap resources"
-  type        = string
-  default     = "ap-east-1"
-}
-
-variable "agent_logs_bucket_name" {
-  description = "Name of the shared S3 bucket that stores agent logs and session archives. Must be globally unique across AWS. Both prod and dev envs reference this bucket via a data source."
-  type        = string
-}
-
-variable "stt_models_bucket_name" {
-  description = "Name of the shared S3 bucket hosting whisper.cpp model files. Must be globally unique across AWS. Both prod and dev envs reference this bucket via a data source."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.stt_models_bucket_name))
-    error_message = "S3 bucket names must be 3-63 characters, lowercase, and contain only letters, numbers, hyphens, and dots. Cannot start or end with a hyphen or dot."
-  }
-}
-
 # ----------------------------------------------------------------------------
 # Per-env deploy-time config + secrets
 #
@@ -33,8 +12,8 @@ variable "stt_models_bucket_name" {
 # "github-app-private-key"). Missing keys fall back to the per-leaf
 # defaults declared in `infra/bootstrap/secrets.tf`'s
 # `local.leaf_defaults`. The operator's bootstrap tfvars is generated
-# by `scripts/tfvars-to-bootstrap.py` from the per-env
-# `terraform.tfvars` files.
+# by copying `terraform.{dev,prod}.tfvars.example` to
+# `terraform.{dev,prod}.tfvars` (gitignored) and editing.
 #
 # Type is `map(string)` rather than `map(any)` because every value
 # ends up as a string in SSM regardless (the AWS API's
@@ -47,17 +26,24 @@ variable "stt_models_bucket_name" {
 #
 # Both maps are `sensitive = true` because the bootstrap state would
 # otherwise contain plaintext values.
+#
+# All bootstrap-time inputs (including the AWS region and the
+# agent-logs / stt-models bucket names) live in these maps. The
+# bootstrap creates one bucket pair (agent-logs + stt-models) per
+# env, so the operator can use distinct bucket names per env. The
+# per-env stacks consume the same values from SSM via the deploy
+# workflow's `get-parameters-by-path` fetch.
 # ----------------------------------------------------------------------------
 
 variable "dev" {
-  description = "Dev deploy-time config + secrets, keyed by SSM leaf name (e.g. \"github-app-private-key\"). Missing keys fall back to the per-leaf defaults in infra/bootstrap/secrets.tf."
+  description = "Dev deploy-time config + secrets, keyed by SSM leaf name (e.g. \"github-app-private-key\", \"aws-region\", \"agent-logs-bucket-name\", \"stt-models-bucket-name\"). Missing keys fall back to the per-leaf defaults in infra/bootstrap/secrets.tf."
   type        = map(string)
   sensitive   = true
   default     = {}
 }
 
 variable "prod" {
-  description = "Prod deploy-time config + secrets, keyed by SSM leaf name (e.g. \"github-app-private-key\"). Same shape as `var.dev`."
+  description = "Prod deploy-time config + secrets, keyed by SSM leaf name. Same shape as `var.dev`. Each env can have its own bucket names (and region) so the bootstrap creates a per-env bucket pair."
   type        = map(string)
   sensitive   = true
   default     = {}

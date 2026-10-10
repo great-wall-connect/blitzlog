@@ -17,6 +17,9 @@
 # template stays in the repo so the next operator knows the shape.
 #
 # Required keys (no defaults — the apply fails if any are missing):
+#   - aws-region
+#   - agent-logs-bucket-name
+#   - stt-models-bucket-name
 #   - github-app-id
 #   - github-app-private-key   (PEM, use <<EOT ... EOT heredoc)
 #   - github-app-installation-id
@@ -26,10 +29,10 @@
 # Optional keys (have defaults in infra/bootstrap/secrets.tf's
 # local.leaf_defaults; the apply uses the default if you omit them
 # here):
-#   aws-region, vpc-id, ec2-subnet-id, ssh-allowed-cidrs, alert-email,
-#   opencode-model, opencode-agent-max-steps, agent-logs-bucket-name,
-#   stt-api-url, stt-api-key, stt-model, stt-language, upload-stt-model,
-#   stt-model-source-url, stt-models-bucket-name, aws-profile,
+#   vpc-id, ec2-subnet-id, ssh-allowed-cidrs, alert-email,
+#   opencode-model, opencode-agent-max-steps,
+#   stt-api-url, stt-api-key, stt-model, stt-language,
+#   upload-stt-model, stt-model-source-url, aws-profile,
 #   spot-instance-types
 #
 # Example heredoc for a multi-line PEM (the value comes through to
@@ -55,6 +58,9 @@
 prod = {
   aws-region = "ap-east-1"
 
+  agent-logs-bucket-name = "gwc-blitzlog-agent-logs-prod"
+  stt-models-bucket-name = "gwc-blitzlog-stt-models-prod"
+
   vpc-id          = ""
   ec2-subnet-id   = ""
   ssh-allowed-cidrs = []
@@ -70,15 +76,12 @@ prod = {
   opencode-agent-max-steps  = 500
   opencode-api-key          = "REPLACE_ME"
 
-  agent-logs-bucket-name = ""
-
   stt-api-url            = "http://127.0.0.1:7878/v1"
   stt-api-key            = "placeholder-not-used-by-localhost-shim"
   stt-model              = "base.en"
   stt-language           = "en"
   upload-stt-model       = false
   stt-model-source-url   = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-  stt-models-bucket-name = ""
 
   aws-profile = ""
 

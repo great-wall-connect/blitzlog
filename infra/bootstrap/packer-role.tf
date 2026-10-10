@@ -133,7 +133,8 @@ resource "aws_iam_role_policy" "packer_build" {
           "ssm:DeleteParameter",
         ]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu",
+          for r in local.regions :
+          "arn:aws:ssm:${r}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu"
         ]
       },
       {
@@ -142,9 +143,10 @@ resource "aws_iam_role_policy" "packer_build" {
         Action = [
           "s3:GetObject",
         ]
-        Resource = [
-          "${aws_s3_bucket.stt_models.arn}/models/*",
-        ]
+        Resource = flatten([
+          for bucket in aws_s3_bucket.stt_models :
+          "${bucket.arn}/models/*"
+        ])
       },
       {
         Sid    = "AllowEC2RunInstancesForPacker"
