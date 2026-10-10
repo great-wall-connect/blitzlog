@@ -357,7 +357,7 @@ resource "aws_iam_role_policy" "deploy" {
           # apply errors mid-plan with:
           #   Error: listing tags for SNS Topic (...): User is not
           #   authorized to perform: SNS:ListTagsForResource
-        "sns:ListTagsForResource",
+          "sns:ListTagsForResource",
         ]
         Resource = [
           "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts",
