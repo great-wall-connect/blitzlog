@@ -318,48 +318,107 @@ used from a local laptop without AdministratorAccess.
 
 #### One-time operator setup for the deploy workflows
 
-The deploy workflows read per-env secrets and use one repo
-variable. The setup is one-time per repo:
+The deploy workflows read per-env config + secrets from AWS SSM
+Parameter Store (under `/blitzlog/<env>/<leaf>`), populated by
+`infra/bootstrap/secrets.tf` and updated by the operator with
+`aws ssm put-parameter`. The workflows use two repo variables
+(`AWS_ACCOUNT_ID` for OIDC and `TF_BACKEND_BUCKET` for the state
+bucket). The setup is one-time per repo:
 
-1. **Repo variable** (Settings → Variables → Actions → New variable):
+1. **Repo variables** (Settings → Variables → Actions → New variable):
    - `AWS_ACCOUNT_ID` = your AWS account id (used by both the Packer
      and deploy OIDC roles).
+   - `TF_BACKEND_BUCKET` = the S3 bucket holding terraform state
+     (default `gwc-infra-tf-state`; the variable exists for
+     non-default state buckets). **Not a secret** — bucket names
+     are world-readable once any state is published from them.
 
 2. **Repo Settings → Environments → `production` → Required reviewers**
    = CODEOWNERS (gates the prod apply).
 
-3. **Apply bootstrap locally** so the `deploy_role_arn` output exists:
+3. **Apply bootstrap locally** so the `deploy_role_arn` output
+   exists *and* the per-env SSM parameters are provisioned
+   (with placeholder values):
    ```bash
    cd infra/bootstrap
    terraform init -backend-config=bootstrap-backend.hcl
    terraform apply    # brings up the new blitzlog-deploy-role
+                      # AND the /blitzlog/<env>/<leaf> SSM parameters
    ```
 
-4. **Per-env GitHub Actions secrets** (Settings → Secrets and
-   variables → Actions → New repository secret), named to map
-   1:1 onto terraform variables in `infra/<env>/variables.tf`:
-   - `TF_VAR_AWS_REGION_DEV` / `TF_VAR_AWS_REGION_PROD`
-   - `TF_VAR_VPC_ID_DEV` / `TF_VAR_VPC_ID_PROD`
-   - `TF_VAR_EC2_SUBNET_ID_DEV` / `TF_VAR_EC2_SUBNET_ID_PROD`
-   - `TF_VAR_GITHUB_APP_ID_DEV` / `TF_VAR_GITHUB_APP_ID_PROD`
-   - `TF_VAR_GITHUB_APP_PRIVATE_KEY_DEV` / `TF_VAR_GITHUB_APP_PRIVATE_KEY_PROD` (multi-line PEM)
-   - `TF_VAR_GITHUB_APP_INSTALLATION_ID_DEV` / `TF_VAR_GITHUB_APP_INSTALLATION_ID_PROD`
-   - `TF_VAR_GITHUB_WEBHOOK_SECRET_DEV` / `TF_VAR_GITHUB_WEBHOOK_SECRET_PROD`
-   - `TF_VAR_OPENCODE_API_KEY_DEV` / `TF_VAR_OPENCODE_API_KEY_PROD`
-   - `TF_VAR_AGENT_LOGS_BUCKET_NAME_DEV` / `TF_VAR_AGENT_LOGS_BUCKET_NAME_PROD`
-   - Optional: `TF_VAR_STT_API_KEY_*`, `TF_VAR_STT_MODELS_BUCKET_NAME_*`,
-     `TF_VAR_ALERT_EMAIL_*`, `TF_VAR_AWS_PROFILE_*`,
-     `TF_VAR_SSH_ALLOWED_CIDRS_*`, `TF_VAR_SPOT_INSTANCE_TYPES_*`,
-     `TF_VAR_OPENCODE_MODEL_*`, `TF_VAR_OPENCODE_AGENT_MAX_STEPS_*`,
-     `TF_VAR_STT_*` (only the keys you want to override per env).
+4. **Replace the bootstrap placeholders with real values** for
+   each env. The deploy workflow fails fast with a clear
+   one-time-setup error if any parameter still holds the
+   placeholder, so this step is mandatory before the first
+   apply. The bootstrap module exposes the parameter name → type
+   mapping as outputs:
 
-5. **Backend** secrets (one set, shared by both deploy paths):
-   - `TF_BACKEND_BUCKET` = `gwc-infra-tf-state` (or your state bucket name).
+   ```bash
+   cd infra/bootstrap
+   terraform output deploy_parameter_names   # /blitzlog/<env>/<leaf> list
+   terraform output deploy_parameter_types   # name -> String|SecureString
+   ```
+
+   Then for each `/blitzlog/<env>/<leaf>` returned above:
+
+   ```bash
+   # Example for the GitHub App private key (SecureString)
+   aws ssm put-parameter \
+     --name /blitzlog/dev/github-app-private-key \
+     --type SecureString \
+     --value "$(cat /path/to/dev-app.pem)" \
+     --overwrite
+
+   # Example for a non-secret config value
+   aws ssm put-parameter \
+     --name /blitzlog/dev/aws-region \
+     --type String \
+     --value "ap-east-1" \
+     --overwrite
+   ```
+
+   The full set of parameters provisioned by `secrets.tf` (one
+   per row, for each of `dev` and `prod`):
+
+   | SSM path leaf | Type | Notes |
+   |---|---|---|
+   | `aws-region` | String | e.g. `ap-east-1` |
+   | `vpc-id` | String | the per-env VPC id |
+   | `ec2-subnet-id` | String | public subnet inside `vpc-id` |
+   | `ssh-allowed-cidrs` | String | optional, default `[]` |
+   | `github-app-id` | String | numeric id of the GitHub App |
+   | `github-app-private-key` | SecureString | multi-line PEM |
+   | `github-app-installation-id` | String | numeric id of the App's installation on the webhook repo |
+   | `github-webhook-secret` | SecureString | HMAC secret |
+   | `alert-email` | String | optional, SNS subscription target |
+   | `opencode-model` | String | optional, e.g. `minimax-coding-plan/MiniMax-M3` |
+   | `opencode-agent-max-steps` | String | optional, default `500` |
+   | `opencode-api-key` | SecureString | provider API key |
+   | `agent-logs-bucket-name` | String | typically `gwc-blitzlog-agent-logs` (from bootstrap output) |
+   | `stt-api-url` | String | optional |
+   | `stt-api-key` | SecureString | optional; placeholder `any-non-empty-string` if local STT is unauth'd |
+   | `stt-model` | String | optional |
+   | `stt-language` | String | optional |
+   | `upload-stt-model` | String | optional, default `false` |
+   | `stt-model-source-url` | String | optional |
+   | `stt-models-bucket-name` | String | optional, default `gwc-blitzlog-stt-models` |
+   | `aws-profile` | String | optional, CLI profile for the upload provisioner |
+   | `spot-instance-types` | String | optional, JSON array of type preferences |
+
+   > **Public repo note.** Storing these in SSM (not in GitHub
+   > Actions secrets) keeps both the *values* and the *names* of
+   > the secrets off this public repo's metadata. PRs from forks
+   > can't read them, and the secret *list* is not visible to
+   > anyone with read access to the repo.
+
+   > **Rotation.** Update a value in place with
+   > `aws ssm put-parameter --name <path> --value <new> --type <type> --overwrite`;
+   > the next deploy picks up the new value. Automated rotation
+   > is tracked in issue #120.
 
 The deploy workflows hard-code the state keys to `dev/blitzlog.tfstate`
 and `prod/blitzlog.tfstate` to match the existing layout in
-[State file layout](#state-file-layout); only the bucket name is
-secret material.
+[State file layout](#state-file-layout).
 
 ### Migrating an existing single-env deployment to the new layout
 

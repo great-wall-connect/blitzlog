@@ -581,116 +581,101 @@ jobs:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
 
-      # Map per-env secrets onto the TF_VAR_* env vars terraform
-      # reads at apply time. We never write the values to disk —
-      # they live only in GITHUB_ENV for the duration of this run.
-      # The secrets are uppercased TF_VAR_<NAME>_<ENV> in the repo
-      # Settings → Secrets UI; the run block maps them to
-      # lowercase TF_VAR_<name> to match terraform's naming
-      # convention.
+      # Fetch per-env deploy config + secrets from SSM Parameter
+      # Store. The deploy role (infra/bootstrap/deploy-role.tf)
+      # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the
+      # OIDC session can read these. We fetch the entire env
+      # subtree in one round trip (cheaper + atomic) and map
+      # each parameter's leaf name to a TF_VAR_<name> env var
+      # (hyphens -> underscores).
       #
-      # The heredoc syntax (`VAR<<EOF\n...\nEOF`) is the GH Actions
-      # pattern for safely passing multi-line values to GITHUB_ENV.
-      # Without it, a PEM private key (newlines!) would be mangled
-      # and `terraform apply` would reject the value.
-      - name: Render TF_VAR_* env from secrets
+      # The values are written to GITHUB_ENV using the heredoc
+      # form so multi-line PEM private keys survive intact. The
+      # values never touch the runner's filesystem, and they
+      # never enter the GH Actions secret context (so PRs from
+      # forks on this public repo can't read them).
+      #
+      # Placeholder detection: every parameter was provisioned
+      # by infra/bootstrap/secrets.tf with
+      # value=PLACEHOLDER_SET_VIA_AWS_CLI; the bootstrap
+      # `lifecycle.ignore_changes=[value]` keeps the operator's
+      # real value intact across subsequent applies. The sanity
+      # check below fails fast if any value still equals the
+      # placeholder, so a misconfigured operator gets a clear
+      # one-time-setup error rather than a confusing
+      # "GitHub App auth failed" deep inside the Lambda at
+      # runtime.
+      - name: Render TF_VAR_* env from SSM
         env:
-          # Pull each secret into a single-line shell var named
-          # S_<NAME>. The `secrets[format(...)]` index access
-          # returns "" if the secret is missing, so secrets with
-          # safe defaults (alert_email, aws_profile, ssh_allowed_cidrs,
-          # upload_stt_model, stt_models_bucket_name, ...) flow
-          # through the empty-string path and let terraform use
-          # the variable's default.
-          S_AWS_REGION: ${{ secrets[format('TF_VAR_AWS_REGION_{0}', env.BLITZLOG_ENV)] }}
-          S_VPC_ID: ${{ secrets[format('TF_VAR_VPC_ID_{0}', env.BLITZLOG_ENV)] }}
-          S_EC2_SUBNET_ID: ${{ secrets[format('TF_VAR_EC2_SUBNET_ID_{0}', env.BLITZLOG_ENV)] }}
-          S_SSH_ALLOWED_CIDRS: ${{ secrets[format('TF_VAR_SSH_ALLOWED_CIDRS_{0}', env.BLITZLOG_ENV)] }}
-          S_GITHUB_APP_ID: ${{ secrets[format('TF_VAR_GITHUB_APP_ID_{0}', env.BLITZLOG_ENV)] }}
-          S_GITHUB_APP_PRIVATE_KEY: ${{ secrets[format('TF_VAR_GITHUB_APP_PRIVATE_KEY_{0}', env.BLITZLOG_ENV)] }}
-          S_GITHUB_APP_INSTALLATION_ID: ${{ secrets[format('TF_VAR_GITHUB_APP_INSTALLATION_ID_{0}', env.BLITZLOG_ENV)] }}
-          S_GITHUB_WEBHOOK_SECRET: ${{ secrets[format('TF_VAR_GITHUB_WEBHOOK_SECRET_{0}', env.BLITZLOG_ENV)] }}
-          S_ALERT_EMAIL: ${{ secrets[format('TF_VAR_ALERT_EMAIL_{0}', env.BLITZLOG_ENV)] }}
-          S_OPENCODE_MODEL: ${{ secrets[format('TF_VAR_OPENCODE_MODEL_{0}', env.BLITZLOG_ENV)] }}
-          S_OPENCODE_AGENT_MAX_STEPS: ${{ secrets[format('TF_VAR_OPENCODE_AGENT_MAX_STEPS_{0}', env.BLITZLOG_ENV)] }}
-          S_OPENCODE_API_KEY: ${{ secrets[format('TF_VAR_OPENCODE_API_KEY_{0}', env.BLITZLOG_ENV)] }}
-          S_AGENT_LOGS_BUCKET_NAME: ${{ secrets[format('TF_VAR_AGENT_LOGS_BUCKET_NAME_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_API_URL: ${{ secrets[format('TF_VAR_STT_API_URL_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_API_KEY: ${{ secrets[format('TF_VAR_STT_API_KEY_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_MODEL: ${{ secrets[format('TF_VAR_STT_MODEL_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_LANGUAGE: ${{ secrets[format('TF_VAR_STT_LANGUAGE_{0}', env.BLITZLOG_ENV)] }}
-          S_UPLOAD_STT_MODEL: ${{ secrets[format('TF_VAR_UPLOAD_STT_MODEL_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_MODEL_SOURCE_URL: ${{ secrets[format('TF_VAR_STT_MODEL_SOURCE_URL_{0}', env.BLITZLOG_ENV)] }}
-          S_STT_MODELS_BUCKET_NAME: ${{ secrets[format('TF_VAR_STT_MODELS_BUCKET_NAME_{0}', env.BLITZLOG_ENV)] }}
-          S_AWS_PROFILE: ${{ secrets[format('TF_VAR_AWS_PROFILE_{0}', env.BLITZLOG_ENV)] }}
-          S_SPOT_INSTANCE_TYPES: ${{ secrets[format('TF_VAR_SPOT_INSTANCE_TYPES_{0}', env.BLITZLOG_ENV)] }}
+          BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
         run: |
           set -euo pipefail
-          # write_var NAME VALUE -> GITHUB_ENV using the heredoc
-          # form so multi-line values (notably
-          # GITHUB_APP_PRIVATE_KEY, a PEM) survive intact.
-          write_var() {
-            local var_name="$1"
-            local value="$2"
-            if [ -n "$value" ]; then
-              {
-                echo "${var_name}<<EOF"
-                printf '%s' "$value"
-                echo "EOF"
-              } >> "$GITHUB_ENV"
-            fi
-          }
-          write_var TF_VAR_aws_region "$S_AWS_REGION"
-          write_var TF_VAR_vpc_id "$S_VPC_ID"
-          write_var TF_VAR_ec2_subnet_id "$S_EC2_SUBNET_ID"
-          write_var TF_VAR_ssh_allowed_cidrs "$S_SSH_ALLOWED_CIDRS"
-          write_var TF_VAR_github_app_id "$S_GITHUB_APP_ID"
-          write_var TF_VAR_github_app_private_key "$S_GITHUB_APP_PRIVATE_KEY"
-          write_var TF_VAR_github_app_installation_id "$S_GITHUB_APP_INSTALLATION_ID"
-          write_var TF_VAR_github_webhook_secret "$S_GITHUB_WEBHOOK_SECRET"
-          write_var TF_VAR_alert_email "$S_ALERT_EMAIL"
-          write_var TF_VAR_opencode_model "$S_OPENCODE_MODEL"
-          write_var TF_VAR_opencode_agent_max_steps "$S_OPENCODE_AGENT_MAX_STEPS"
-          write_var TF_VAR_opencode_api_key "$S_OPENCODE_API_KEY"
-          write_var TF_VAR_agent_logs_bucket_name "$S_AGENT_LOGS_BUCKET_NAME"
-          write_var TF_VAR_stt_api_url "$S_STT_API_URL"
-          write_var TF_VAR_stt_api_key "$S_STT_API_KEY"
-          write_var TF_VAR_stt_model "$S_STT_MODEL"
-          write_var TF_VAR_stt_language "$S_STT_LANGUAGE"
-          write_var TF_VAR_upload_stt_model "$S_UPLOAD_STT_MODEL"
-          write_var TF_VAR_stt_model_source_url "$S_STT_MODEL_SOURCE_URL"
-          write_var TF_VAR_stt_models_bucket_name "$S_STT_MODELS_BUCKET_NAME"
-          write_var TF_VAR_aws_profile "$S_AWS_PROFILE"
-          write_var TF_VAR_spot_instance_types "$S_SPOT_INSTANCE_TYPES"
 
-          # Required-var sanity check: at least one of the bare
-          # required vars must be set, otherwise the apply will
-          # surface a confusing "variable not set" error mid-run.
-          if [ -z "${TF_VAR_aws_region:-}" ]; then
-            echo "FATAL: TF_VAR_AWS_REGION_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
+          SSM_PATH="/blitzlog/${BLITZLOG_ENV}/"
+          aws ssm get-parameters-by-path \
+            --path "${SSM_PATH}" \
+            --recursive \
+            --with-decryption \
+            --output json > /tmp/ssm-params.json
+
+          # Fail fast if any required parameter is missing
+          # entirely (operator hasn't run the bootstrap apply,
+          # or added a TF var to variables.tf without adding the
+          # corresponding SSM parameter to secrets.tf).
+          for required in \
+            aws-region vpc-id github-app-id \
+            github-app-private-key github-app-installation-id \
+            github-webhook-secret opencode-api-key \
+            agent-logs-bucket-name; do
+            if ! jq -e --arg n "${SSM_PATH}${required}" \
+                 '.Parameters[] | select(.Name == $n)' /tmp/ssm-params.json > /dev/null; then
+              echo "FATAL: ${SSM_PATH}${required} is not set in SSM" >&2
+              echo "  Run 'cd infra/bootstrap && terraform apply' first," >&2
+              echo "  then update the placeholder with:" >&2
+              echo "    aws ssm put-parameter --name ${SSM_PATH}${required} --type SecureString --value <real> --overwrite" >&2
+              exit 1
+            fi
+          done
+
+          # Fail fast if any value is still the bootstrap
+          # placeholder (operator hasn't replaced it yet).
+          if placeholders=$(jq -r '.Parameters[] | select(.Value == "PLACEHOLDER_SET_VIA_AWS_CLI") | .Name' /tmp/ssm-params.json); [ -n "$placeholders" ]; then
+            echo "FATAL: the following SSM parameters still have the bootstrap placeholder value:" >&2
+            echo "$placeholders" | sed 's/^/  /' >&2
+            echo "" >&2
+            echo "  Update each one with the real value via:" >&2
+            echo "    aws ssm put-parameter --name <name> --type SecureString --value <real> --overwrite" >&2
+            echo "  See README §One-time operator setup for the full list." >&2
             exit 1
           fi
-          if [ -z "${TF_VAR_vpc_id:-}" ]; then
-            echo "FATAL: TF_VAR_VPC_ID_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
-            exit 1
-          fi
-          if [ -z "${TF_VAR_github_app_id:-}" ]; then
-            echo "FATAL: TF_VAR_GITHUB_APP_ID_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
-            exit 1
-          fi
+
+          # Render each parameter to GITHUB_ENV in heredoc form.
+          # The mapping is:
+          #   /blitzlog/<env>/github-app-private-key  ->  TF_VAR_github_app_private_key
+          # (leaf name with hyphens replaced by underscores).
+          # Heredoc form preserves multi-line PEM values.
+          jq -r '
+            .Parameters[] |
+            (.Name | split("/") | last) as $leaf |
+            "TF_VAR_" + ($leaf | gsub("-";"_")) + "<<EOF\n" + .Value + "\nEOF"
+          ' /tmp/ssm-params.json >> "$GITHUB_ENV"
 
       # Backend config is passed inline so no `*.hcl` file is
-      # materialized on the runner. The bucket comes from
-      # secrets.TF_BACKEND_BUCKET (the operator may use a
-      # non-default state bucket), the key is per-env
+      # materialized on the runner. The bucket comes from the
+      # repo variable TF_BACKEND_BUCKET (with a default of
+      # `gwc-infra-tf-state` so the standard install needs no
+      # operator action; the variable exists for non-default
+      # state buckets), the key is per-env
       # (<env>/blitzlog.tfstate), the region is hard-coded
       # ap-east-1 (matches the bootstrap role's trust policy).
       - name: terraform init
         working-directory: infra/${{ env.BLITZLOG_ENV }}
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
         run: |
           set -euo pipefail
           terraform init -input=false \
-            -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
             -backend-config="key=${{ env.STATE_KEY }}" \
             -backend-config="region=ap-east-1"
 

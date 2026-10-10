@@ -21,6 +21,16 @@ What this guards against (issue #92):
 - ``deploy-role.tf`` losing the ``iam:PassedToService`` condition
   on PassRole (the role can then be passed to any service, not
   just Lambda / EC2).
+- ``infra/bootstrap/secrets.tf`` failing to provision the SSM
+  parameters (deploy workflows would then fail with
+  "ParameterNotFound" at fetch time).
+- ``secrets.tf`` losing ``lifecycle.ignore_changes = [value]``
+  (every bootstrap apply would re-write the operator's real
+  value to the placeholder, breaking the next deploy).
+- ``secrets.tf`` widening SSM parameter names beyond
+  ``/blitzlog/<env>/<leaf>`` (would break the deploy workflow's
+  ``get-parameters-by-path`` fetch and the env-isolation
+  guarantees).
 - ``release.yml`` losing the new ``deploy`` job (release-mode
   no longer auto-applies infra/prod).
 - ``release.yml``'s deploy job losing the prod ``environment:
@@ -29,15 +39,23 @@ What this guards against (issue #92):
   group (two concurrent applies race on the same state file).
 - ``release.yml``'s deploy job no longer mapping mode -> env
   (pr-test must apply infra/dev, release must apply infra/prod).
+- Either deploy workflow regressing to the old
+  ``secrets[format(...)]`` index access (a per-env-suffixed
+  switch duplicates the secret list; the SSM ``get-parameters-
+  by-path`` fetch handles all params in one call).
+- Either deploy workflow regressing to GitHub-stored
+  ``TF_VAR_*_<ENV>`` secrets (the whole point of this PR is
+  to remove secrets from a public repo's GH Actions context).
+- Either deploy workflow losing the placeholder sanity check
+  (a misconfigured operator would see a confusing
+  "GitHub App auth failed" at Lambda runtime instead of a
+  clear one-time-setup error at deploy time).
 - ``terraform-apply-dev.yml`` losing its workflow_dispatch-only
   trigger (auto-apply on push would surprise reviewers).
 - ``terraform-apply-dev.yml`` losing the per-env concurrency
   group or the ref input.
 - Either workflow dropping the backend-config inline args
   (a ``*.hcl`` materialised on the runner is a leak vector).
-- Either workflow dropping the ``secrets[format(...)]``
-  index access (regression to a per-env-suffixed switch would
-  duplicate the secret list).
 
 We parse the YAML with regex rather than pyyaml so we don't pull
 a new dev dependency in for what is fundamentally a set of shape
@@ -56,6 +74,8 @@ RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 APPLY_DEV_YML = REPO_ROOT / ".github" / "workflows" / "terraform-apply-dev.yml"
 DEPLOY_ROLE_TF = REPO_ROOT / "infra" / "bootstrap" / "deploy-role.tf"
 PACKER_ROLE_TF = REPO_ROOT / "infra" / "bootstrap" / "packer-role.tf"
+SECRETS_TF = REPO_ROOT / "infra" / "bootstrap" / "secrets.tf"
+BOOTSTRAP_OUTPUTS_TF = REPO_ROOT / "infra" / "bootstrap" / "outputs.tf"
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -669,6 +689,108 @@ class TestReleaseDeployJob(unittest.TestCase):
             "from steps.detect.outputs.mode",
         )
 
+    def test_deploy_fetches_ssm_by_path(self):
+        """The deploy job MUST fetch per-env config + secrets from
+        SSM Parameter Store via ``aws ssm get-parameters-by-path``
+        under ``/blitzlog/<env>/``.
+
+        A regression to GitHub-stored ``TF_VAR_*_<ENV>`` secrets
+        (the pre-#92 shape) re-introduces secret exposure on this
+        public repo. The SSM batch fetch is cheaper and atomic
+        (one round trip per apply).
+        """
+        self.assertIn(
+            "aws ssm get-parameters-by-path",
+            self.text,
+            "release.yml's deploy job must use `aws ssm get-parameters-by-path` "
+            "(batch fetch; cheaper than per-param get-parameter)",
+        )
+        # The path is templated to /blitzlog/${BLITZLOG_ENV}/ via
+        # the SSM_PATH bash variable; the regex matches either the
+        # assignment (defines the shape) or the literal --path
+        # argument (consumes it).
+        self.assertRegex(
+            self.text,
+            r'SSM_PATH="/blitzlog/\$\{BLITZLOG_ENV\}/"',
+            "release.yml's deploy job must template the SSM path as "
+            '`SSM_PATH="/blitzlog/${BLITZLOG_ENV}/"` (per-env subtree)',
+        )
+        self.assertIn(
+            "--with-decryption",
+            self.text,
+            "release.yml's deploy job must pass `--with-decryption` "
+            "(SecureString entries are encrypted at rest)",
+        )
+
+    def test_deploy_uses_repo_variable_for_backend_bucket(self):
+        """The deploy job MUST read the state bucket from the repo
+        variable ``TF_BACKEND_BUCKET`` (with a default of
+        ``gwc-infra-tf-state``), not from a secret.
+
+        The state-bucket name is not a credential; storing it as
+        a secret is over-classification. A default fallback means
+        the standard install needs no operator action.
+        """
+        # The init step's env block must read from vars.TF_BACKEND_BUCKET.
+        self.assertRegex(
+            self.text,
+            r"\$\{\{\s*vars\.TF_BACKEND_BUCKET\s*\|\|\s*'gwc-infra-tf-state'\s*\}\}",
+            "release.yml's deploy init must read "
+            "`vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state'` "
+            "(repo variable, not secret, with a sensible default)",
+        )
+        # And MUST NOT reference the legacy `secrets.TF_BACKEND_BUCKET`.
+        self.assertNotIn(
+            "secrets.TF_BACKEND_BUCKET",
+            self.text,
+            "release.yml's deploy init must NOT read `secrets.TF_BACKEND_BUCKET` "
+            "(the state-bucket name is not a credential; demoted to a repo variable)",
+        )
+
+    def test_deploy_placeholder_sanity_check(self):
+        """The deploy job MUST fail fast if any SSM parameter still
+        holds the bootstrap placeholder value
+        (``PLACEHOLDER_SET_VIA_AWS_CLI``).
+
+        Without this check, a misconfigured operator would see a
+        confusing "GitHub App auth failed" deep inside the Lambda
+        at runtime (the placeholder is not a valid PEM). Failing
+        at deploy time with a clear "update the placeholder" error
+        is the operator-friendly path.
+        """
+        self.assertIn(
+            "PLACEHOLDER_SET_VIA_AWS_CLI",
+            self.text,
+            "release.yml's deploy job must detect the bootstrap "
+            "placeholder string (PLACEHOLDER_SET_VIA_AWS_CLI) and "
+            "fail fast with a one-time-setup error",
+        )
+
+    def test_deploy_required_vars_sanity_check(self):
+        """The deploy job MUST sanity-check that all required SSM
+        parameters are present (not just non-placeholder).
+
+        A missing required param (e.g. operator added a new TF var
+        to variables.tf without adding it to secrets.tf) should
+        fail with a clear "missing SSM parameter" error, not a
+        confusing "variable not set" from terraform mid-apply.
+        """
+        # Look for the per-required-param jq select.
+        for required in (
+            "aws-region",
+            "vpc-id",
+            "github-app-id",
+            "github-app-private-key",
+            "github-webhook-secret",
+            "opencode-api-key",
+        ):
+            self.assertIn(
+                required,
+                self.text,
+                f"release.yml's deploy job must sanity-check that "
+                f"`/blitzlog/${{BLITZLOG_ENV}}/{required}` is present in SSM",
+            )
+
 
 class TestTerraformApplyDevWorkflow(unittest.TestCase):
     """Static checks on .github/workflows/terraform-apply-dev.yml."""
@@ -816,54 +938,62 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "`cancel-in-progress: false` (a long apply should not be killed)",
         )
 
-    def test_renders_tf_vars_from_dev_secrets(self):
-        """The dev workflow MUST map per-env `_DEV` secrets to
-        `TF_VAR_<name>` env vars via the `secrets[...]` index access.
+    def test_renders_tf_vars_from_ssm_dev_path(self):
+        """The dev workflow MUST fetch per-env config + secrets from
+        SSM Parameter Store under ``/blitzlog/dev/`` via
+        ``aws ssm get-parameters-by-path`` (not from GitHub
+        secrets).
 
-        A regression to a `case`/`if` switch would duplicate the
-        secret list and drift. A regression that hard-codes the
-        secrets (e.g. `secrets.TF_VAR_FOO_PROD` for a dev workflow)
-        would silently apply prod secrets to dev.
+        A regression to ``secrets[format('TF_VAR_*_${env}', ...)]``
+        would re-introduce GitHub-stored secrets on this public
+        repo. A regression to ``secrets.TF_VAR_*_DEV`` (the
+        pre-#92 shape) would duplicate the secret list per var.
+        The SSM ``get-parameters-by-path --path /blitzlog/dev/``
+        fetch handles all params in one round trip and inherits
+        the deploy role's existing ``ssm:GetParametersByPath``
+        grant on ``/blitzlog/<env>/*``.
         """
-        # Pull every TF_VAR_<NAME>_DEV secret reference.
-        for required_var in (
-            "TF_VAR_AWS_REGION_DEV",
-            "TF_VAR_VPC_ID_DEV",
-            "TF_VAR_GITHUB_APP_ID_DEV",
-            "TF_VAR_GITHUB_APP_PRIVATE_KEY_DEV",
-            "TF_VAR_GITHUB_WEBHOOK_SECRET_DEV",
-            "TF_VAR_OPENCODE_API_KEY_DEV",
-            "TF_VAR_AGENT_LOGS_BUCKET_NAME_DEV",
-        ):
-            self.assertIn(
-                f"secrets.{required_var}",
-                self.text,
-                f"terraform-apply-dev.yml must read `{required_var}` "
-                f"via the direct secrets.X access (env is hard-coded to dev)",
-            )
+        # The fetch must target the per-env SSM path. Hard-coded
+        # to "dev" because this workflow always applies infra/dev.
+        self.assertRegex(
+            self.text,
+            r'SSM_PATH="/blitzlog/\$\{BLITZLOG_ENV\}/"',
+            "terraform-apply-dev.yml must template the SSM path as "
+            '`SSM_PATH="/blitzlog/${BLITZLOG_ENV}/"` (per-env subtree)',
+        )
+        # Must use the batch endpoint (one round trip), not
+        # per-param get-parameter.
+        self.assertIn(
+            "aws ssm get-parameters-by-path",
+            self.text,
+            "terraform-apply-dev.yml must use `aws ssm get-parameters-by-path` "
+            "(batch fetch; cheaper than per-param get-parameter)",
+        )
+        # Must decrypt SecureString entries (PEM keys, API tokens).
+        self.assertIn(
+            "--with-decryption",
+            self.text,
+            "terraform-apply-dev.yml must pass `--with-decryption` "
+            "(SecureString entries are encrypted at rest)",
+        )
 
-    def test_no_prod_secret_access(self):
-        """The dev workflow MUST NOT read `_PROD` secrets.
+    def test_no_prod_ssm_path_in_dev_workflow(self):
+        """The dev workflow MUST NOT touch ``/blitzlog/prod/``.
 
-        Reading `_PROD` secrets in a dev workflow is either a
-        copy-paste error (the prod path would deploy to dev's
-        state with prod's secrets) or a privilege-escalation
-        primitive (a dev dispatch with prod secrets would update
-        prod SSM parameters from the dev apply).
+        Reading prod SSM parameters from a dev workflow is either
+        a copy-paste error (the prod path would deploy to dev's
+        state with prod's params) or a privilege-escalation
+        primitive (a dev dispatch with prod's data would update
+        prod from a dev apply — even though the deploy role's IAM
+        scopes reads to ``/blitzlog/dev/*`` AND ``/blitzlog/prod/*``,
+        the *intent* of the dev workflow is dev-only).
         """
-        for forbidden in (
-            "TF_VAR_AWS_REGION_PROD",
-            "TF_VAR_VPC_ID_PROD",
-            "TF_VAR_GITHUB_APP_ID_PROD",
-            "TF_VAR_GITHUB_WEBHOOK_SECRET_PROD",
-            "TF_VAR_OPENCODE_API_KEY_PROD",
-        ):
-            self.assertNotIn(
-                forbidden,
-                self.text,
-                f"terraform-apply-dev.yml must NOT read `{forbidden}` "
-                "(the dev workflow is dev-only; prod secrets stay in the release cycle)",
-            )
+        self.assertNotIn(
+            "/blitzlog/prod/",
+            self.text,
+            "terraform-apply-dev.yml must NOT reference `/blitzlog/prod/` "
+            "(the dev workflow is dev-only; prod SSM stays in the release cycle)",
+        )
 
     def test_local_exec_python_resolution_works(self):
         """The dev workflow MUST install Python 3.12 via `mise install`.
@@ -884,6 +1014,220 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "terraform-apply-dev.yml must run `mise install` "
             "(puts Python 3.12 in ~/.local/share/mise/installs/python/... "
             "where the local-exec resolves it)",
+        )
+
+
+class TestDeploySecretsParameters(unittest.TestCase):
+    """Static checks on infra/bootstrap/secrets.tf.
+
+    The deploy workflows fetch per-env config + secrets from SSM
+    Parameter Store. This file is what *creates* the parameter
+    names (with placeholder values that the operator replaces
+    post-apply). A regression here — wrong name, wrong type, no
+    ``ignore_changes`` — surfaces as either a deploy-time
+    ParameterNotFound or, worse, the operator's real value being
+    silently clobbered by a subsequent bootstrap apply.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SECRETS_TF.read_text()
+
+    def test_secrets_tf_exists(self):
+        """infra/bootstrap/secrets.tf MUST exist (the file that
+        provisions the per-env SSM parameters the deploy workflows
+        fetch).
+
+        Without it, the bootstrap apply doesn't create any of the
+        parameters the deploy workflow reads, and the next
+        `terraform apply` against infra/<env> fails with
+        ParameterNotFound at fetch time.
+        """
+        self.assertTrue(
+            SECRETS_TF.exists(),
+            f"infra/bootstrap/secrets.tf must exist "
+            f"(provisions per-env SSM parameters; checked path: {SECRETS_TF})",
+        )
+
+    def test_provisions_per_env_string_and_secure_resources(self):
+        """secrets.tf MUST declare one String-typed resource and
+        one SecureString-typed resource, each iterating over
+        dev/prod.
+
+        Splitting by type is the cleanest way to express the
+        `key_id` attribute (which the AWS provider only allows
+        for `SecureString`). Collapsing them into a single
+        resource with a conditional `key_id` is a valid
+        alternative — the test just guards that *both* types are
+        provisioned.
+        """
+        self.assertRegex(
+            self.text,
+            r'resource\s+"aws_ssm_parameter"\s+"deploy_string"',
+            "secrets.tf must declare `aws_ssm_parameter.deploy_string` "
+            "(for non-secret config: region, VPC ID, bucket names, ...)",
+        )
+        self.assertRegex(
+            self.text,
+            r'resource\s+"aws_ssm_parameter"\s+"deploy_secure"',
+            "secrets.tf must declare `aws_ssm_parameter.deploy_secure` "
+            "(for credentials: PEM keys, HMAC secrets, API tokens)",
+        )
+
+    def test_secure_resource_uses_aws_managed_kms_key(self):
+        """The SecureString resource MUST use the AWS-managed KMS
+        key (``alias/aws/ssm``).
+
+        A customer-managed key (CMK) adds a key-policy management
+        surface that's out of scope for this PR. The
+        AWS-managed key is free and gives at-rest encryption
+        with no extra config.
+        """
+        # Scope the assertion to the deploy_secure resource body.
+        m = re.search(
+            r'(?ms)resource\s+"aws_ssm_parameter"\s+"deploy_secure"\s*\{(?P<body>.*?)\n\}',
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "secrets.tf must declare `aws_ssm_parameter.deploy_secure`",
+        )
+        body = m.group("body")
+        self.assertIn(
+            'key_id = "alias/aws/ssm"',
+            body,
+            'secrets.tf\'s deploy_secure resource must use `key_id = "alias/aws/ssm"` '
+            "(AWS-managed KMS key; free; no key-policy management needed)",
+        )
+
+    def test_ignore_changes_value_lifecycle(self):
+        """Both resources MUST have ``lifecycle.ignore_changes = [value]``.
+
+        Without this, every subsequent `terraform apply` against
+        the bootstrap stack would overwrite the operator's real
+        value (set via `aws ssm put-parameter` after first apply)
+        with the placeholder, breaking the next deploy with a
+        confusing auth failure.
+        """
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertRegex(
+                body,
+                r"lifecycle\s*\{\s*ignore_changes\s*=\s*\[value\]\s*\}",
+                f"secrets.tf's {resource_name} must have "
+                "`lifecycle { ignore_changes = [value] }` "
+                "(prevents the bootstrap placeholder from clobbering the operator's real value on subsequent applies)",
+            )
+
+    def test_parameter_names_match_ssm_layout(self):
+        """The parameter names MUST be exactly
+        ``/blitzlog/<env>/<leaf>`` so the deploy workflow's
+        ``get-parameters-by-path --path /blitzlog/<env>/`` fetch
+        returns them and the leaf-to-TF_VAR mapping is stable.
+        """
+        # Each resource's `name` attribute must be templated to
+        # /blitzlog/${env}/${leaf} — not hard-coded to a single
+        # env, not widened to a different prefix.
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertRegex(
+                body,
+                r'name\s*=\s*"/blitzlog/\$\{each\.value\.env\}/\$\{each\.value\.leaf\}"',
+                f"secrets.tf's {resource_name} must use "
+                '`name = "/blitzlog/${each.value.env}/${each.value.leaf}"` '
+                "(matches the deploy workflow's get-parameters-by-path fetch)",
+            )
+
+    def test_placeholder_value_string(self):
+        """Both resources MUST use the exact placeholder string
+        ``PLACEHOLDER_SET_VIA_AWS_CLI`` so the deploy workflow's
+        placeholder detection can match it.
+
+        A drift between the bootstrap placeholder and the
+        workflow's check string would silently let a
+        never-replaced placeholder through to the Lambda.
+        """
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertIn(
+                'value = "PLACEHOLDER_SET_VIA_AWS_CLI"',
+                body,
+                f"secrets.tf's {resource_name} must use the placeholder string "
+                "`PLACEHOLDER_SET_VIA_AWS_CLI` "
+                "(matches the deploy workflow's PLACEHOLDER_SET_VIA_AWS_CLI sanity check)",
+            )
+
+    def test_string_resource_has_no_key_id(self):
+        """The String-typed resource MUST NOT have a ``key_id``
+        attribute (the AWS provider rejects it for `String` type).
+
+        Splitting into two resources (rather than one with a
+        conditional `key_id`) is the chosen pattern; this test
+        guards the asymmetry.
+        """
+        m = re.search(
+            r'(?ms)resource\s+"aws_ssm_parameter"\s+"deploy_string"\s*\{(?P<body>.*?)\n\}',
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "secrets.tf must declare `aws_ssm_parameter.deploy_string`",
+        )
+        body = m.group("body")
+        self.assertNotIn(
+            "key_id",
+            body,
+            "secrets.tf's deploy_string resource must NOT have a `key_id` attribute "
+            "(the AWS provider rejects it for `String` type; only SecureString uses KMS)",
+        )
+
+    def test_outputs_expose_parameter_names_and_types(self):
+        """infra/bootstrap/outputs.tf MUST expose
+        ``deploy_parameter_names`` and ``deploy_parameter_types``
+        so the operator has a single source of truth for the
+        one-time ``aws ssm put-parameter`` invocations.
+
+        Without these, the operator has to read secrets.tf to
+        figure out the parameter name -> type mapping.
+        """
+        outputs_text = BOOTSTRAP_OUTPUTS_TF.read_text()
+        self.assertRegex(
+            outputs_text,
+            r'output\s+"deploy_parameter_names"',
+            "infra/bootstrap/outputs.tf must declare "
+            '`output "deploy_parameter_names"` '
+            "(operator uses this to drive the one-time aws ssm put-parameter invocations)",
+        )
+        self.assertRegex(
+            outputs_text,
+            r'output\s+"deploy_parameter_types"',
+            "infra/bootstrap/outputs.tf must declare "
+            '`output "deploy_parameter_types"` '
+            "(operator uses this to drive the --type flag of aws ssm put-parameter)",
         )
 
 
