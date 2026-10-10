@@ -337,21 +337,19 @@ the state bucket). The setup is one-time per repo:
    = CODEOWNERS (gates the prod apply).
 
 3. **Apply bootstrap locally** with the per-env values in scope.
-   The bootstrap reads two env-scoped tfvars files (which you
-   regenerate from your per-env tfvars with the helper script)
+   The bootstrap reads two env-scoped tfvars files (one per env)
    and writes the S3 buckets + 44 SSM parameters
    (22 leaves × `dev`/`prod`) in a single pass:
 
    ```bash
-   # 1. Generate infra/bootstrap/terraform.dev.tfvars +
-   #    infra/bootstrap/terraform.prod.tfvars from per-env tfvars
-   scripts/tfvars-to-bootstrap.py \
-       infra/dev/terraform.tfvars \
-       infra/prod/terraform.tfvars \
-       --out-dir infra/bootstrap
+   # 1. Copy the example templates to the (gitignored) real files
+   #    and edit them with your real values.
+   cd infra/bootstrap
+   cp terraform.dev.example terraform.dev.tfvars
+   cp terraform.prod.example terraform.prod.tfvars
+   $EDITOR terraform.dev.tfvars terraform.prod.tfvars
 
    # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
-   cd infra/bootstrap
    terraform init -backend-config=bootstrap-backend.hcl
    terraform apply \
        -var-file=terraform.dev.tfvars \
@@ -385,9 +383,9 @@ the state bucket). The setup is one-time per repo:
    `opencode-api-key`) have no default — the apply fails with
    "value is required" if the operator omits any of them.
 
-   `infra/bootstrap/terraform.dev.tfvars` and
-   `infra/bootstrap/terraform.prod.tfvars` are **gitignored** —
-   regenerate them whenever a per-env tfvars value changes.
+   The `.example` templates are tracked in git; the `.tfvars`
+   files you create from them are **gitignored**
+   (`.gitignore: *.tfvars`).
 
 4. **No `aws ssm put-parameter` step is required.** The bootstrap
    apply writes the values directly to SSM in the same run. The
@@ -408,9 +406,9 @@ the state bucket). The setup is one-time per repo:
    > can't read them, and the secret *list* is not visible to
    > anyone with read access to the repo.
 
-   > **Rotation.** Edit the per-env `terraform.tfvars` with the
-   > new value, regenerate `infra/bootstrap/terraform.tfvars`
-   > via the helper script, and re-run
+   > **Rotation.** Edit the relevant bootstrap tfvars
+   > (`terraform.dev.tfvars` or `terraform.prod.tfvars`) with
+   > the new value, save, and re-run
    > `cd infra/bootstrap && terraform apply`. The bootstrap
    > writes the new value to SSM in place; the next deploy picks
    > it up. Automated rotation is tracked in issue #120.

@@ -1,0 +1,86 @@
+# Template for the prod bootstrap tfvars. The bootstrap apply reads
+# this file (or a copy of it) via:
+#
+#     cd infra/bootstrap
+#     terraform apply \
+#         -var-file=terraform.dev.tfvars \
+#         -var-file=terraform.prod.tfvars
+#
+# Workflow:
+#   1. Copy this file:    cp terraform.prod.example terraform.prod.tfvars
+#   2. Edit terraform.prod.tfvars and replace the placeholders below
+#      with the real values for the prod env. The map keys are the
+#      SSM leaf names (kebab-case) that the deploy workflow fetches.
+#   3. The bootstrap writes each entry to /blitzlog/prod/<key> in SSM.
+#
+# `terraform.prod.tfvars` is gitignored (.gitignore: `*.tfvars`); the
+# template stays in the repo so the next operator knows the shape.
+#
+# Required keys (no defaults — the apply fails if any are missing):
+#   - github-app-id
+#   - github-app-private-key   (PEM, use <<EOT ... EOT heredoc)
+#   - github-app-installation-id
+#   - github-webhook-secret
+#   - opencode-api-key
+#
+# Optional keys (have defaults in infra/bootstrap/secrets.tf's
+# local.leaf_defaults; the apply uses the default if you omit them
+# here):
+#   aws-region, vpc-id, ec2-subnet-id, ssh-allowed-cidrs, alert-email,
+#   opencode-model, opencode-agent-max-steps, agent-logs-bucket-name,
+#   stt-api-url, stt-api-key, stt-model, stt-language, upload-stt-model,
+#   stt-model-source-url, stt-models-bucket-name, aws-profile,
+#   spot-instance-types
+#
+# Example heredoc for a multi-line PEM (the value comes through to
+# the bootstrap as a single string; the deploy workflow's `get-parameter
+# --with-decryption` decrypts and feeds it to terraform apply as
+# TF_VAR_github_app_private_key):
+#
+#   github-app-private-key = <<EOT
+#   -----BEGIN RSA PRIVATE KEY-----
+#   MIIEowIBAAKCAQEA...
+#   -----END RSA PRIVATE KEY-----
+#   EOT
+#
+# Example list value (HCL list; written through to SSM as the
+# string-equivalent, parsed back by the per-env apply at parse time):
+#
+#   ssh-allowed-cidrs = ["1.2.3.4/32", "5.6.7.8/32"]
+#
+# Example bool:
+#
+#   upload-stt-model = false
+
+prod = {
+  aws-region = "ap-east-1"
+
+  vpc-id          = ""
+  ec2-subnet-id   = ""
+  ssh-allowed-cidrs = []
+
+  github-app-id              = "REPLACE_ME"
+  github-app-private-key     = "REPLACE_ME_PEM_HEREDOC"
+  github-app-installation-id = "REPLACE_ME"
+  github-webhook-secret      = "REPLACE_ME"
+
+  alert-email = ""
+
+  opencode-model            = "minimax-coding-plan/MiniMax-M3"
+  opencode-agent-max-steps  = 500
+  opencode-api-key          = "REPLACE_ME"
+
+  agent-logs-bucket-name = ""
+
+  stt-api-url            = "http://127.0.0.1:7878/v1"
+  stt-api-key            = "placeholder-not-used-by-localhost-shim"
+  stt-model              = "base.en"
+  stt-language           = "en"
+  upload-stt-model       = false
+  stt-model-source-url   = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+  stt-models-bucket-name = ""
+
+  aws-profile = ""
+
+  spot-instance-types = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+}
