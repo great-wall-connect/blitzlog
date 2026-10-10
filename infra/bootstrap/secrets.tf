@@ -135,6 +135,21 @@ resource "aws_ssm_parameter" "deploy_string" {
       leaf = combo[0]
       env  = combo[1]
     }
+    # Skip non-null empty values (e.g. `aws-profile` when the
+    # operator doesn't set it) — SSM rejects empty values with
+    # the cryptic "Member must have length greater than or equal
+    # to 1". Keep null entries so the precondition below fires
+    # for the 5 required keys when the operator omits them.
+    #
+    # `nonsensitive()` strips the sensitivity that would otherwise
+    # propagate from `local.env_values` (var.dev and var.prod
+    # are sensitive). The condition itself is just a bool (include
+    # or skip) — no real secret is exposed by marking it
+    # non-sensitive.
+    if nonsensitive(
+      local.env_values[combo[1]][combo[0]] == null
+      || local.env_values[combo[1]][combo[0]] != ""
+    )
   }
 
   name  = "/blitzlog/${each.value.env}/${each.value.leaf}"
@@ -147,20 +162,17 @@ resource "aws_ssm_parameter" "deploy_string" {
   # of erroring with `ParameterAlreadyExists`.
   overwrite = true
 
-  # Fail fast at plan time if a value is missing or empty:
-  # - `null`: the operator's per-env tfvars doesn't supply the
-  #   key, AND there's no default in `leaf_defaults` (the 5
-  #   required keys have no default).
-  # - `""`: the operator's per-env tfvars doesn't supply the key,
-  #   AND `leaf_defaults` has an empty string (e.g. the optional
-  #   bucket-name keys). SSM rejects empty values with the
-  #   cryptic "Member must have length greater than or equal to 1"
-  #   mid-apply; the precondition catches it at plan time with a
-  #   self-explanatory message.
+  # Fail fast at plan time if a value resolved to null (the 5
+  # required keys have no default in `leaf_defaults`; if the
+  # operator's per-env tfvars doesn't supply them, the lookup
+  # yields `null` and the AWS provider otherwise errors with the
+  # cryptic "one of insecure_value, value, value_wo must be
+  # specified" mid-apply). Empty values are handled by the
+  # for_each filter above; the precondition only fires on null.
   lifecycle {
     precondition {
-      condition     = local.env_values[each.value.env][each.value.leaf] != null && local.env_values[each.value.env][each.value.leaf] != ""
-      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value (or is empty). Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+      condition     = local.env_values[each.value.env][each.value.leaf] != null
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
     }
   }
 
@@ -183,6 +195,10 @@ resource "aws_ssm_parameter" "deploy_secure" {
       leaf = combo[0]
       env  = combo[1]
     }
+    if nonsensitive(
+      local.env_values[combo[1]][combo[0]] == null
+      || local.env_values[combo[1]][combo[0]] != ""
+    )
   }
 
   name      = "/blitzlog/${each.value.env}/${each.value.leaf}"
@@ -191,14 +207,12 @@ resource "aws_ssm_parameter" "deploy_secure" {
   key_id    = "alias/aws/ssm"
   overwrite = true
 
-  # Same precondition as deploy_string — null means the key is
-  # missing entirely, empty string means the leaf_defaults
-  # fallback was empty (catches the bucket-name and aws-profile
-  # cases the operator commonly forgets to set).
+  # Same precondition as deploy_string (null check only — empty
+  # values are filtered out by the for_each above).
   lifecycle {
     precondition {
-      condition     = local.env_values[each.value.env][each.value.leaf] != null && local.env_values[each.value.env][each.value.leaf] != ""
-      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value (or is empty). Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+      condition     = local.env_values[each.value.env][each.value.leaf] != null
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
     }
   }
 

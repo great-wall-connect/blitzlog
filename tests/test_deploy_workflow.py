@@ -1131,23 +1131,19 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "ignore_changes would mask intentional updates.",
             )
 
-    def test_value_precondition_fails_fast_on_null_or_empty(self):
+    def test_value_precondition_fails_fast_on_null(self):
         """Both SSM resources MUST have a ``lifecycle.precondition``
         that fails the apply when ``local.env_values[env][leaf]`` is
-        null OR empty string.
+        null (i.e., the operator's per-env tfvars doesn't supply the
+        leaf AND there's no default in ``leaf_defaults``).
 
-        - ``null``: the operator's per-env tfvars doesn't supply the
-          key AND there's no default in ``leaf_defaults`` (the 5
-          required keys have no default).
-        - ``""``: the operator's per-env tfvars doesn't supply the
-          key AND ``leaf_defaults`` has an empty string (e.g. the
-          optional ``agent-logs-bucket-name`` /
-          ``stt-models-bucket-name`` / ``aws-profile``).
-
-        SSM rejects empty values mid-apply with the cryptic
-        "Member must have length greater than or equal to 1"; the
-        precondition catches both cases at plan time with an
-        actionable message.
+        Empty values (e.g. ``aws-profile`` when the operator's per-env
+        tfvars doesn't set it) are filtered out by the for_each — the
+        SSM parameter is simply not created, and the per-env apply
+        reads via ``get-parameters-by-path`` and falls back to the
+        per-env variable's default. The precondition only fires on
+        null, which is the case the operator MUST fix (5 required
+        keys).
         """
         for resource_name in ("deploy_string", "deploy_secure"):
             m = re.search(
@@ -1161,11 +1157,11 @@ class TestDeploySecretsParameters(unittest.TestCase):
             body = m.group("body")
             self.assertRegex(
                 body,
-                r"lifecycle\s*\{[^}]*precondition\s*\{[^}]*condition\s*=\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*null\s*&&\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*\"\"",
+                r"lifecycle\s*\{[^}]*precondition\s*\{[^}]*condition\s*=\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*null",
                 f"secrets.tf's {resource_name} must have a "
-                '`lifecycle { precondition { condition = local.env_values[...] != null && != "" } }` '
-                "so missing OR empty per-env tfvars values fail at plan time with a clear error, "
-                "not mid-apply with the AWS provider's cryptic value-required or length-constraint messages.",
+                "`lifecycle { precondition { condition = local.env_values[...] != null } }` "
+                "so a missing per-env tfvars value fails at plan time with a clear error, "
+                "not mid-apply with the AWS provider's cryptic value-required message.",
             )
             # The error message must name the missing key and point
             # at the per-env tfvars the operator needs to edit.
@@ -1175,6 +1171,65 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 f"secrets.tf's {resource_name} precondition error_message must "
                 "name the missing SSM parameter and tell the operator which per-env "
                 "tfvars to edit.",
+            )
+
+    def test_for_each_skips_empty_values(self):
+        """Both SSM resources MUST filter the for_each so that
+        non-null empty values (e.g. ``aws-profile`` when the
+        operator doesn't set it) are skipped.
+
+        Without the filter, the bootstrap writes an empty string to
+        SSM, which the API rejects with the cryptic
+        "Member must have length greater than or equal to 1".
+        Skipping the empty values is safe: the per-env apply reads
+        via ``get-parameters-by-path``; if a key isn't in SSM,
+        ``TF_VAR_<key>`` is empty and the per-env variable's
+        default is used.
+
+        The filter's ``if`` clause references
+        ``local.env_values[...]`` (a value derived from
+        ``var.dev``/``var.prod``, both ``sensitive = true``), which
+        would normally make the whole ``for_each`` expression
+        sensitive and trigger "Sensitive values ... cannot be used
+        as for_each arguments". The fix is to wrap the condition
+        in ``nonsensitive(...)`` — the bool result is just true/false,
+        not a real secret, so stripping sensitivity is safe.
+        """
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            # The for_each must have an `if nonsensitive(...)` filter
+            # that keeps entries where value is null OR non-empty
+            # (i.e., skips only non-null empty values). The
+            # `nonsensitive()` wrap is what prevents the sensitivity
+            # error.
+            self.assertIn(
+                "nonsensitive(",
+                body,
+                f"secrets.tf's {resource_name} for_each must wrap its `if` "
+                "filter in `nonsensitive(...)` so the for_each map itself "
+                "isn't marked sensitive (var.dev/var.prod are sensitive; "
+                "any derivation propagates unless explicitly stripped).",
+            )
+            self.assertIn(
+                "local.env_values[combo[1]][combo[0]] == null",
+                body,
+                f"secrets.tf's {resource_name} for_each `if` must check "
+                "value == null to keep null entries (so the precondition "
+                "fires for missing required keys).",
+            )
+            self.assertIn(
+                '!= ""',
+                body,
+                f"secrets.tf's {resource_name} for_each `if` must check "
+                'value != "" to skip only non-null empty values.',
             )
 
     def test_overwrite_true_for_legacy_params(self):
