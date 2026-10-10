@@ -345,8 +345,8 @@ the state bucket). The setup is one-time per repo:
    # 1. Copy the example templates to the (gitignored) real files
    #    and edit them with your real values.
    cd infra/bootstrap
-   cp terraform.dev.example terraform.dev.tfvars
-   cp terraform.prod.example terraform.prod.tfvars
+   cp terraform.dev.tfvars.example terraform.dev.tfvars
+   cp terraform.prod.tfvars.example terraform.prod.tfvars
    $EDITOR terraform.dev.tfvars terraform.prod.tfvars
 
    # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
