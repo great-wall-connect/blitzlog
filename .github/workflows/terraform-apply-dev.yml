@@ -243,3 +243,8 @@ jobs:
             echo
             jq -r 'to_entries[] | "- **\(.key)**: `\(.value.value // "null")`"' /tmp/tf-output.json
           } >> "$GITHUB_STEP_SUMMARY"
+          # Force a re-index trigger: this comment-only change was added
+          # so the workflow gets re-registered by GitHub Actions after
+          # previous pushes failed to index the file. The comment can
+          # be removed once the workflow is known to dispatch via
+          # `gh workflow run terraform-apply-dev.yml` without a 404.
