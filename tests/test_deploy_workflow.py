@@ -1021,12 +1021,12 @@ class TestDeploySecretsParameters(unittest.TestCase):
     """Static checks on infra/bootstrap/secrets.tf.
 
     The deploy workflows fetch per-env config + secrets from SSM
-    Parameter Store. This file is what *creates* the parameter
-    names (with placeholder values that the operator replaces
-    post-apply). A regression here — wrong name, wrong type, no
-    ``ignore_changes`` — surfaces as either a deploy-time
-    ParameterNotFound or, worse, the operator's real value being
-    silently clobbered by a subsequent bootstrap apply.
+    Parameter Store. This file is what *writes* the parameters
+    (with values from the matching ``var.<env>_<leaf>`` declared
+    in variables.tf) at bootstrap-apply time. A regression here
+    — wrong name, wrong type, value-from-string-literal instead
+    of from a var — surfaces as either a deploy-time
+    ParameterNotFound or a placeholder sneaking into production.
     """
 
     @classmethod
@@ -1100,14 +1100,15 @@ class TestDeploySecretsParameters(unittest.TestCase):
             "(AWS-managed KMS key; free; no key-policy management needed)",
         )
 
-    def test_ignore_changes_value_lifecycle(self):
-        """Both resources MUST have ``lifecycle.ignore_changes = [value]``.
+    def test_no_ignore_changes_value_lifecycle(self):
+        """Neither resource MUST have ``lifecycle.ignore_changes = [value]``.
 
-        Without this, every subsequent `terraform apply` against
-        the bootstrap stack would overwrite the operator's real
-        value (set via `aws ssm put-parameter` after first apply)
-        with the placeholder, breaking the next deploy with a
-        confusing auth failure.
+        With the current design the value comes from a
+        ``var.<env>_<leaf>``, so a re-apply with the same tfvars
+        produces no diff (terraform's value source is the var, not
+        SSM). An ``ignore_changes = [value]`` would silently swallow
+        intentional value updates from a regenerated tfvars — a
+        footgun. Drop it.
         """
         for resource_name in ("deploy_string", "deploy_secure"):
             m = re.search(
@@ -1119,12 +1120,13 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
             )
             body = m.group("body")
-            self.assertRegex(
+            self.assertNotRegex(
                 body,
-                r"lifecycle\s*\{\s*ignore_changes\s*=\s*\[value\]\s*\}",
-                f"secrets.tf's {resource_name} must have "
-                "`lifecycle { ignore_changes = [value] }` "
-                "(prevents the bootstrap placeholder from clobbering the operator's real value on subsequent applies)",
+                r"ignore_changes\s*=\s*\[value\]",
+                f"secrets.tf's {resource_name} must NOT have "
+                "`ignore_changes = [value]`. "
+                "The value is sourced from a tfvars var; an "
+                "ignore_changes would mask intentional updates.",
             )
 
     def test_parameter_names_match_ssm_layout(self):
@@ -1154,15 +1156,35 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "(matches the deploy workflow's get-parameters-by-path fetch)",
             )
 
-    def test_placeholder_value_string(self):
-        """Both resources MUST use the exact placeholder string
-        ``PLACEHOLDER_SET_VIA_AWS_CLI`` so the deploy workflow's
-        placeholder detection can match it.
+    def test_value_comes_from_var_lookup(self):
+        """Both resources MUST source their ``value`` from a
+        ``local.deploy_value_maps`` lookup, not a string literal.
 
-        A drift between the bootstrap placeholder and the
-        workflow's check string would silently let a
-        never-replaced placeholder through to the Lambda.
+        A regression to a hard-coded value (e.g. ``value =
+        "PLACEHOLDER_SET_VIA_AWS_CLI"`` or ``value = "real-key"``)
+        would either (a) leak a placeholder into the deploy or
+        (b) bake a value into the bootstrap state that should
+        live in the operator's tfvars.
+
+        The ``local.deploy_value_maps[env][leaf]`` map is built
+        from explicit ``var.<env>_<leaf>`` references in locals
+        (Terraform only allows attribute access on the ``var``
+        object, not dynamic indexing). Both resources then
+        look up the value from the map.
         """
+        # The map must exist and contain both envs.
+        self.assertIn(
+            "deploy_value_maps",
+            self.text,
+            "secrets.tf must declare a `deploy_value_maps` local "
+            "(<env> -> { <leaf> = <value> })",
+        )
+        for env in ("dev", "prod"):
+            self.assertRegex(
+                self.text,
+                rf"\b{env}\s*=\s*\{{",
+                f"secrets.tf's `deploy_value_maps` must contain a `{env}` entry",
+            )
         for resource_name in ("deploy_string", "deploy_secure"):
             m = re.search(
                 rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
@@ -1173,12 +1195,23 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
             )
             body = m.group("body")
-            self.assertIn(
-                'value = "PLACEHOLDER_SET_VIA_AWS_CLI"',
+            # The value line must reference the value map. We
+            # don't pin the exact syntax, just that the value is
+            # sourced from `local.deploy_value_maps[...]`.
+            self.assertRegex(
                 body,
-                f"secrets.tf's {resource_name} must use the placeholder string "
-                "`PLACEHOLDER_SET_VIA_AWS_CLI` "
-                "(matches the deploy workflow's PLACEHOLDER_SET_VIA_AWS_CLI sanity check)",
+                r"value\s*=\s*local\.deploy_value_maps\[",
+                f"secrets.tf's {resource_name} must source its `value` from "
+                "`local.deploy_value_maps[...]` (not a string literal) so the "
+                "value comes from the operator's tfvars, not from a hard-coded "
+                "placeholder or in-repo secret.",
+            )
+            # And must NOT use the literal placeholder string.
+            self.assertNotIn(
+                "PLACEHOLDER_SET_VIA_AWS_CLI",
+                body,
+                f"secrets.tf's {resource_name} must NOT contain the literal "
+                "`PLACEHOLDER_SET_VIA_AWS_CLI` placeholder — values come from vars now.",
             )
 
     def test_string_resource_has_no_key_id(self):
@@ -1205,30 +1238,45 @@ class TestDeploySecretsParameters(unittest.TestCase):
             "(the AWS provider rejects it for `String` type; only SecureString uses KMS)",
         )
 
-    def test_outputs_expose_parameter_names_and_types(self):
-        """infra/bootstrap/outputs.tf MUST expose
-        ``deploy_parameter_names`` and ``deploy_parameter_types``
-        so the operator has a single source of truth for the
-        one-time ``aws ssm put-parameter`` invocations.
+    def test_outputs_do_not_expose_reference_param_lists(self):
+        """infra/bootstrap/outputs.tf MUST NOT expose
+        ``deploy_parameter_names`` or ``deploy_parameter_types``.
 
-        Without these, the operator has to read secrets.tf to
-        figure out the parameter name -> type mapping.
+        Those outputs were references for the (now-deleted)
+        one-time ``aws ssm put-parameter`` populate step. With
+        Option B the bootstrap apply writes values directly, so
+        the reference outputs are dead code. Dropping them keeps
+        the bootstrap's surface small and prevents a future
+        refactor from re-introducing the placeholder flow.
         """
         outputs_text = BOOTSTRAP_OUTPUTS_TF.read_text()
-        self.assertRegex(
+        self.assertNotRegex(
             outputs_text,
             r'output\s+"deploy_parameter_names"',
-            "infra/bootstrap/outputs.tf must declare "
-            '`output "deploy_parameter_names"` '
-            "(operator uses this to drive the one-time aws ssm put-parameter invocations)",
+            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_names"` '
+            "(removed: the operator no longer needs a reference list of parameter names; "
+            "values come from the bootstrap tfvars).",
         )
-        self.assertRegex(
+        self.assertNotRegex(
             outputs_text,
             r'output\s+"deploy_parameter_types"',
-            "infra/bootstrap/outputs.tf must declare "
-            '`output "deploy_parameter_types"` '
-            "(operator uses this to drive the --type flag of aws ssm put-parameter)",
+            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_types"` '
+            "(removed: the operator no longer needs a reference type map; "
+            "the per-leaf type is hard-coded in secrets.tf).",
         )
+        # The original bucket-name outputs must still be there.
+        for must_still_be_there in (
+            "agent_logs_bucket_arn",
+            "agent_logs_bucket_name",
+            "stt_models_bucket_arn",
+            "stt_models_bucket_name",
+        ):
+            self.assertRegex(
+                outputs_text,
+                rf'output\s+"{must_still_be_there}"',
+                f'infra/bootstrap/outputs.tf must still declare `output "{must_still_be_there}"` '
+                "(the bucket outputs are still useful for the per-env stacks).",
+            )
 
 
 if __name__ == "__main__":

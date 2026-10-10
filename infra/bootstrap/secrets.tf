@@ -1,39 +1,43 @@
-# SSM Parameter Store entries for terraform deploy-time config +
-# secrets. The actual VALUES are operator-managed (set via
-# `aws ssm put-parameter` after first apply); Terraform only
-# provisions the parameter *names*, *types*, and *tags* with a
-# placeholder so the deploy role's IAM scope is locked in at
-# bootstrap time.
+# SSM Parameter Store entries for the per-env deploy-time config +
+# secrets. The bootstrap apply writes each value directly from the
+# matching `var.<env>_<leaf>` (declared in variables.tf) — the
+# operator's source of truth is the per-env terraform.tfvars
+# (regenerated into infra/bootstrap/terraform.tfvars via
+# scripts/tfvars-to-bootstrap.py).
 #
-# `lifecycle.ignore_changes = [value]` ensures subsequent
-# `terraform apply` runs do NOT clobber the operator's real values.
-# Without it, the placeholder would re-appear after every bootstrap
-# apply and break the next deploy.
+# Why a single bootstrap apply (no per-param `aws ssm put-parameter`
+# round-trip):
 #
-# The deploy workflows fetch these parameters via
-# `aws ssm get-parameters-by-path --path /blitzlog/<env>/` at
-# apply time, so the values never appear in the GitHub Actions
-# context (no exposure to PRs from forks on this public repo).
+# - One `cd infra/bootstrap && terraform apply` provisions the S3
+#   buckets AND writes all 44 SSM parameters (22 leaves × 2 envs)
+#   with the values from the operator's tfvars in a single pass.
+# - The deploy workflows
+#   (release.yml's deploy job, terraform-apply-dev.yml) read these
+#   values at apply time via
+#   `aws ssm get-parameters-by-path --path /blitzlog/<env>/`, so
+#   per-env GitHub Actions secrets are not required.
+# - The value comes from a tfvars var, not a hard-coded placeholder;
+#   the `lifecycle.ignore_changes = [value]` safety net from the
+#   earlier placeholder design is no longer needed (a re-apply with
+#   the same tfvars produces no diff; rotating a value means
+#   regenerating the bootstrap tfvars and re-applying).
 #
-# Rotation: the operator updates the parameter in place with
-# `aws ssm put-parameter --name <name> --value <new> --type <String|SecureString>
-# --overwrite`. The next deploy picks up the new value. See issue
-# #120 for the future automated-rotation work (Lambda on a
-# 90-day EventBridge schedule per secret type).
+# The deploy role's existing `ssm:GetParametersByPath` grant on
+# `/blitzlog/<env>/*` (infra/bootstrap/deploy-role.tf) covers the
+# read path; the OIDC role-to-assume is unchanged.
 #
 # Type rationale: `SecureString` for actual credentials (PEM keys,
 # HMAC secrets, API keys) and `String` for non-secrets (region, VPC
-# ID, bucket name, etc.). The type is set at provision time; the
-# operator doesn't need to change it. The deploy role's
-# `ssm:GetParametersByPath --with-decryption` call decrypts
-# SecureString entries and returns String entries in the clear, so
-# the workflow treats both types uniformly.
+# ID, bucket name, etc.). The type is set at provision time and
+# matches the per-env SSM-parameter type expectations in
+# infra/modules/core/iam.tf.
 
 locals {
   # Parameter leaf name -> SSM type. Mirrors infra/<env>/variables.tf
   # 1:1. Adding a new TF var requires adding the corresponding
-  # entry here (with the same leaf name, hyphens-not-underscores)
-  # so the deploy workflow can resolve it.
+  # entry here (with the same leaf name, hyphens-not-underscores) AND
+  # the matching `var.<env>_<snake_case_leaf>` declaration in
+  # variables.tf.
   deploy_parameter_types = {
     "aws-region"                 = "String"
     "vpc-id"                     = "String"
@@ -70,6 +74,62 @@ locals {
   ]
 
   deploy_envs = ["dev", "prod"]
+
+  # Map of <env> -> { <leaf> = <value> }. The value is sourced from
+  # the matching `var.<env>_<snake_case_leaf>` so the operator's
+  # tfvars is the single source of truth. We use a map of maps (not
+  # a dynamic `var[...]` index) because Terraform only allows
+  # attribute access on the `var` object, not index access.
+  deploy_value_maps = {
+    dev = {
+      "aws-region"                 = var.dev_aws_region
+      "vpc-id"                     = var.dev_vpc_id
+      "ec2-subnet-id"              = var.dev_ec2_subnet_id
+      "ssh-allowed-cidrs"          = var.dev_ssh_allowed_cidrs
+      "github-app-id"              = var.dev_github_app_id
+      "github-app-private-key"     = var.dev_github_app_private_key
+      "github-app-installation-id" = var.dev_github_app_installation_id
+      "github-webhook-secret"      = var.dev_github_webhook_secret
+      "alert-email"                = var.dev_alert_email
+      "opencode-model"             = var.dev_opencode_model
+      "opencode-agent-max-steps"   = var.dev_opencode_agent_max_steps
+      "opencode-api-key"           = var.dev_opencode_api_key
+      "agent-logs-bucket-name"     = var.dev_agent_logs_bucket_name
+      "stt-api-url"                = var.dev_stt_api_url
+      "stt-api-key"                = var.dev_stt_api_key
+      "stt-model"                  = var.dev_stt_model
+      "stt-language"               = var.dev_stt_language
+      "upload-stt-model"           = var.dev_upload_stt_model
+      "stt-model-source-url"       = var.dev_stt_model_source_url
+      "stt-models-bucket-name"     = var.dev_stt_models_bucket_name
+      "aws-profile"                = var.dev_aws_profile
+      "spot-instance-types"        = var.dev_spot_instance_types
+    }
+    prod = {
+      "aws-region"                 = var.prod_aws_region
+      "vpc-id"                     = var.prod_vpc_id
+      "ec2-subnet-id"              = var.prod_ec2_subnet_id
+      "ssh-allowed-cidrs"          = var.prod_ssh_allowed_cidrs
+      "github-app-id"              = var.prod_github_app_id
+      "github-app-private-key"     = var.prod_github_app_private_key
+      "github-app-installation-id" = var.prod_github_app_installation_id
+      "github-webhook-secret"      = var.prod_github_webhook_secret
+      "alert-email"                = var.prod_alert_email
+      "opencode-model"             = var.prod_opencode_model
+      "opencode-agent-max-steps"   = var.prod_opencode_agent_max_steps
+      "opencode-api-key"           = var.prod_opencode_api_key
+      "agent-logs-bucket-name"     = var.prod_agent_logs_bucket_name
+      "stt-api-url"                = var.prod_stt_api_url
+      "stt-api-key"                = var.prod_stt_api_key
+      "stt-model"                  = var.prod_stt_model
+      "stt-language"               = var.prod_stt_language
+      "upload-stt-model"           = var.prod_upload_stt_model
+      "stt-model-source-url"       = var.prod_stt_model_source_url
+      "stt-models-bucket-name"     = var.prod_stt_models_bucket_name
+      "aws-profile"                = var.prod_aws_profile
+      "spot-instance-types"        = var.prod_spot_instance_types
+    }
+  }
 }
 
 # String-typed parameters. Split from the SecureString resource
@@ -87,19 +147,16 @@ resource "aws_ssm_parameter" "deploy_string" {
 
   name = "/blitzlog/${each.value.env}/${each.value.leaf}"
   type = "String"
-  # Placeholder; operator replaces via `aws ssm put-parameter`
-  # after first apply. lifecycle.ignore_changes below ensures
-  # subsequent applies don't clobber the real value.
-  value = "PLACEHOLDER_SET_VIA_AWS_CLI"
+  # Value comes from the per-env value map built in locals
+  # (sourced from the matching `var.<env>_<leaf>`). The map
+  # lookup keeps this resource a one-liner without dynamic var
+  # indexing (which Terraform forbids).
+  value = local.deploy_value_maps[each.value.env][each.value.leaf]
 
   tags = {
     Purpose     = "blitzlog-deploy-${each.value.env}"
     ManagedBy   = "blitzlog-bootstrap"
     ParameterId = each.value.leaf
-  }
-
-  lifecycle {
-    ignore_changes = [value]
   }
 }
 
@@ -119,10 +176,8 @@ resource "aws_ssm_parameter" "deploy_secure" {
 
   name = "/blitzlog/${each.value.env}/${each.value.leaf}"
   type = "SecureString"
-  # Placeholder; operator replaces via `aws ssm put-parameter`
-  # after first apply. lifecycle.ignore_changes below ensures
-  # subsequent applies don't clobber the real value.
-  value = "PLACEHOLDER_SET_VIA_AWS_CLI"
+  # See note on the deploy_string resource above re: the value map.
+  value = local.deploy_value_maps[each.value.env][each.value.leaf]
   # AWS-managed key (free). Operators can rotate to a CMK later
   # by recreating the parameter; out of scope for this bootstrap.
   key_id = "alias/aws/ssm"
@@ -131,9 +186,5 @@ resource "aws_ssm_parameter" "deploy_secure" {
     Purpose     = "blitzlog-deploy-${each.value.env}"
     ManagedBy   = "blitzlog-bootstrap"
     ParameterId = each.value.leaf
-  }
-
-  lifecycle {
-    ignore_changes = [value]
   }
 }

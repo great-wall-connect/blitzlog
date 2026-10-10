@@ -319,11 +319,11 @@ used from a local laptop without AdministratorAccess.
 #### One-time operator setup for the deploy workflows
 
 The deploy workflows read per-env config + secrets from AWS SSM
-Parameter Store (under `/blitzlog/<env>/<leaf>`), populated by
-`infra/bootstrap/secrets.tf` and updated by the operator with
-`aws ssm put-parameter`. The workflows use two repo variables
-(`AWS_ACCOUNT_ID` for OIDC and `TF_BACKEND_BUCKET` for the state
-bucket). The setup is one-time per repo:
+Parameter Store (under `/blitzlog/<env>/<leaf>`). The values come
+directly from your per-env `terraform.tfvars` files; the bootstrap
+apply is what writes them to SSM. The workflows use two repo
+variables (`AWS_ACCOUNT_ID` for OIDC and `TF_BACKEND_BUCKET` for
+the state bucket). The setup is one-time per repo:
 
 1. **Repo variables** (Settings → Variables → Actions → New variable):
    - `AWS_ACCOUNT_ID` = your AWS account id (used by both the Packer
@@ -336,74 +336,43 @@ bucket). The setup is one-time per repo:
 2. **Repo Settings → Environments → `production` → Required reviewers**
    = CODEOWNERS (gates the prod apply).
 
-3. **Apply bootstrap locally** so the `deploy_role_arn` output
-   exists *and* the per-env SSM parameters are provisioned
-   (with placeholder values):
+3. **Apply bootstrap locally** with the per-env values in scope.
+   The bootstrap reads `infra/bootstrap/terraform.tfvars` (which
+   you regenerate from your per-env tfvars with the helper script)
+   and writes the S3 buckets + 44 SSM parameters
+   (22 leaves × `dev`/`prod`) in a single pass:
+
    ```bash
+   # 1. Generate infra/bootstrap/terraform.tfvars from per-env tfvars
+   scripts/tfvars-to-bootstrap.py \
+       infra/dev/terraform.tfvars \
+       infra/prod/terraform.tfvars \
+       > infra/bootstrap/terraform.tfvars
+
+   # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
    cd infra/bootstrap
    terraform init -backend-config=bootstrap-backend.hcl
-   terraform apply    # brings up the new blitzlog-deploy-role
-                      # AND the /blitzlog/<env>/<leaf> SSM parameters
+   terraform apply
    ```
 
-4. **Replace the bootstrap placeholders with real values** for
-   each env. The deploy workflow fails fast with a clear
-   one-time-setup error if any parameter still holds the
-   placeholder, so this step is mandatory before the first
-   apply. The bootstrap module exposes the parameter name → type
-   mapping as outputs:
+   `infra/bootstrap/terraform.tfvars` is **gitignored** — regenerate
+   it whenever a per-env tfvars value changes. The bootstrap's
+   variables match the per-env `variables.tf` defaults, so any
+   field you don't override in your per-env tfvars gets the
+   standard default.
 
-   ```bash
-   cd infra/bootstrap
-   terraform output deploy_parameter_names   # /blitzlog/<env>/<leaf> list
-   terraform output deploy_parameter_types   # name -> String|SecureString
-   ```
+4. **No `aws ssm put-parameter` step is required.** The bootstrap
+   apply writes the values directly to SSM in the same run. The
+   deploy workflows then fetch them via
+   `aws ssm get-parameters-by-path --path /blitzlog/<env>/` and
+   feed them into terraform as `TF_VAR_<name>` env vars.
 
-   Then for each `/blitzlog/<env>/<leaf>` returned above:
-
-   ```bash
-   # Example for the GitHub App private key (SecureString)
-   aws ssm put-parameter \
-     --name /blitzlog/dev/github-app-private-key \
-     --type SecureString \
-     --value "$(cat /path/to/dev-app.pem)" \
-     --overwrite
-
-   # Example for a non-secret config value
-   aws ssm put-parameter \
-     --name /blitzlog/dev/aws-region \
-     --type String \
-     --value "ap-east-1" \
-     --overwrite
-   ```
-
-   The full set of parameters provisioned by `secrets.tf` (one
-   per row, for each of `dev` and `prod`):
-
-   | SSM path leaf | Type | Notes |
-   |---|---|---|
-   | `aws-region` | String | e.g. `ap-east-1` |
-   | `vpc-id` | String | the per-env VPC id |
-   | `ec2-subnet-id` | String | public subnet inside `vpc-id` |
-   | `ssh-allowed-cidrs` | String | optional, default `[]` |
-   | `github-app-id` | String | numeric id of the GitHub App |
-   | `github-app-private-key` | SecureString | multi-line PEM |
-   | `github-app-installation-id` | String | numeric id of the App's installation on the webhook repo |
-   | `github-webhook-secret` | SecureString | HMAC secret |
-   | `alert-email` | String | optional, SNS subscription target |
-   | `opencode-model` | String | optional, e.g. `minimax-coding-plan/MiniMax-M3` |
-   | `opencode-agent-max-steps` | String | optional, default `500` |
-   | `opencode-api-key` | SecureString | provider API key |
-   | `agent-logs-bucket-name` | String | typically `gwc-blitzlog-agent-logs` (from bootstrap output) |
-   | `stt-api-url` | String | optional |
-   | `stt-api-key` | SecureString | optional; placeholder `any-non-empty-string` if local STT is unauth'd |
-   | `stt-model` | String | optional |
-   | `stt-language` | String | optional |
-   | `upload-stt-model` | String | optional, default `false` |
-   | `stt-model-source-url` | String | optional |
-   | `stt-models-bucket-name` | String | optional, default `gwc-blitzlog-stt-models` |
-   | `aws-profile` | String | optional, CLI profile for the upload provisioner |
-   | `spot-instance-types` | String | optional, JSON array of type preferences |
+   The full set of parameters provisioned (22 leaves × 2 envs =
+   44 total) is declared in `infra/bootstrap/secrets.tf`'s
+   `deploy_parameter_types` local. The 4 SecureString leaves are
+   `github-app-private-key`, `github-webhook-secret`,
+   `opencode-api-key`, and `stt-api-key`; the other 18 are
+   `String`.
 
    > **Public repo note.** Storing these in SSM (not in GitHub
    > Actions secrets) keeps both the *values* and the *names* of
@@ -411,10 +380,12 @@ bucket). The setup is one-time per repo:
    > can't read them, and the secret *list* is not visible to
    > anyone with read access to the repo.
 
-   > **Rotation.** Update a value in place with
-   > `aws ssm put-parameter --name <path> --value <new> --type <type> --overwrite`;
-   > the next deploy picks up the new value. Automated rotation
-   > is tracked in issue #120.
+   > **Rotation.** Edit the per-env `terraform.tfvars` with the
+   > new value, regenerate `infra/bootstrap/terraform.tfvars`
+   > via the helper script, and re-run
+   > `cd infra/bootstrap && terraform apply`. The bootstrap
+   > writes the new value to SSM in place; the next deploy picks
+   > it up. Automated rotation is tracked in issue #120.
 
 The deploy workflows hard-code the state keys to `dev/blitzlog.tfstate`
 and `prod/blitzlog.tfstate` to match the existing layout in
