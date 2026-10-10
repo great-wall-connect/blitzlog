@@ -81,6 +81,45 @@ jobs:
         # python = "3.12", so `mise install` puts it there.
         run: mise install
 
+      # Build the Lambda bundle into `infra/modules/core/build/`
+      # BEFORE `terraform plan` runs. The data source
+      # `module.core.data.archive_file.lambda_zip` (lambda.tf:1-7)
+      # reads that directory at plan time to compute
+      # `output_base64sha256`, and fails with
+      # "could not archive missing directory" if the dir is
+      # absent. The null_resource.lambda_build local-exec only
+      # runs on `terraform apply`, so the dir doesn't exist on a
+      # fresh runner by the time plan runs. The release job above
+      # builds into `infra/build/` (the release asset path), not
+      # `infra/modules/core/build/`, so we can't share artifacts
+      # between the two jobs.
+      #
+      # This command mirrors the local-exec in
+      # `infra/modules/core/lambda.tf:57-92` and uses the same
+      # Python-resolution ladder (system python3.12 → mise →
+      # fail loudly).
+      - name: Pre-build Lambda bundle
+        run: |
+          set -euo pipefail
+          PYTHON_BIN="$(command -v python3.12 || true)"
+          if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+            PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+          fi
+          if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+            echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
+            exit 1
+          fi
+          BUILD_DIR=infra/modules/core/build
+          rm -rf "$BUILD_DIR" infra/modules/core/.build-venv
+          mkdir -p "$BUILD_DIR"
+          cp -r lambda "$BUILD_DIR"/
+          mkdir -p "$BUILD_DIR/lambda/packages/whisper-stt-shim"
+          cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
+          "$PYTHON_BIN" -m venv infra/modules/core/.build-venv
+          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/modules/core/.build-venv/bin/python3
+          infra/modules/core/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t "$BUILD_DIR"
+          rm -rf infra/modules/core/.build-venv
+
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
