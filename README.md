@@ -337,29 +337,57 @@ the state bucket). The setup is one-time per repo:
    = CODEOWNERS (gates the prod apply).
 
 3. **Apply bootstrap locally** with the per-env values in scope.
-   The bootstrap reads `infra/bootstrap/terraform.tfvars` (which
-   you regenerate from your per-env tfvars with the helper script)
+   The bootstrap reads two env-scoped tfvars files (which you
+   regenerate from your per-env tfvars with the helper script)
    and writes the S3 buckets + 44 SSM parameters
    (22 leaves × `dev`/`prod`) in a single pass:
 
    ```bash
-   # 1. Generate infra/bootstrap/terraform.tfvars from per-env tfvars
+   # 1. Generate infra/bootstrap/terraform.dev.tfvars +
+   #    infra/bootstrap/terraform.prod.tfvars from per-env tfvars
    scripts/tfvars-to-bootstrap.py \
        infra/dev/terraform.tfvars \
        infra/prod/terraform.tfvars \
-       > infra/bootstrap/terraform.tfvars
+       --out-dir infra/bootstrap
 
    # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
    cd infra/bootstrap
    terraform init -backend-config=bootstrap-backend.hcl
-   terraform apply
+   terraform apply \
+       -var-file=terraform.dev.tfvars \
+       -var-file=terraform.prod.tfvars
    ```
 
-   `infra/bootstrap/terraform.tfvars` is **gitignored** — regenerate
-   it whenever a per-env tfvars value changes. The bootstrap's
-   variables match the per-env `variables.tf` defaults, so any
-   field you don't override in your per-env tfvars gets the
-   standard default.
+   Each bootstrap tfvars is a single `var.<env>` map. For
+   example, `terraform.dev.tfvars` looks like:
+
+   ```hcl
+   dev = {
+     aws-region               = "ap-east-1"
+     vpc-id                   = "vpc-0123456789abcdef0"
+     github-app-private-key   = <<EOT
+   -----BEGIN RSA PRIVATE KEY-----
+   ...
+   -----END RSA PRIVATE KEY-----
+   EOT
+     github-webhook-secret    = "..."
+     opencode-api-key         = "sk-cp-..."
+     ...
+   }
+   ```
+
+   The map keys match the SSM leaf names (kebab-case). The
+   bootstrap writes each value to `/blitzlog/<env>/<key>`. Missing
+   keys fall back to per-leaf defaults declared in
+   `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
+   required keys (`github-app-id`, `github-app-private-key`,
+   `github-app-installation-id`, `github-webhook-secret`,
+   `opencode-api-key`) have no default — the apply fails with
+   "value is required" if the operator omits any of them.
+
+   `infra/bootstrap/terraform.dev.tfvars` and
+   `infra/bootstrap/terraform.prod.tfvars` are **gitignored** —
+   regenerate them whenever a per-env tfvars value changes.
 
 4. **No `aws ssm put-parameter` step is required.** The bootstrap
    apply writes the values directly to SSM in the same run. The

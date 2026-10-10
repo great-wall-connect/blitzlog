@@ -1,8 +1,8 @@
 # SSM Parameter Store entries for the per-env deploy-time config +
-# secrets. The bootstrap apply writes each value directly from the
-# matching `var.<env>_<leaf>` (declared in variables.tf) — the
-# operator's source of truth is the per-env terraform.tfvars
-# (regenerated into infra/bootstrap/terraform.tfvars via
+# secrets. The bootstrap apply reads each value from `var.dev` (or
+# `var.prod`) — the operator's source of truth is the per-env
+# `terraform.tfvars` (regenerated into infra/bootstrap/terraform.dev.tfvars
+# and infra/bootstrap/terraform.prod.tfvars via
 # scripts/tfvars-to-bootstrap.py).
 #
 # Why a single bootstrap apply (no per-param `aws ssm put-parameter`
@@ -17,10 +17,8 @@
 #   `aws ssm get-parameters-by-path --path /blitzlog/<env>/`, so
 #   per-env GitHub Actions secrets are not required.
 # - The value comes from a tfvars var, not a hard-coded placeholder;
-#   the `lifecycle.ignore_changes = [value]` safety net from the
-#   earlier placeholder design is no longer needed (a re-apply with
-#   the same tfvars produces no diff; rotating a value means
-#   regenerating the bootstrap tfvars and re-applying).
+#   a re-apply with the same tfvars produces no diff; rotating a
+#   value means regenerating the bootstrap tfvars and re-applying.
 #
 # The deploy role's existing `ssm:GetParametersByPath` grant on
 # `/blitzlog/<env>/*` (infra/bootstrap/deploy-role.tf) covers the
@@ -35,9 +33,7 @@
 locals {
   # Parameter leaf name -> SSM type. Mirrors infra/<env>/variables.tf
   # 1:1. Adding a new TF var requires adding the corresponding
-  # entry here (with the same leaf name, hyphens-not-underscores) AND
-  # the matching `var.<env>_<snake_case_leaf>` declaration in
-  # variables.tf.
+  # entry here (with the same leaf name, hyphens-not-underscores).
   deploy_parameter_types = {
     "aws-region"                 = "String"
     "vpc-id"                     = "String"
@@ -75,59 +71,50 @@ locals {
 
   deploy_envs = ["dev", "prod"]
 
-  # Map of <env> -> { <leaf> = <value> }. The value is sourced from
-  # the matching `var.<env>_<snake_case_leaf>` so the operator's
-  # tfvars is the single source of truth. We use a map of maps (not
-  # a dynamic `var[...]` index) because Terraform only allows
-  # attribute access on the `var` object, not index access.
-  deploy_value_maps = {
-    dev = {
-      "aws-region"                 = var.dev_aws_region
-      "vpc-id"                     = var.dev_vpc_id
-      "ec2-subnet-id"              = var.dev_ec2_subnet_id
-      "ssh-allowed-cidrs"          = var.dev_ssh_allowed_cidrs
-      "github-app-id"              = var.dev_github_app_id
-      "github-app-private-key"     = var.dev_github_app_private_key
-      "github-app-installation-id" = var.dev_github_app_installation_id
-      "github-webhook-secret"      = var.dev_github_webhook_secret
-      "alert-email"                = var.dev_alert_email
-      "opencode-model"             = var.dev_opencode_model
-      "opencode-agent-max-steps"   = var.dev_opencode_agent_max_steps
-      "opencode-api-key"           = var.dev_opencode_api_key
-      "agent-logs-bucket-name"     = var.dev_agent_logs_bucket_name
-      "stt-api-url"                = var.dev_stt_api_url
-      "stt-api-key"                = var.dev_stt_api_key
-      "stt-model"                  = var.dev_stt_model
-      "stt-language"               = var.dev_stt_language
-      "upload-stt-model"           = var.dev_upload_stt_model
-      "stt-model-source-url"       = var.dev_stt_model_source_url
-      "stt-models-bucket-name"     = var.dev_stt_models_bucket_name
-      "aws-profile"                = var.dev_aws_profile
-      "spot-instance-types"        = var.dev_spot_instance_types
-    }
-    prod = {
-      "aws-region"                 = var.prod_aws_region
-      "vpc-id"                     = var.prod_vpc_id
-      "ec2-subnet-id"              = var.prod_ec2_subnet_id
-      "ssh-allowed-cidrs"          = var.prod_ssh_allowed_cidrs
-      "github-app-id"              = var.prod_github_app_id
-      "github-app-private-key"     = var.prod_github_app_private_key
-      "github-app-installation-id" = var.prod_github_app_installation_id
-      "github-webhook-secret"      = var.prod_github_webhook_secret
-      "alert-email"                = var.prod_alert_email
-      "opencode-model"             = var.prod_opencode_model
-      "opencode-agent-max-steps"   = var.prod_opencode_agent_max_steps
-      "opencode-api-key"           = var.prod_opencode_api_key
-      "agent-logs-bucket-name"     = var.prod_agent_logs_bucket_name
-      "stt-api-url"                = var.prod_stt_api_url
-      "stt-api-key"                = var.prod_stt_api_key
-      "stt-model"                  = var.prod_stt_model
-      "stt-language"               = var.prod_stt_language
-      "upload-stt-model"           = var.prod_upload_stt_model
-      "stt-model-source-url"       = var.prod_stt_model_source_url
-      "stt-models-bucket-name"     = var.prod_stt_models_bucket_name
-      "aws-profile"                = var.prod_aws_profile
-      "spot-instance-types"        = var.prod_spot_instance_types
+  # Per-leaf defaults. Used when a key is absent from `var.dev` (or
+  # `var.prod`). The five required keys (github-app-id,
+  # github-app-private-key, github-app-installation-id,
+  # github-webhook-secret, opencode-api-key) are intentionally
+  # absent — if the operator omits them, the apply fails with
+  # "value is required" and the one-time-setup error points at the
+  # bootstrap tfvars.
+  #
+  # `map(string)` means non-string values (lists, bools) must be
+  # stringified in the default. We use the same canonical HCL
+  # spellings the operator's per-env tfvars would use so the
+  # SSM value round-trips cleanly through the deploy workflow
+  # (the per-env apply re-parses these strings back to their
+  # declared types at parse time).
+  leaf_defaults = {
+    "aws-region"               = "ap-east-1"
+    "vpc-id"                   = ""
+    "ec2-subnet-id"            = ""
+    "ssh-allowed-cidrs"        = "[]"
+    "alert-email"              = ""
+    "opencode-model"           = "minimax-coding-plan/MiniMax-M3"
+    "opencode-agent-max-steps" = "500"
+    "agent-logs-bucket-name"   = ""
+    "stt-api-url"              = "http://127.0.0.1:7878/v1"
+    "stt-api-key"              = "placeholder-not-used-by-localhost-shim"
+    "stt-model"                = "base.en"
+    "stt-language"             = "en"
+    "upload-stt-model"         = "false"
+    "stt-model-source-url"     = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+    "stt-models-bucket-name"   = ""
+    "aws-profile"              = ""
+    "spot-instance-types"      = "[\"t4g.medium\", \"t4g.large\", \"t4g.xlarge\"]"
+  }
+
+  # The operator-supplied per-env maps. The `for` walks every leaf
+  # the bootstrap provisions, so a missing key in `var.dev` /
+  # `var.prod` falls through to `leaf_defaults` (or, for required
+  # leaves with no default, `lookup` returns `null` and the apply
+  # fails with a clear "value is required" error).
+  env_values = {
+    for env in local.deploy_envs :
+    env => {
+      for leaf in keys(local.deploy_parameter_types) :
+      leaf => lookup({ dev = var.dev, prod = var.prod }[env], leaf, lookup(local.leaf_defaults, leaf, null))
     }
   }
 }
@@ -136,22 +123,23 @@ locals {
 # because the AWS provider's `aws_ssm_parameter` does not allow
 # `key_id` for `String` type, and the cleanest way to express the
 # type-specific attribute is a dedicated resource per type.
+#
+# The for_each product of (leaf, env) is what lets us "cycle
+# through `["dev", "prod"]`" in a single resource block. Each map
+# key is "<env>/<leaf>" (e.g. "dev/github-app-private-key") and
+# each value is the corresponding entry from `local.env_values`.
 resource "aws_ssm_parameter" "deploy_string" {
   for_each = {
     for combo in setproduct(local.deploy_string_leaves, local.deploy_envs) :
-    "${combo[0]}/${combo[1]}" => {
+    "${combo[1]}/${combo[0]}" => {
       leaf = combo[0]
       env  = combo[1]
     }
   }
 
-  name = "/blitzlog/${each.value.env}/${each.value.leaf}"
-  type = "String"
-  # Value comes from the per-env value map built in locals
-  # (sourced from the matching `var.<env>_<leaf>`). The map
-  # lookup keeps this resource a one-liner without dynamic var
-  # indexing (which Terraform forbids).
-  value = local.deploy_value_maps[each.value.env][each.value.leaf]
+  name  = "/blitzlog/${each.value.env}/${each.value.leaf}"
+  type  = "String"
+  value = local.env_values[each.value.env][each.value.leaf]
 
   tags = {
     Purpose     = "blitzlog-deploy-${each.value.env}"
@@ -168,18 +156,15 @@ resource "aws_ssm_parameter" "deploy_string" {
 resource "aws_ssm_parameter" "deploy_secure" {
   for_each = {
     for combo in setproduct(local.deploy_secure_leaves, local.deploy_envs) :
-    "${combo[0]}/${combo[1]}" => {
+    "${combo[1]}/${combo[0]}" => {
       leaf = combo[0]
       env  = combo[1]
     }
   }
 
-  name = "/blitzlog/${each.value.env}/${each.value.leaf}"
-  type = "SecureString"
-  # See note on the deploy_string resource above re: the value map.
-  value = local.deploy_value_maps[each.value.env][each.value.leaf]
-  # AWS-managed key (free). Operators can rotate to a CMK later
-  # by recreating the parameter; out of scope for this bootstrap.
+  name   = "/blitzlog/${each.value.env}/${each.value.leaf}"
+  type   = "SecureString"
+  value  = local.env_values[each.value.env][each.value.leaf]
   key_id = "alias/aws/ssm"
 
   tags = {

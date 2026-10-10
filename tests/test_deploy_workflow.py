@@ -1022,11 +1022,13 @@ class TestDeploySecretsParameters(unittest.TestCase):
 
     The deploy workflows fetch per-env config + secrets from SSM
     Parameter Store. This file is what *writes* the parameters
-    (with values from the matching ``var.<env>_<leaf>`` declared
-    in variables.tf) at bootstrap-apply time. A regression here
-    — wrong name, wrong type, value-from-string-literal instead
-    of from a var — surfaces as either a deploy-time
-    ParameterNotFound or a placeholder sneaking into production.
+    (with values from ``var.dev`` / ``var.prod``, declared in
+    variables.tf as ``map(string)`` and cycled through
+    ``["dev", "prod"]`` in a single for_each) at bootstrap-apply
+    time. A regression here — wrong name, wrong type, value-from-
+    string-literal instead of from a var — surfaces as either a
+    deploy-time ParameterNotFound or a placeholder sneaking into
+    production.
     """
 
     @classmethod
@@ -1156,9 +1158,9 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "(matches the deploy workflow's get-parameters-by-path fetch)",
             )
 
-    def test_value_comes_from_var_lookup(self):
-        """Both resources MUST source their ``value`` from a
-        ``local.deploy_value_maps`` lookup, not a string literal.
+    def test_value_comes_from_env_values_local(self):
+        """Both resources MUST source their ``value`` from the
+        ``local.env_values`` lookup, not a string literal.
 
         A regression to a hard-coded value (e.g. ``value =
         "PLACEHOLDER_SET_VIA_AWS_CLI"`` or ``value = "real-key"``)
@@ -1166,25 +1168,28 @@ class TestDeploySecretsParameters(unittest.TestCase):
         (b) bake a value into the bootstrap state that should
         live in the operator's tfvars.
 
-        The ``local.deploy_value_maps[env][leaf]`` map is built
-        from explicit ``var.<env>_<leaf>`` references in locals
-        (Terraform only allows attribute access on the ``var``
-        object, not dynamic indexing). Both resources then
-        look up the value from the map.
+        ``local.env_values`` is built in ``secrets.tf`` by cycling
+        through ``["dev", "prod"]`` (one for_each product over
+        leaves × envs) and reading each value from
+        ``var.<env>[leaf]`` with a fallback to
+        ``local.leaf_defaults[leaf]``. Both resources then look up
+        the value from the ``env_values`` map.
         """
-        # The map must exist and contain both envs.
+        # The env_values local must exist and be keyed by env.
         self.assertIn(
-            "deploy_value_maps",
+            "env_values",
             self.text,
-            "secrets.tf must declare a `deploy_value_maps` local "
+            "secrets.tf must declare a `local.env_values` map "
             "(<env> -> { <leaf> = <value> })",
         )
-        for env in ("dev", "prod"):
-            self.assertRegex(
-                self.text,
-                rf"\b{env}\s*=\s*\{{",
-                f"secrets.tf's `deploy_value_maps` must contain a `{env}` entry",
-            )
+        # The leaf_defaults local must exist (the per-leaf
+        # fallback for keys absent from var.dev / var.prod).
+        self.assertIn(
+            "leaf_defaults",
+            self.text,
+            "secrets.tf must declare a `local.leaf_defaults` map "
+            "(provides defaults for keys absent from var.dev / var.prod)",
+        )
         for resource_name in ("deploy_string", "deploy_secure"):
             m = re.search(
                 rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
@@ -1195,14 +1200,14 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
             )
             body = m.group("body")
-            # The value line must reference the value map. We
-            # don't pin the exact syntax, just that the value is
-            # sourced from `local.deploy_value_maps[...]`.
+            # The value line must reference local.env_values.
+            # We don't pin the exact syntax, just that the value
+            # is sourced from `local.env_values[...]`.
             self.assertRegex(
                 body,
-                r"value\s*=\s*local\.deploy_value_maps\[",
+                r"value\s*=\s*local\.env_values\[",
                 f"secrets.tf's {resource_name} must source its `value` from "
-                "`local.deploy_value_maps[...]` (not a string literal) so the "
+                "`local.env_values[...]` (not a string literal) so the "
                 "value comes from the operator's tfvars, not from a hard-coded "
                 "placeholder or in-repo secret.",
             )
@@ -1212,6 +1217,32 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 body,
                 f"secrets.tf's {resource_name} must NOT contain the literal "
                 "`PLACEHOLDER_SET_VIA_AWS_CLI` placeholder — values come from vars now.",
+            )
+
+    def test_env_values_cycles_through_dev_prod(self):
+        """``local.env_values`` MUST be built by iterating over
+        ``local.deploy_envs`` (currently ``["dev", "prod"]``), so
+        adding a third env is a one-line change in ``deploy_envs``.
+
+        Hard-coding ``"dev"`` / ``"prod"`` in the for_each would
+        mean new envs need edits in multiple places.
+        """
+        # The for_each product must include deploy_envs.
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertIn(
+                "local.deploy_envs",
+                body,
+                f"secrets.tf's {resource_name} for_each must iterate over `local.deploy_envs` "
+                "(currently ['dev', 'prod']); hard-coding the env list defeats the cycle-through pattern.",
             )
 
     def test_string_resource_has_no_key_id(self):
