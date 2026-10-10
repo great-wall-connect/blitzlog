@@ -6,6 +6,7 @@ infra/**/lambda_function.zip
 infra/**/build/
 infra/**/*-backend.hcl
 *.tfvars
+*.auto.tfvars
 *.private-key.pem
 terraform.tfstate
 

@@ -117,6 +117,11 @@ Override the bucket if your state bucket is not `gwc-infra-tf-state`.
 
 ### 3. Deploy production
 
+The canonical deploy path is via the GitHub Actions `release`
+workflow — see [Applying from GitHub Actions](#applying-from-github-actions)
+for the full mechanism. For the first deploy (and as a fallback),
+the local path still works:
+
 ```bash
 cd infra/prod
 terraform init -backend-config=prod-backend.hcl
@@ -242,11 +247,176 @@ infra/
 
 | You want to... | You run... |
 |---|---|
-| Ship a fix to prod | `cd infra/prod && terraform apply` |
-| Test an unstable branch | `git checkout my-branch && cd infra/dev && terraform apply` |
-| Verify prod is unchanged after a dev change | `cd infra/prod && terraform plan` (should be empty) |
-| Inspect current state of either env | `terraform output` from `infra/prod` or `infra/dev` |
-| Add/rotate a bot token | `cd infra/user-pool && terraform apply` |
+| Ship a fix to prod | Trigger **Actions → release → Run workflow** against `main` (or merge to `main` and trigger) |
+| Test an unstable branch | Trigger **Actions → terraform-apply-dev → Run workflow** with `ref=my-branch` |
+| Verify prod is unchanged after a dev change | Trigger **Actions → release → Run workflow** against the dev ref; the prod apply is the prod step's plan in the run summary |
+| Inspect current state of either env | `cd infra/prod` or `cd infra/dev` and `terraform output` (local apply still works as a fallback — see *Local applies* below) |
+| Add/rotate a bot token | `cd infra/user-pool && terraform apply` (per-user stack stays local — see [Per-user bot pool setup](#per-user-bot-pool-setup-assisted-mode)) |
+
+### Applying from GitHub Actions
+
+Issue [#92](https://github.com/great-wall-connect/blitzlog/issues/92) moved the
+`terraform apply` path for `infra/dev` and `infra/prod` into GitHub Actions.
+The local `cd infra/<env> && terraform apply` workflow is still supported
+(see *Local applies* below) but is no longer the default; the canonical
+path is via two workflows:
+
+#### `release.yml` (canonical, after image bake)
+
+The `release` workflow already builds and bakes the agent image/AMI
+(`.github/workflows/release.yml`; see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the release-cycle conventions). After the bake succeeds, the
+new `deploy` job runs `terraform apply` against the env implied by
+the release mode:
+
+- **`pr-test` mode** (open PR on the dispatched ref) — applies `infra/dev`.
+- **`release` mode** (no open PR, e.g. `main`) — applies `infra/prod` and
+  gates on the `production` GitHub Environment. Required reviewers
+  (= CODEOWNERS) must approve before the apply runs.
+
+The OIDC role `blitzlog-deploy-role` is provisioned by
+[`infra/bootstrap/deploy-role.tf`](infra/bootstrap/deploy-role.tf) and
+assumes the same trust surface as the Packer role
+(`blitzlog-packer-build-role`): any branch of `great-wall-connect/blitzlog`
+can assume it, plus the admin-SSO escape hatch for local applies.
+
+#### `terraform-apply-dev.yml` (manual, fast)
+
+A separate `terraform-apply-dev` workflow is the fast-feedback path
+for dev work — it skips the image build and Packer bake and runs
+just the terraform plan + apply, so a typical run is ~3-5 min rather
+than ~35 min. Trigger via **Actions → terraform-apply-dev → Run workflow**,
+optionally setting `ref` to a feature branch (default: the workflow's
+`github.ref_name`). Always applies `infra/dev`; the prod path lives
+exclusively in the release cycle.
+
+#### Per-env concurrency
+
+Both deploy paths serialize per-env via a GitHub Actions
+[concurrency group](https://docs.github.com/en/actions/using-jobs/using-concurrency)
+(`terraform-dev` and `terraform-prod`, `cancel-in-progress: false`).
+A long apply blocks the next one rather than racing it. Local-vs-CI
+races remain possible (the project chose no DynamoDB lock table
+deliberately — see [State file layout](#state-file-layout)).
+
+#### Local applies
+
+The local path is still supported as a fallback. To run from a
+laptop with AdministratorAccess:
+
+```bash
+cd infra/dev   # or infra/prod
+terraform init -backend-config=dev-backend.hcl
+terraform plan
+terraform apply
+```
+
+The admin-SSO principal in `deploy-role.tf` is the trust-policy
+half of the local-apply path; the OIDC role is the CI half. The
+two are intentionally separated so a leaked CI token can't be
+used from a local laptop without AdministratorAccess.
+
+#### One-time operator setup for the deploy workflows
+
+The deploy workflows read per-env config + secrets from AWS SSM
+Parameter Store (under `/blitzlog/<env>/<leaf>`). The values come
+directly from your per-env `terraform.tfvars` files; the bootstrap
+apply is what writes them to SSM. The workflows use two repo
+variables (`AWS_ACCOUNT_ID` for OIDC and `TF_BACKEND_BUCKET` for
+the state bucket). The setup is one-time per repo:
+
+1. **Repo variables** (Settings → Variables → Actions → New variable):
+   - `AWS_ACCOUNT_ID` = your AWS account id (used by both the Packer
+     and deploy OIDC roles).
+   - `TF_BACKEND_BUCKET` = the S3 bucket holding terraform state
+     (default `gwc-infra-tf-state`; the variable exists for
+     non-default state buckets). **Not a secret** — bucket names
+     are world-readable once any state is published from them.
+
+2. **Repo Settings → Environments → `production` → Required reviewers**
+   = CODEOWNERS (gates the prod apply).
+
+3. **Apply bootstrap locally** with the per-env values in scope.
+   The bootstrap reads two env-scoped tfvars files (one per env)
+   and writes the S3 buckets + 44 SSM parameters
+   (22 leaves × `dev`/`prod`) in a single pass:
+
+   ```bash
+   # 1. Copy the example templates to the (gitignored) real files
+   #    and edit them with your real values. The `*.auto.tfvars`
+   #    suffix means terraform auto-loads them — no `-var-file`
+   #    flag needed at apply time.
+   cd infra/bootstrap
+   cp terraform.dev.auto.tfvars.example terraform.dev.auto.tfvars
+   cp terraform.prod.auto.tfvars.example terraform.prod.auto.tfvars
+   $EDITOR terraform.dev.auto.tfvars terraform.prod.auto.tfvars
+
+   # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
+   terraform init -backend-config=bootstrap-backend.hcl
+   terraform apply
+   ```
+
+   Each bootstrap tfvars is a single `var.<env>` map. For
+   example, `terraform.dev.auto.tfvars` looks like:
+
+   ```hcl
+   dev = {
+     aws-region               = "ap-east-1"
+     vpc-id                   = "vpc-0123456789abcdef0"
+     github-app-private-key   = <<EOT
+   -----BEGIN RSA PRIVATE KEY-----
+   ...
+   -----END RSA PRIVATE KEY-----
+   EOT
+     github-webhook-secret    = "..."
+     opencode-api-key         = "sk-cp-..."
+     ...
+   }
+   ```
+
+   The map keys match the SSM leaf names (kebab-case). The
+   bootstrap writes each value to `/blitzlog/<env>/<key>`. Missing
+   keys fall back to per-leaf defaults declared in
+   `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
+   required keys (`github-app-id`, `github-app-private-key`,
+   `github-app-installation-id`, `github-webhook-secret`,
+   `opencode-api-key`) have no default — the apply fails fast
+   at plan time (via the `lifecycle.precondition` on the SSM
+   resources) if the operator omits any of them.
+
+   The `.example` templates are tracked in git; the
+   `.auto.tfvars` files you create from them are **gitignored**
+   (`.gitignore: *.tfvars, *.auto.tfvars`).
+
+4. **No `aws ssm put-parameter` step is required.** The bootstrap
+   apply writes the values directly to SSM in the same run. The
+   deploy workflows then fetch them via
+   `aws ssm get-parameters-by-path --path /blitzlog/<env>/` and
+   feed them into terraform as `TF_VAR_<name>` env vars.
+
+   The full set of parameters provisioned (22 leaves × 2 envs =
+   44 total) is declared in `infra/bootstrap/secrets.tf`'s
+   `deploy_parameter_types` local. The 4 SecureString leaves are
+   `github-app-private-key`, `github-webhook-secret`,
+   `opencode-api-key`, and `stt-api-key`; the other 18 are
+   `String`.
+
+   > **Public repo note.** Storing these in SSM (not in GitHub
+   > Actions secrets) keeps both the *values* and the *names* of
+   > the secrets off this public repo's metadata. PRs from forks
+   > can't read them, and the secret *list* is not visible to
+   > anyone with read access to the repo.
+
+   > **Rotation.** Edit the relevant bootstrap tfvars
+   > (`terraform.dev.auto.tfvars` or `terraform.prod.auto.tfvars`)
+   > with the new value, save, and re-run
+   > `cd infra/bootstrap && terraform apply`. The bootstrap
+   > writes the new value to SSM in place; the next deploy picks
+   > it up. Automated rotation is tracked in issue #120.
+
+The deploy workflows hard-code the state keys to `dev/blitzlog.tfstate`
+and `prod/blitzlog.tfstate` to match the existing layout in
+[State file layout](#state-file-layout).
 
 ### Migrating an existing single-env deployment to the new layout
 
@@ -304,6 +474,15 @@ s3://gwc-infra-tf-state/
 ```
 
 The bucket name is configurable in each stack's `-backend.hcl` file. Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+
+> **CI concurrency.** The deploy workflows (`.github/workflows/release.yml`'s
+> `deploy` job and `.github/workflows/terraform-apply-dev.yml`) serialize
+> applies per-env via a GitHub Actions concurrency group
+> (`cancel-in-progress: false`), so two concurrent CI dispatches queue
+> rather than race. **Local-vs-CI races remain possible** — the project
+> chose no DynamoDB lock table deliberately. If you need to apply locally
+> while a CI run is in flight, either let the CI run finish or cancel it
+> first.
 
 ---
 
