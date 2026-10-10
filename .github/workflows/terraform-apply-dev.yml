@@ -41,7 +41,7 @@ permissions:
 jobs:
   apply-dev:
     name: Apply terraform (dev)
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-26.04
     # 20 min covers a typical plan + apply + local-exec (Python 3.12
     # venv + pip install for the lambda bundle, see
     # infra/modules/core/lambda.tf:35-92). The local-exec is the

@@ -520,7 +520,14 @@ jobs:
     # Default `needs.X.result` for `needs: release` is `success`,
     # so the deploy job does NOT run if the release job failed
     # (e.g. Packer bake errored or the image build couldn't push).
-    runs-on: ubuntu-26.04-arm
+    # x86_64 (not -arm): the lambda bundle pip-install must
+    # produce x86_64 wheels to match the lambda function's
+    # default x86_64 architecture. ARM64 wheels fail to load
+    # at lambda runtime with _rust.abi3.so "cannot open shared
+    # object file". The release job above stays on arm because
+    # the docker buildx multi-arch build + Packer Graviton
+    # AMI bake both need ARM64 runners.
+    runs-on: ubuntu-26.04
     # 20 min covers a typical plan + apply + local-exec (Python 3.12
     # venv + pip install for the lambda bundle, see
     # infra/modules/core/lambda.tf:35-92). The Packer bake has
