@@ -149,6 +149,13 @@ resource "aws_iam_role_policy" "deploy" {
           "lambda:GetFunctionConfiguration",
           "lambda:GetAlias",
           "lambda:CreateEventSourceMapping",
+          # `ListVersionsByFunction` is needed to refresh the
+          # Lambda function's published version list at plan time
+          # (without it, the apply errors mid-plan with
+          # `Error: reading Lambda Function (...): User is not
+          # authorized to perform: lambda:ListVersionsByFunction`).
+          "lambda:ListVersionsByFunction",
+          "lambda:GetFunctionCodeSigningConfig",
           "lambda:UpdateEventSourceMapping",
           "lambda:DeleteEventSourceMapping",
           "lambda:GetEventSourceMapping",
@@ -336,6 +343,12 @@ resource "aws_iam_role_policy" "deploy" {
           "sns:ListSubscriptionsByTopic",
           "sns:Subscribe",
           "sns:Unsubscribe",
+          # `GetSubscriptionAttributes` is needed to refresh
+          # existing subscriptions on the dev topic at plan time
+          # (without it, the apply errors mid-plan with
+          # `Error: reading SNS Topic Subscription (...): User is
+          # not authorized to perform: SNS:GetSubscriptionAttributes`).
+          "sns:GetSubscriptionAttributes",
           "sns:TagResource",
           "sns:UntagResource",
           # `ListTagsForResource` is needed by the terraform AWS
