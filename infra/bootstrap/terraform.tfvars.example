@@ -1,0 +1,28 @@
+# Bootstrap stack — one-time setup of the shared S3 resources.
+#
+# Run from this directory:
+#
+#   terraform init -backend-config=bootstrap-backend.hcl
+#   terraform plan
+#   terraform apply
+#
+# This creates:
+#   - The shared agent-logs S3 bucket (AES-256 server-side encryption)
+#   - The shared STT models S3 bucket (AES-256, versioning, public access
+#     blocked, 30-day noncurrent version expiration)
+#
+# Both buckets are referenced as data sources by every Blitzlog env
+# (infra/prod/, infra/dev/, ...). Per-env stacks read/write keys under these
+# buckets but never mutate the bucket configuration.
+#
+# The same bucket names MUST be set in infra/prod/terraform.tfvars and
+# infra/dev/terraform.tfvars after this stack applies.
+#
+# Required variables (no defaults — Terraform apply will fail without these):
+# ------------------------------------------------------------------------------
+aws_region             = "ap-east-1"                          # any AWS region
+agent_logs_bucket_name = "gwc-blitzlog-agent-logs"           # must be globally unique across AWS
+stt_models_bucket_name = "gwc-blitzlog-stt-models"           # must be globally unique across AWS
+
+# State file: S3 key is "bootstrap/blitzlog-bootstrap.tfstate" in the bucket
+# named in bootstrap-backend.hcl.

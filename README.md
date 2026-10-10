@@ -338,9 +338,8 @@ the state bucket). The setup is one-time per repo:
 
 3. **Apply bootstrap locally** with the per-env values in scope.
    The bootstrap reads two env-scoped tfvars files (one per env)
-   and writes the S3 buckets (one `agent-logs` + one `stt-models`
-   per env) + 50 SSM parameters (25 leaves × `dev`/`prod`) in
-   a single pass:
+   and writes the S3 buckets + 44 SSM parameters
+   (22 leaves × `dev`/`prod`) in a single pass:
 
    ```bash
    # 1. Copy the example templates to the (gitignored) real files
@@ -363,8 +362,6 @@ the state bucket). The setup is one-time per repo:
    ```hcl
    dev = {
      aws-region               = "ap-east-1"
-     agent-logs-bucket-name   = "gwc-blitzlog-agent-logs-dev"
-     stt-models-bucket-name   = "gwc-blitzlog-stt-models-dev"
      vpc-id                   = "vpc-0123456789abcdef0"
      github-app-private-key   = <<EOT
    -----BEGIN RSA PRIVATE KEY-----
@@ -377,19 +374,14 @@ the state bucket). The setup is one-time per repo:
    }
    ```
 
-   Each env gets its own `agent-logs` and `stt-models` bucket
-   (so the operator can run dev and prod in different regions /
-   accounts / bucket names without coupling). The map keys match
-   the SSM leaf names (kebab-case). The bootstrap writes each
-   value to `/blitzlog/<env>/<key>`. Missing keys fall back to
-   per-leaf defaults declared in
-   `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The seven
-   required keys (`aws-region`, `agent-logs-bucket-name`,
-   `stt-models-bucket-name`, `github-app-id`,
-   `github-app-private-key`, `github-app-installation-id`,
-   `github-webhook-secret`, `opencode-api-key`) have no
-   default — the apply fails with "value is required" if the
-   operator omits any of them.
+   The map keys match the SSM leaf names (kebab-case). The
+   bootstrap writes each value to `/blitzlog/<env>/<key>`. Missing
+   keys fall back to per-leaf defaults declared in
+   `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
+   required keys (`github-app-id`, `github-app-private-key`,
+   `github-app-installation-id`, `github-webhook-secret`,
+   `opencode-api-key`) have no default — the apply fails with
+   "value is required" if the operator omits any of them.
 
    The `.example` templates are tracked in git; the `.tfvars`
    files you create from them are **gitignored**
@@ -401,11 +393,11 @@ the state bucket). The setup is one-time per repo:
    `aws ssm get-parameters-by-path --path /blitzlog/<env>/` and
    feed them into terraform as `TF_VAR_<name>` env vars.
 
-   The full set of parameters provisioned (25 leaves × 2 envs =
-   50 total) is declared in `infra/bootstrap/secrets.tf`'s
+   The full set of parameters provisioned (22 leaves × 2 envs =
+   44 total) is declared in `infra/bootstrap/secrets.tf`'s
    `deploy_parameter_types` local. The 4 SecureString leaves are
    `github-app-private-key`, `github-webhook-secret`,
-   `opencode-api-key`, and `stt-api-key`; the other 21 are
+   `opencode-api-key`, and `stt-api-key`; the other 18 are
    `String`.
 
    > **Public repo note.** Storing these in SSM (not in GitHub

@@ -1,19 +1,19 @@
-# The bucket-name outputs that used to live here were references
-# for the per-env stacks (which used shared buckets via data sources).
-# With the per-env design (each env has its own bucket pair, names
-# supplied via the bootstrap tfvars), the per-env stacks read the
-# bucket names straight from SSM via the deploy workflow's
-# `get-parameters-by-path` fetch — no bootstrap outputs needed.
-#
-# If a future consumer needs the per-env bucket ARNs, re-introduce
-# them as a map output:
-#
-#   output "bucket_arns" {
-#     value = {
-#       for env in ["dev", "prod"] :
-#       env => {
-#         agent_logs = aws_s3_bucket.agent_logs[env].arn
-#         stt_models = aws_s3_bucket.stt_models[env].arn
-#       }
-#     }
-#   }
+output "agent_logs_bucket_arn" {
+  description = "ARN of the shared agent-logs bucket. Pass this into infra/prod/terraform.tfvars and infra/dev/terraform.tfvars as agent_logs_bucket_name."
+  value       = aws_s3_bucket.agent_logs.arn
+}
+
+output "agent_logs_bucket_name" {
+  description = "Name of the shared agent-logs bucket"
+  value       = aws_s3_bucket.agent_logs.bucket
+}
+
+output "stt_models_bucket_arn" {
+  description = "ARN of the shared STT models bucket. Pass this into infra/prod/terraform.tfvars and infra/dev/terraform.tfvars as stt_models_bucket_name (or override the default)."
+  value       = aws_s3_bucket.stt_models.arn
+}
+
+output "stt_models_bucket_name" {
+  description = "Name of the shared STT models bucket"
+  value       = aws_s3_bucket.stt_models.bucket
+}
