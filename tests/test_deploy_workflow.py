@@ -345,6 +345,11 @@ class TestDeployRole(unittest.TestCase):
     def test_passrole_ec2_conditional(self):
         """iam:PassRole for the EC2 agent role MUST be conditional on
         iam:PassedToService=ec2.amazonaws.com.
+
+        Without the condition, the deploy role could pass the
+        EC2 agent role to any service (e.g. an attacker could
+        attach it to an arbitrary ECS task to inherit the EC2
+        instance's permissions).
         """
         body = _policy_body_for_role("deploy", self.text)
         self.assertIn(
@@ -371,6 +376,164 @@ class TestDeployRole(unittest.TestCase):
                 f"deploy policy must include {required} "
                 "(terraform needs it to manage blitzlog-<env>-handler)",
             )
+
+    def test_ssm_account_level_reads_present(self):
+        """The deploy policy MUST include an account-level SSM
+        read Sid (``ssm:DescribeParameters`` on ``Resource = "*"``)
+        in addition to the per-parameter-path grant.
+
+        ``ssm:DescribeParameters`` and ``ssm:ListTagsForResource``
+        are account-level API calls (they don't operate on a
+        specific parameter ARN). The per-parameter-path
+        ``SSMParameterManagement`` Sid doesn't match these calls,
+        so the per-env apply's ``aws_ssm_parameter`` resources
+        error mid-plan with
+        ``AccessDeniedException: ... ssm:DescribeParameters on
+        resource: arn:aws:ssm:...:*``. Without this Sid, every
+        per-env apply that touches an existing SSM parameter
+        fails.
+        """
+        body = _policy_body_for_role("deploy", self.text)
+        # The Sid must be named SSMAccountLevelReads (so a
+        # future refactor that drops the account-level grant
+        # breaks this test).
+        self.assertRegex(
+            body,
+            r'Sid\s*=\s*"SSMAccountLevelReads"',
+            "deploy policy must include a Sid named `SSMAccountLevelReads` "
+            "for the account-level SSM read actions",
+        )
+        # Find the start of the SSMAccountLevelReads Sid and extract
+        # its body up to the next `}` at the same indentation as
+        # `Sid =`. The Sid is `{ Sid = "..." Effect = "..." Action =
+        # [...] Resource = "..." }`, so the closing `}` is the
+        # first `}` at the same indent as the Sid key (6 spaces in the
+        # formatted body). This avoids bleeding into the next Sid in
+        # the array.
+        # terraform fmt aligns the `=` so we allow any whitespace.
+        idx = re.search(r'Sid\s*=\s*"SSMAccountLevelReads"', body)
+        self.assertIsNotNone(
+            idx,
+            "could not locate SSMAccountLevelReads Sid in policy body",
+        )
+        idx = idx.start()
+        # The Sid's opening brace is the last `{` at or before the
+        # Sid = "..." line. The Statement array uses `[` and `]`, not
+        # `{` and `}`, so the only `{` before the Sid is the Sid's
+        # own opening brace.
+        open_idx = body.rfind("{", 0, idx)
+        self.assertGreater(
+            open_idx,
+            0,
+            "could not find opening brace for SSMAccountLevelReads Sid",
+        )
+        m = re.search(r"^      \}", body[open_idx:], re.MULTILINE)
+        self.assertIsNotNone(
+            m,
+            "could not find closing brace for SSMAccountLevelReads Sid",
+        )
+        sid_body = body[open_idx : open_idx + m.end()]
+        self.assertIn(
+            '"ssm:DescribeParameters"',
+            sid_body,
+            "SSMAccountLevelReads Sid must grant ssm:DescribeParameters",
+        )
+        self.assertIn(
+            '"ssm:ListTagsForResource"',
+            sid_body,
+            "SSMAccountLevelReads Sid must grant ssm:ListTagsForResource",
+        )
+        # The Sid must use Resource = "*" (account-level actions
+        # don't accept per-parameter ARN constraints).
+        self.assertIn(
+            'Resource = "*"',
+            sid_body,
+            'SSMAccountLevelReads Sid must use Resource = "*" '
+            "(account-level action; per-parameter-path doesn't match)",
+        )
+
+    def test_cloudwatch_logs_account_level_reads_present(self):
+        """The deploy policy MUST include an account-level
+        ``logs:DescribeLogGroups`` / ``logs:ListTagsForResource``
+        Sid (``Resource = "*"``) in addition to the
+        log-group-scoped grant.
+
+        ``DescribeLogGroups`` is account-scoped; the existing
+        per-log-group grant (``log-group:/aws/lambda/blitzlog-*-handler``)
+        doesn't match the wildcard API call the per-env apply
+        makes (the log-group name in the call is empty, so the
+        ``blitzlog-*-handler`` wildcard doesn't match). Without
+        this Sid, the per-env apply's ``aws_cloudwatch_log_group``
+        errors mid-plan with
+        ``AccessDeniedException: ... logs:DescribeLogGroups on
+        resource: arn:aws:logs:...:log-group::log-stream:``.
+        """
+        body = _policy_body_for_role("deploy", self.text)
+        # The CloudWatchLogsManagement Sid keeps the per-log-group
+        # Resource for the wildcard-matched actions; the
+        # CloudWatchLogsAccountLevelReads Sid adds
+        # DescribeLogGroups / ListTagsForResource on Resource = "*".
+        self.assertRegex(
+            body,
+            r'Sid\s*=\s*"CloudWatchLogsAccountLevelReads"\s*Effect\s*=\s*"Allow"',
+            "deploy policy must include a CloudWatchLogsAccountLevelReads Sid "
+            "so logs:DescribeLogGroups works against the per-env apply's "
+            "account-level API call",
+        )
+        self.assertRegex(
+            body,
+            r'"logs:DescribeLogGroups"\s*,\s*"logs:ListTagsForResource"',
+            "CloudWatchLogsAccountLevelReads Sid must grant both "
+            "logs:DescribeLogGroups and logs:ListTagsForResource",
+        )
+        self.assertRegex(
+            body,
+            r'Resource\s*=\s*"\*"',
+            'CloudWatchLogsAccountLevelReads Sid must use Resource = "*" '
+            "(the action is account-scoped)",
+        )
+
+    def test_shared_s3_buckets_read_present(self):
+        """The deploy policy MUST grant read access to the shared
+        ``agent-logs`` and ``stt-models`` buckets.
+
+        The per-env apply's
+        ``data \"aws_s3_bucket\" \"agent_logs\"`` /
+        ``data \"aws_s3_bucket\" \"stt_models\"`` data sources
+        (and the EC2 user-data downloading the STT model) need
+        ``s3:GetObject`` and ``s3:ListBucket`` on these buckets.
+        The existing S3 grants are scoped to the state bucket
+        (``dev/*`` / ``prod/*`` prefix) and don't cover them.
+        Without this Sid, the per-env apply errors mid-plan with
+        ``Error: reading S3 Bucket (gwc-blitzlog-agent-logs):
+        empty result``.
+        """
+        body = _policy_body_for_role("deploy", self.text)
+        self.assertRegex(
+            body,
+            r'Sid\s*=\s*"SharedS3BucketRead"',
+            "deploy policy must include a SharedS3BucketRead Sid "
+            "for the shared agent-logs and stt-models buckets",
+        )
+        for action in ("s3:GetObject", "s3:ListBucket"):
+            with self.subTest(action=action):
+                self.assertIn(
+                    f'"{action}"',
+                    body,
+                    f"SharedS3BucketRead Sid must grant {action}",
+                )
+        # The Resource must include both bucket ARNs and their
+        # */object suffixes.
+        self.assertRegex(
+            body,
+            r"aws_s3_bucket\.agent_logs\.arn",
+            "SharedS3BucketRead Sid must include aws_s3_bucket.agent_logs.arn",
+        )
+        self.assertRegex(
+            body,
+            r"aws_s3_bucket\.stt_models\.arn",
+            "SharedS3BucketRead Sid must include aws_s3_bucket.stt_models.arn",
+        )
 
     def test_iam_management_actions_present(self):
         """The deploy policy MUST include the actions terraform needs

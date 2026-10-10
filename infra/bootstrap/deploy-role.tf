@@ -364,6 +364,25 @@ resource "aws_iam_role_policy" "deploy" {
         Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/blitzlog-*-handler"
       },
       {
+        # CloudWatch Logs: account-level `DescribeLogGroups` /
+        # `ListTagsForResource`. The per-env apply's
+        # `aws_cloudwatch_log_group` resource calls
+        # `DescribeLogGroups` with no log-group filter; the
+        # resource-ARN-constrained grant above doesn't match
+        # an empty log-group name in the API call (the
+        # wildcard `blitzlog-*-handler` requires at least one
+        # character). Without this, the apply errors with
+        # `AccessDeniedException: ... logs:DescribeLogGroups on
+        # resource: arn:aws:logs:...:log-group::log-stream:`.
+        Sid    = "CloudWatchLogsAccountLevelReads"
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogGroups",
+          "logs:ListTagsForResource",
+        ]
+        Resource = "*"
+      },
+      {
         # SSM Parameter Store: per-env credentials and runtime
         # config under /blitzlog/<env>/*. The user-pool namespace
         # (/blitzlog/users/*) is env-independent; per-env stacks
@@ -385,6 +404,47 @@ resource "aws_iam_role_policy" "deploy" {
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/dev/*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/prod/*",
+        ]
+      },
+      {
+        # SSM Parameter Store: account-level reads the per-env
+        # apply needs to enumerate parameters and tags. The two
+        # actions in this Sid are account-scoped (they don't
+        # operate on a specific parameter ARN), so the resource
+        # has to be "*". Without this the `aws_ssm_parameter`
+        # resources in the per-env apply error mid-plan with
+        # `AccessDeniedException: ... ssm:DescribeParameters on
+        # resource: arn:aws:ssm:...:*`.
+        Sid    = "SSMAccountLevelReads"
+        Effect = "Allow"
+        Action = [
+          "ssm:DescribeParameters",
+          "ssm:ListTagsForResource",
+        ]
+        Resource = "*"
+      },
+      {
+        # S3: read access to the shared `agent-logs` and
+        # `stt-models` buckets. The per-env apply's
+        # `data "aws_s3_bucket" "agent_logs"` /
+        # `data "aws_s3_bucket" "stt_models"` data sources (and
+        # the STT model download from the EC2 user-data) need to
+        # read these. The bootstrap's S3 state-file grant is
+        # scoped to the state bucket's `dev/*` / `prod/*` prefix
+        # and doesn't cover these.
+        Sid    = "SharedS3BucketRead"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+        ]
+        Resource = [
+          aws_s3_bucket.agent_logs.arn,
+          "${aws_s3_bucket.agent_logs.arn}/*",
+          aws_s3_bucket.stt_models.arn,
+          "${aws_s3_bucket.stt_models.arn}/*",
         ]
       },
     ]
