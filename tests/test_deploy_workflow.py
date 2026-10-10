@@ -535,6 +535,15 @@ class TestDeployRole(unittest.TestCase):
             "SharedS3BucketRead Sid must include aws_s3_bucket.stt_models.arn",
         )
 
+    def test_sns_list_tags_for_resource_present(self):
+        body = _policy_body_for_role("deploy", self.text)
+        self.assertIn('"sns:ListTagsForResource"', body)
+
+    def test_iam_instance_profile_read_present(self):
+        body = _policy_body_for_role("deploy", self.text)
+        self.assertRegex(body, r'Sid\s*=\s*"IAMInstanceProfileRead"')
+        self.assertIn("instance-profile/blitzlog-*", body)
+
     def test_iam_management_actions_present(self):
         """The deploy policy MUST include the actions terraform needs
         to manage the blitzlog Lambda + EC2 agent roles and policies.

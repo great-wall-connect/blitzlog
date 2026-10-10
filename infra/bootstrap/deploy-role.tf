@@ -218,6 +218,25 @@ resource "aws_iam_role_policy" "deploy" {
         Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/blitzlog-*"
       },
       {
+        # IAM instance profile: the per-env apply refreshes
+        # `aws_iam_instance_profile.ec2_agent_profile` at the
+        # start of `terraform plan`. `iam:GetInstanceProfile` is in
+        # the IAMRoleManagement Action list, but the Resource is
+        # scoped to `role/blitzlog-*` — which doesn't match the
+        # instance profile's ARN format (`instance-profile/...`).
+        # Without this separate Sid, the apply errors mid-plan
+        # with:
+        #   Error: reading IAM Instance Profile (...): User is not
+        #   authorized to perform: iam:GetInstanceProfile
+        Sid    = "IAMInstanceProfileRead"
+        Effect = "Allow"
+        Action = [
+          "iam:GetInstanceProfile",
+          "iam:ListInstanceProfilesForRole",
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:instance-profile/blitzlog-*"
+      },
+      {
         # iam:PassRole for the EC2 agent role. The Lambda assumes
         # this role on the EC2 instance profile; terraform needs to
         # be able to pass it on create. Conditional on the EC2
@@ -319,6 +338,13 @@ resource "aws_iam_role_policy" "deploy" {
           "sns:Unsubscribe",
           "sns:TagResource",
           "sns:UntagResource",
+          # `ListTagsForResource` is needed by the terraform AWS
+          # provider to refresh the existing SNS topic's tag set
+          # at the start of `terraform plan`. Without it, the
+          # apply errors mid-plan with:
+          #   Error: listing tags for SNS Topic (...): User is not
+          #   authorized to perform: SNS:ListTagsForResource
+        "sns:ListTagsForResource",
         ]
         Resource = [
           "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:blitzlog-*-alerts",
