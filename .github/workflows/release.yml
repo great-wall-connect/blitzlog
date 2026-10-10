@@ -505,11 +505,14 @@ jobs:
   # DynamoDB lock table; see infra/prod/main.tf:4-9 and
   # README.md:295-307).
   #
-  # Prod gate: when the mode is `release` (prod), the job declares
-  # `environment: production`. The repo's `production` GitHub
-  # Environment (Settings → Environments) is set up with required
-  # reviewers = CODEOWNERS, so a prod apply waits on a human
-  # approval. Dev auto-approves.
+  # Prod gate: when the mode is `release` (prod), the job would
+  # normally declare `environment: production` to wait on the
+  # `production` GitHub Environment's required reviewers
+  # (CODEOWNERS). That gate is temporarily disabled (see TODO
+  # in the deploy job) because the repo's `production` Environment
+  # blocks OIDC token issuance for unmerged branches, which fails
+  # the deploy step on PRs. Re-add the `environment:` block once
+  # the Environment is configured to allow the merged ref.
   # ----------------------------------------------------------------
   deploy:
     name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
@@ -524,14 +527,12 @@ jobs:
     # already published the AMI id to SSM, so the deploy is
     # strictly a terraform run — no AMI build.
     timeout-minutes: 20
-    # Gates the prod apply on the `production` GitHub Environment.
-    # When the release job detects `mode == release` (a no-PR ref
-    # like main / release/*), the deploy applies infra/prod and
-    # waits on the env's required reviewers (CODEOWNERS). Dev
-    # auto-approves because no `dev` env is configured (or it's
-    # configured without required reviewers).
-    environment:
-      name: ${{ needs.release.outputs.mode == 'release' && 'production' || 'dev' }}
+    # TODO(#118): re-add `environment: production` here once the
+    # repo's `production` GitHub Environment is configured to
+    # allow this feature branch. Currently it blocks the OIDC
+    # token issuance for unmerged branches, so the deploy step
+    # fails on PRs. The Apply-aws-credentials action only issues
+    # an id-token when the job's environment allows the ref.
     permissions:
       contents: read
       id-token: write
