@@ -75,6 +75,15 @@ jobs:
     # grew the budget from the previous 20min.
     timeout-minutes: 35
 
+    # Job-level outputs surfaced to the `deploy` job below. Mirrors
+    # the step-level outputs from the Detect step (mode / pr_number /
+    # new_version) so the deploy job can map mode -> env without
+    # re-running the same git-cliff / gh-pr-list logic.
+    outputs:
+      mode: ${{ steps.detect.outputs.mode }}
+      pr_number: ${{ steps.detect.outputs.pr_number }}
+      new_version: ${{ steps.detect.outputs.new_version }}
+
     env:
       IMAGE_NAME: blitzlog-agent
       REGISTRY: ghcr.io
@@ -473,3 +482,265 @@ jobs:
         with:
           tag_name: v${{ steps.detect.outputs.new_version }}
           files: infra/blitzlog-lambda.zip
+
+  # ----------------------------------------------------------------
+  # Apply terraform to the env implied by the release mode
+  # (issue #92). The `release` job above already determined the mode
+  # (pr-test vs release) from the ref's open-PR status; this job
+  # maps that to a per-env stack:
+  #
+  #   pr-test  -> apply infra/dev
+  #   release -> apply infra/prod
+  #
+  # OIDC role: blitzlog-deploy-role, provisioned by
+  # infra/bootstrap/deploy-role.tf. Trust policy mirrors the
+  # Packer role's OIDC block (any branch of great-wall-connect/
+  # blitzlog) but drops the EC2 service-principal statement — the
+  # local-exec in infra/modules/core/lambda.tf:35-92 runs on the
+  # runner, not on an EC2 instance.
+  #
+  # Per-env concurrency serializes CI runs (cancel-in-progress:
+  # false) so a long apply blocks the next one rather than racing
+  # it. Local-vs-CI races remain possible (the project chose no
+  # DynamoDB lock table; see infra/prod/main.tf:4-9 and
+  # README.md:295-307).
+  #
+  # Prod gate: when the mode is `release` (prod), the job declares
+  # `environment: production`. The repo's `production` GitHub
+  # Environment (Settings → Environments) is set up with required
+  # reviewers = CODEOWNERS, so a prod apply waits on a human
+  # approval. Dev auto-approves.
+  # ----------------------------------------------------------------
+  deploy:
+    name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
+    needs: release
+    # Default `needs.X.result` for `needs: release` is `success`,
+    # so the deploy job does NOT run if the release job failed
+    # (e.g. Packer bake errored or the image build couldn't push).
+    runs-on: ubuntu-26.04-arm
+    # 20 min covers a typical plan + apply + local-exec (Python 3.12
+    # venv + pip install for the lambda bundle, see
+    # infra/modules/core/lambda.tf:35-92). The Packer bake has
+    # already published the AMI id to SSM, so the deploy is
+    # strictly a terraform run — no AMI build.
+    timeout-minutes: 20
+    # Gates the prod apply on the `production` GitHub Environment.
+    # When the release job detects `mode == release` (a no-PR ref
+    # like main / release/*), the deploy applies infra/prod and
+    # waits on the env's required reviewers (CODEOWNERS). Dev
+    # auto-approves because no `dev` env is configured (or it's
+    # configured without required reviewers).
+    environment:
+      name: ${{ needs.release.outputs.mode == 'release' && 'production' || 'dev' }}
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: terraform-${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }}
+      cancel-in-progress: false
+    env:
+      BLITZLOG_ENV: ${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }}
+      STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate' }}
+      AWS_REGION: ap-east-1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # The release job checked out $BUILD_REF; the deploy job
+          # re-checks out the same ref so the same source tree is
+          # applied to the same env. fetch-depth: 0 keeps the git
+          # history for the `null_resource.lambda_build` trigger
+          # hashes (they read the source files via filemd5) to be
+          # deterministic; fetch-tags is unnecessary here because
+          # terraform doesn't read tag history.
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install mise
+        uses: jdx/mise-action@v4
+
+      - name: Install Python toolchain
+        # The local-exec in null_resource.lambda_build resolves
+        # Python 3.12 from `~/.local/share/mise/installs/python/...`
+        # (see infra/modules/core/lambda.tf:65-75). mise.toml pins
+        # python = "3.12", so `mise install` puts it there.
+        run: mise install
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.9.8
+
+      - name: Configure AWS credentials (OIDC) for terraform
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # OIDC into the role provisioned by infra/bootstrap/
+          # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)
+          # is used by the Packer workflow above.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
+          aws-region: ap-east-1
+
+      # Map per-env secrets onto the TF_VAR_* env vars terraform
+      # reads at apply time. We never write the values to disk —
+      # they live only in GITHUB_ENV for the duration of this run.
+      # The secrets are uppercased TF_VAR_<NAME>_<ENV> in the repo
+      # Settings → Secrets UI; the run block maps them to
+      # lowercase TF_VAR_<name> to match terraform's naming
+      # convention.
+      #
+      # The heredoc syntax (`VAR<<EOF\n...\nEOF`) is the GH Actions
+      # pattern for safely passing multi-line values to GITHUB_ENV.
+      # Without it, a PEM private key (newlines!) would be mangled
+      # and `terraform apply` would reject the value.
+      - name: Render TF_VAR_* env from secrets
+        env:
+          # Pull each secret into a single-line shell var named
+          # S_<NAME>. The `secrets[format(...)]` index access
+          # returns "" if the secret is missing, so secrets with
+          # safe defaults (alert_email, aws_profile, ssh_allowed_cidrs,
+          # upload_stt_model, stt_models_bucket_name, ...) flow
+          # through the empty-string path and let terraform use
+          # the variable's default.
+          S_AWS_REGION: ${{ secrets[format('TF_VAR_AWS_REGION_{0}', env.BLITZLOG_ENV)] }}
+          S_VPC_ID: ${{ secrets[format('TF_VAR_VPC_ID_{0}', env.BLITZLOG_ENV)] }}
+          S_EC2_SUBNET_ID: ${{ secrets[format('TF_VAR_EC2_SUBNET_ID_{0}', env.BLITZLOG_ENV)] }}
+          S_SSH_ALLOWED_CIDRS: ${{ secrets[format('TF_VAR_SSH_ALLOWED_CIDRS_{0}', env.BLITZLOG_ENV)] }}
+          S_GITHUB_APP_ID: ${{ secrets[format('TF_VAR_GITHUB_APP_ID_{0}', env.BLITZLOG_ENV)] }}
+          S_GITHUB_APP_PRIVATE_KEY: ${{ secrets[format('TF_VAR_GITHUB_APP_PRIVATE_KEY_{0}', env.BLITZLOG_ENV)] }}
+          S_GITHUB_APP_INSTALLATION_ID: ${{ secrets[format('TF_VAR_GITHUB_APP_INSTALLATION_ID_{0}', env.BLITZLOG_ENV)] }}
+          S_GITHUB_WEBHOOK_SECRET: ${{ secrets[format('TF_VAR_GITHUB_WEBHOOK_SECRET_{0}', env.BLITZLOG_ENV)] }}
+          S_ALERT_EMAIL: ${{ secrets[format('TF_VAR_ALERT_EMAIL_{0}', env.BLITZLOG_ENV)] }}
+          S_OPENCODE_MODEL: ${{ secrets[format('TF_VAR_OPENCODE_MODEL_{0}', env.BLITZLOG_ENV)] }}
+          S_OPENCODE_AGENT_MAX_STEPS: ${{ secrets[format('TF_VAR_OPENCODE_AGENT_MAX_STEPS_{0}', env.BLITZLOG_ENV)] }}
+          S_OPENCODE_API_KEY: ${{ secrets[format('TF_VAR_OPENCODE_API_KEY_{0}', env.BLITZLOG_ENV)] }}
+          S_AGENT_LOGS_BUCKET_NAME: ${{ secrets[format('TF_VAR_AGENT_LOGS_BUCKET_NAME_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_API_URL: ${{ secrets[format('TF_VAR_STT_API_URL_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_API_KEY: ${{ secrets[format('TF_VAR_STT_API_KEY_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_MODEL: ${{ secrets[format('TF_VAR_STT_MODEL_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_LANGUAGE: ${{ secrets[format('TF_VAR_STT_LANGUAGE_{0}', env.BLITZLOG_ENV)] }}
+          S_UPLOAD_STT_MODEL: ${{ secrets[format('TF_VAR_UPLOAD_STT_MODEL_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_MODEL_SOURCE_URL: ${{ secrets[format('TF_VAR_STT_MODEL_SOURCE_URL_{0}', env.BLITZLOG_ENV)] }}
+          S_STT_MODELS_BUCKET_NAME: ${{ secrets[format('TF_VAR_STT_MODELS_BUCKET_NAME_{0}', env.BLITZLOG_ENV)] }}
+          S_AWS_PROFILE: ${{ secrets[format('TF_VAR_AWS_PROFILE_{0}', env.BLITZLOG_ENV)] }}
+          S_SPOT_INSTANCE_TYPES: ${{ secrets[format('TF_VAR_SPOT_INSTANCE_TYPES_{0}', env.BLITZLOG_ENV)] }}
+        run: |
+          set -euo pipefail
+          # write_var NAME VALUE -> GITHUB_ENV using the heredoc
+          # form so multi-line values (notably
+          # GITHUB_APP_PRIVATE_KEY, a PEM) survive intact.
+          write_var() {
+            local var_name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              {
+                echo "${var_name}<<EOF"
+                printf '%s' "$value"
+                echo "EOF"
+              } >> "$GITHUB_ENV"
+            fi
+          }
+          write_var TF_VAR_aws_region "$S_AWS_REGION"
+          write_var TF_VAR_vpc_id "$S_VPC_ID"
+          write_var TF_VAR_ec2_subnet_id "$S_EC2_SUBNET_ID"
+          write_var TF_VAR_ssh_allowed_cidrs "$S_SSH_ALLOWED_CIDRS"
+          write_var TF_VAR_github_app_id "$S_GITHUB_APP_ID"
+          write_var TF_VAR_github_app_private_key "$S_GITHUB_APP_PRIVATE_KEY"
+          write_var TF_VAR_github_app_installation_id "$S_GITHUB_APP_INSTALLATION_ID"
+          write_var TF_VAR_github_webhook_secret "$S_GITHUB_WEBHOOK_SECRET"
+          write_var TF_VAR_alert_email "$S_ALERT_EMAIL"
+          write_var TF_VAR_opencode_model "$S_OPENCODE_MODEL"
+          write_var TF_VAR_opencode_agent_max_steps "$S_OPENCODE_AGENT_MAX_STEPS"
+          write_var TF_VAR_opencode_api_key "$S_OPENCODE_API_KEY"
+          write_var TF_VAR_agent_logs_bucket_name "$S_AGENT_LOGS_BUCKET_NAME"
+          write_var TF_VAR_stt_api_url "$S_STT_API_URL"
+          write_var TF_VAR_stt_api_key "$S_STT_API_KEY"
+          write_var TF_VAR_stt_model "$S_STT_MODEL"
+          write_var TF_VAR_stt_language "$S_STT_LANGUAGE"
+          write_var TF_VAR_upload_stt_model "$S_UPLOAD_STT_MODEL"
+          write_var TF_VAR_stt_model_source_url "$S_STT_MODEL_SOURCE_URL"
+          write_var TF_VAR_stt_models_bucket_name "$S_STT_MODELS_BUCKET_NAME"
+          write_var TF_VAR_aws_profile "$S_AWS_PROFILE"
+          write_var TF_VAR_spot_instance_types "$S_SPOT_INSTANCE_TYPES"
+
+          # Required-var sanity check: at least one of the bare
+          # required vars must be set, otherwise the apply will
+          # surface a confusing "variable not set" error mid-run.
+          if [ -z "${TF_VAR_aws_region:-}" ]; then
+            echo "FATAL: TF_VAR_AWS_REGION_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
+            exit 1
+          fi
+          if [ -z "${TF_VAR_vpc_id:-}" ]; then
+            echo "FATAL: TF_VAR_VPC_ID_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
+            exit 1
+          fi
+          if [ -z "${TF_VAR_github_app_id:-}" ]; then
+            echo "FATAL: TF_VAR_GITHUB_APP_ID_${BLITZLOG_ENV^^} is not set in repo secrets" >&2
+            exit 1
+          fi
+
+      # Backend config is passed inline so no `*.hcl` file is
+      # materialized on the runner. The bucket comes from
+      # secrets.TF_BACKEND_BUCKET (the operator may use a
+      # non-default state bucket), the key is per-env
+      # (<env>/blitzlog.tfstate), the region is hard-coded
+      # ap-east-1 (matches the bootstrap role's trust policy).
+      - name: terraform init
+        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=ap-east-1"
+
+      - name: terraform validate
+        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        run: |
+          set -euo pipefail
+          # -out=tfplan serialises the plan to a file so the
+          # apply step consumes the exact same plan (no drift
+          # between plan and apply). -no-color keeps the log
+          # readable in the GH Actions UI.
+          terraform plan -no-color -input=false -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ env.BLITZLOG_ENV }}
+          path: infra/${{ env.BLITZLOG_ENV }}/tfplan
+          # 14-day retention matches the issue body's plan
+          # reusability goal (the plan is a snapshot, not a
+          # long-lived artifact).
+          retention-days: 14
+
+      - name: terraform apply
+        id: apply
+        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        # Always consumes the plan from the previous step; never
+        # re-plans in-band. Keeps plan↔apply symmetric so a
+        # reviewer looking at the artifact can be sure the apply
+        # matches what they saw.
+        run: terraform apply -no-color -input=false tfplan
+
+      - name: Capture terraform output
+        if: steps.apply.outcome == 'success'
+        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        # `webhook_url` is the only output the operator needs
+        # after a successful apply (it's the URL the GitHub App
+        # webhook should target). Capture the full -json output
+        # to the run summary so the operator can grep for any
+        # other outputs without re-running plan/apply.
+        run: |
+          set -euo pipefail
+          terraform output -no-color -json > /tmp/tf-output.json
+          {
+            echo "## Terraform output (${{ env.BLITZLOG_ENV }})"
+            echo
+            jq -r 'to_entries[] | "- **\(.key)**: `\(.value.value // "null")`"' /tmp/tf-output.json
+          } >> "$GITHUB_STEP_SUMMARY"

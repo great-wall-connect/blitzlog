@@ -8,12 +8,11 @@
 #
 # Trust policy: GitHub Actions OIDC for the great-wall-connect/blitzlog repo,
 # workflow_file_ref pinned to the packer-build workflow + branch refs.
-
-data "aws_caller_identity" "current" {}
-
-data "aws_iam_role" "admin_sso" {
-  name = "AWSReservedSSO_AdministratorAccess_5305ac39caba2579"
-}
+#
+# The shared `aws_caller_identity.current` and
+# `aws_iam_role.admin_sso` data sources live in
+# infra/bootstrap/data-sources.tf so the deploy role (next door)
+# can reuse them without duplicating the lookup.
 
 locals {
   github_repo   = "great-wall-connect/blitzlog"
