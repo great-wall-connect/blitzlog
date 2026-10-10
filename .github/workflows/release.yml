@@ -542,6 +542,7 @@ jobs:
       BLITZLOG_ENV: ${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }}
       STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate' }}
       AWS_REGION: ap-east-1
+      ACTIONS_STEP_DEBUG: true
 
     steps:
       - name: Checkout
