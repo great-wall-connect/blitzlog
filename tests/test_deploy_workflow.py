@@ -1095,9 +1095,9 @@ class TestDeploySecretsParameters(unittest.TestCase):
             "secrets.tf must declare `aws_ssm_parameter.deploy_secure`",
         )
         body = m.group("body")
-        self.assertIn(
-            'key_id = "alias/aws/ssm"',
+        self.assertRegex(
             body,
+            r'key_id\s*=\s*"alias/aws/ssm"',
             'secrets.tf\'s deploy_secure resource must use `key_id = "alias/aws/ssm"` '
             "(AWS-managed KMS key; free; no key-policy management needed)",
         )
@@ -1131,17 +1131,23 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 "ignore_changes would mask intentional updates.",
             )
 
-    def test_value_precondition_fails_fast_on_null(self):
+    def test_value_precondition_fails_fast_on_null_or_empty(self):
         """Both SSM resources MUST have a ``lifecycle.precondition``
         that fails the apply when ``local.env_values[env][leaf]`` is
-        null (i.e., the operator's per-env tfvars doesn't supply the
-        leaf AND there's no default in ``leaf_defaults``).
+        null OR empty string.
 
-        Without the precondition, the AWS provider errors mid-apply
-        with the cryptic "one of insecure_value, value, value_wo
-        must be specified" — the operator can't tell which SSM
-        parameter is at fault or where to fix it. The precondition
-        fires at plan time with an actionable message.
+        - ``null``: the operator's per-env tfvars doesn't supply the
+          key AND there's no default in ``leaf_defaults`` (the 5
+          required keys have no default).
+        - ``""``: the operator's per-env tfvars doesn't supply the
+          key AND ``leaf_defaults`` has an empty string (e.g. the
+          optional ``agent-logs-bucket-name`` /
+          ``stt-models-bucket-name`` / ``aws-profile``).
+
+        SSM rejects empty values mid-apply with the cryptic
+        "Member must have length greater than or equal to 1"; the
+        precondition catches both cases at plan time with an
+        actionable message.
         """
         for resource_name in ("deploy_string", "deploy_secure"):
             m = re.search(
@@ -1155,11 +1161,11 @@ class TestDeploySecretsParameters(unittest.TestCase):
             body = m.group("body")
             self.assertRegex(
                 body,
-                r"lifecycle\s*\{[^}]*precondition\s*\{[^}]*condition\s*=\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*null",
+                r"lifecycle\s*\{[^}]*precondition\s*\{[^}]*condition\s*=\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*null\s*&&\s*local\.env_values\[each\.value\.env\]\[each\.value\.leaf\]\s*!=\s*\"\"",
                 f"secrets.tf's {resource_name} must have a "
-                "`lifecycle { precondition { condition = local.env_values[...] != null } }` "
-                "so a missing per-env tfvars value fails at plan time with a clear error, "
-                "not mid-apply with the AWS provider's cryptic value-required message.",
+                '`lifecycle { precondition { condition = local.env_values[...] != null && != "" } }` '
+                "so missing OR empty per-env tfvars values fail at plan time with a clear error, "
+                "not mid-apply with the AWS provider's cryptic value-required or length-constraint messages.",
             )
             # The error message must name the missing key and point
             # at the per-env tfvars the operator needs to edit.
@@ -1169,6 +1175,34 @@ class TestDeploySecretsParameters(unittest.TestCase):
                 f"secrets.tf's {resource_name} precondition error_message must "
                 "name the missing SSM parameter and tell the operator which per-env "
                 "tfvars to edit.",
+            )
+
+    def test_overwrite_true_for_legacy_params(self):
+        """Both SSM resources MUST set ``overwrite = true``.
+
+        Without it, a re-apply against an AWS account that already
+        has these parameters (e.g. from a previous bootstrap apply
+        with the placeholder design) errors mid-apply with
+        ``ParameterAlreadyExists``. ``overwrite = true`` makes
+        ``PutParameter`` pass ``Overwrite=true`` so the new value
+        replaces the old one.
+        """
+        for resource_name in ("deploy_string", "deploy_secure"):
+            m = re.search(
+                rf'(?ms)resource\s+"aws_ssm_parameter"\s+"{resource_name}"\s*\{{(?P<body>.*?)\n\}}',
+                self.text,
+            )
+            self.assertIsNotNone(
+                m,
+                f"secrets.tf must declare `aws_ssm_parameter.{resource_name}`",
+            )
+            body = m.group("body")
+            self.assertRegex(
+                body,
+                r"overwrite\s*=\s*true",
+                f"secrets.tf's {resource_name} must have `overwrite = true` "
+                "so a re-apply against an account with existing parameters "
+                "doesn't fail with ParameterAlreadyExists.",
             )
 
     def test_parameter_names_match_ssm_layout(self):

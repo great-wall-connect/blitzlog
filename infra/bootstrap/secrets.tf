@@ -140,18 +140,27 @@ resource "aws_ssm_parameter" "deploy_string" {
   name  = "/blitzlog/${each.value.env}/${each.value.leaf}"
   type  = "String"
   value = local.env_values[each.value.env][each.value.leaf]
+  # The previous bootstrap apply created these parameters in AWS
+  # (with placeholder values, before the map-based design was
+  # implemented). `overwrite = true` makes `PutParameter` pass
+  # `Overwrite=true` so a re-apply with new values succeeds instead
+  # of erroring with `ParameterAlreadyExists`.
+  overwrite = true
 
-  # Fail fast at plan time if a value resolved to null (the 5
-  # required keys have no default in `leaf_defaults`; if the
-  # operator's per-env tfvars doesn't supply them, the lookup
-  # yields `null` and the AWS provider otherwise errors with the
-  # cryptic "one of insecure_value, value, value_wo must be
-  # specified" mid-apply). The error message tells the operator
-  # exactly which key to add and where.
+  # Fail fast at plan time if a value is missing or empty:
+  # - `null`: the operator's per-env tfvars doesn't supply the
+  #   key, AND there's no default in `leaf_defaults` (the 5
+  #   required keys have no default).
+  # - `""`: the operator's per-env tfvars doesn't supply the key,
+  #   AND `leaf_defaults` has an empty string (e.g. the optional
+  #   bucket-name keys). SSM rejects empty values with the
+  #   cryptic "Member must have length greater than or equal to 1"
+  #   mid-apply; the precondition catches it at plan time with a
+  #   self-explanatory message.
   lifecycle {
     precondition {
-      condition     = local.env_values[each.value.env][each.value.leaf] != null
-      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+      condition     = local.env_values[each.value.env][each.value.leaf] != null && local.env_values[each.value.env][each.value.leaf] != ""
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value (or is empty). Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
     }
   }
 
@@ -176,18 +185,20 @@ resource "aws_ssm_parameter" "deploy_secure" {
     }
   }
 
-  name   = "/blitzlog/${each.value.env}/${each.value.leaf}"
-  type   = "SecureString"
-  value  = local.env_values[each.value.env][each.value.leaf]
-  key_id = "alias/aws/ssm"
+  name      = "/blitzlog/${each.value.env}/${each.value.leaf}"
+  type      = "SecureString"
+  value     = local.env_values[each.value.env][each.value.leaf]
+  key_id    = "alias/aws/ssm"
+  overwrite = true
 
-  # Same precondition as deploy_string — the AWS provider's
-  # mid-apply "value: one of ..." error doesn't tell the operator
-  # which key is missing or where to add it.
+  # Same precondition as deploy_string — null means the key is
+  # missing entirely, empty string means the leaf_defaults
+  # fallback was empty (catches the bucket-name and aws-profile
+  # cases the operator commonly forgets to set).
   lifecycle {
     precondition {
-      condition     = local.env_values[each.value.env][each.value.leaf] != null
-      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value. Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
+      condition     = local.env_values[each.value.env][each.value.leaf] != null && local.env_values[each.value.env][each.value.leaf] != ""
+      error_message = "/blitzlog/${each.value.env}/${each.value.leaf} has no value (or is empty). Add the key to terraform.${each.value.env}.tfvars as `${each.value.leaf} = \"...\"` inside the ${each.value.env} = { ... } block."
     }
   }
 
