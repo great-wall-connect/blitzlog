@@ -1,0 +1,245 @@
+name: terraform-apply-dev
+
+# Manual workflow to apply infra/dev without going through the
+# full release cycle (release.yml takes ~35 min for the image
+# build + Packer bake; this workflow is a ~3-5 min terraform-only
+# path). Use this when:
+#
+#   - You changed only infra/dev/* (e.g. tfvars, module code, IAM
+#     policy) and don't need a new image baked.
+#   - You want to verify a feature branch's infra changes against
+#     a real AWS account before merging.
+#   - You rotated a secret (TF_VAR_*) and want to push the new
+#     value into the dev Lambda's environment without a release.
+#
+# Triggers: workflow_dispatch only. No auto-apply on push or PR.
+#
+# Prod is NOT exposed here — prod applies are part of the
+# canonical release cycle (.github/workflows/release.yml in
+# release mode) and require CODEOWNERS approval via the
+# `production` GitHub Environment. The manual dev path is the
+# fast-feedback escape hatch for non-prod work.
+#
+# Concurrency: group `terraform-dev` serializes CI runs
+# (cancel-in-progress: false) so a long apply blocks the next
+# one rather than racing it. Local-vs-CI races remain possible
+# (the project chose no DynamoDB lock table; see
+# README.md:295-307).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag to apply from. Defaults to `github.ref_name` (the branch the workflow was triggered from)."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply-dev:
+    name: Apply terraform (dev)
+    runs-on: ubuntu-26.04-arm
+    # 20 min covers a typical plan + apply + local-exec (Python 3.12
+    # venv + pip install for the lambda bundle, see
+    # infra/modules/core/lambda.tf:35-92). The local-exec is the
+    # slow step on cold caches; subsequent runs reuse the venv
+    # and finish in <5 min.
+    timeout-minutes: 20
+    concurrency:
+      group: terraform-dev
+      cancel-in-progress: false
+    env:
+      BLITZLOG_ENV: dev
+      STATE_KEY: dev/blitzlog.tfstate
+      AWS_REGION: ap-east-1
+      # Default to the workflow's ref_name when the operator
+      # leaves the input blank (typical when dispatched from
+      # the GitHub UI on a feature branch).
+      BUILD_REF: ${{ inputs.ref || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BUILD_REF }}
+          # fetch-depth: 0 keeps git history available for
+          # `null_resource.lambda_build`'s filemd5 triggers
+          # (infra/modules/core/lambda.tf:35-92) and matches
+          # the `terraform_data` provisioner behavior.
+          fetch-depth: 0
+
+      - name: Install mise
+        uses: jdx/mise-action@v4
+
+      - name: Install Python toolchain
+        # The local-exec in null_resource.lambda_build resolves
+        # Python 3.12 from `~/.local/share/mise/installs/python/...`
+        # (see infra/modules/core/lambda.tf:65-75). mise.toml pins
+        # python = "3.12", so `mise install` puts it there.
+        run: mise install
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.9.8
+
+      - name: Configure AWS credentials (OIDC) for terraform
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # OIDC into the role provisioned by infra/bootstrap/
+          # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)
+          # is used by the Packer workflow in release.yml.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
+          aws-region: ap-east-1
+
+      # Fetch per-env deploy config + secrets from SSM Parameter
+      # Store. The deploy role (infra/bootstrap/deploy-role.tf)
+      # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the
+      # OIDC session can read these. We fetch the entire dev
+      # subtree in one round trip (cheaper + atomic) and map
+      # each parameter's leaf name to a TF_VAR_<name> env var
+      # (hyphens -> underscores).
+      #
+      # The values are written to GITHUB_ENV using the heredoc
+      # form so multi-line PEM private keys survive intact. The
+      # values never touch the runner's filesystem, and they
+      # never enter the GH Actions secret context (so PRs from
+      # forks on this public repo can't read them).
+      #
+      # Placeholder detection: every parameter was provisioned
+      # by infra/bootstrap/secrets.tf with
+      # value=PLACEHOLDER_SET_VIA_AWS_CLI; the bootstrap
+      # `lifecycle.ignore_changes=[value]` keeps the operator's
+      # real value intact across subsequent applies. The sanity
+      # check below fails fast if any value still equals the
+      # placeholder, so a misconfigured operator gets a clear
+      # one-time-setup error rather than a confusing
+      # "GitHub App auth failed" deep inside the Lambda at
+      # runtime.
+      - name: Render TF_VAR_* env from SSM
+        env:
+          BLITZLOG_ENV: dev
+        run: |
+          set -euo pipefail
+
+          SSM_PATH="/blitzlog/${BLITZLOG_ENV}/"
+          aws ssm get-parameters-by-path \
+            --path "${SSM_PATH}" \
+            --recursive \
+            --with-decryption \
+            --output json > /tmp/ssm-params.json
+
+          # Fail fast if any required parameter is missing
+          # entirely (operator hasn't run the bootstrap apply,
+          # or added a TF var to variables.tf without adding the
+          # corresponding SSM parameter to secrets.tf).
+          for required in \
+            aws-region vpc-id github-app-id \
+            github-app-private-key github-app-installation-id \
+            github-webhook-secret opencode-api-key \
+            agent-logs-bucket-name; do
+            if ! jq -e --arg n "${SSM_PATH}${required}" \
+                 '.Parameters[] | select(.Name == $n)' /tmp/ssm-params.json > /dev/null; then
+              echo "FATAL: ${SSM_PATH}${required} is not set in SSM" >&2
+              echo "  Run 'cd infra/bootstrap && terraform apply' first," >&2
+              echo "  then update the placeholder with:" >&2
+              echo "    aws ssm put-parameter --name ${SSM_PATH}${required} --type SecureString --value <real> --overwrite" >&2
+              exit 1
+            fi
+          done
+
+          # Fail fast if any value is still the bootstrap
+          # placeholder (operator hasn't replaced it yet).
+          if placeholders=$(jq -r '.Parameters[] | select(.Value == "PLACEHOLDER_SET_VIA_AWS_CLI") | .Name' /tmp/ssm-params.json); [ -n "$placeholders" ]; then
+            echo "FATAL: the following SSM parameters still have the bootstrap placeholder value:" >&2
+            echo "$placeholders" | sed 's/^/  /' >&2
+            echo "" >&2
+            echo "  Update each one with the real value via:" >&2
+            echo "    aws ssm put-parameter --name <name> --type SecureString --value <real> --overwrite" >&2
+            echo "  See README §One-time operator setup for the full list." >&2
+            exit 1
+          fi
+
+          # Render each parameter to GITHUB_ENV in heredoc form.
+          # The mapping is:
+          #   /blitzlog/<env>/github-app-private-key  ->  TF_VAR_github_app_private_key
+          # (leaf name with hyphens replaced by underscores).
+          # Heredoc form preserves multi-line PEM values.
+          jq -r '
+            .Parameters[] |
+            (.Name | split("/") | last) as $leaf |
+            "TF_VAR_" + ($leaf | gsub("-";"_")) + "<<EOF\n" + .Value + "\nEOF"
+          ' /tmp/ssm-params.json >> "$GITHUB_ENV"
+
+      # Backend config is passed inline so no `*.hcl` file is
+      # materialized on the runner. The bucket comes from the
+      # repo variable TF_BACKEND_BUCKET (with a default of
+      # `gwc-infra-tf-state` so the standard install needs no
+      # operator action; the variable exists for non-default
+      # state buckets), the key is `dev/blitzlog.tfstate`
+      # to match infra/prod/main.tf's backend handoff, the region
+      # is hard-coded ap-east-1.
+      - name: terraform init
+        working-directory: infra/dev
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=ap-east-1"
+
+      - name: terraform validate
+        working-directory: infra/dev
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        working-directory: infra/dev
+        run: |
+          set -euo pipefail
+          # -out=tfplan serialises the plan to a file so the
+          # apply step consumes the exact same plan (no drift
+          # between plan and apply). -no-color keeps the log
+          # readable in the GH Actions UI.
+          terraform plan -no-color -input=false -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev
+          path: infra/dev/tfplan
+          # 14-day retention matches the release.yml deploy
+          # path; the plan is a snapshot, not a long-lived
+          # artifact.
+          retention-days: 14
+
+      - name: terraform apply
+        id: apply
+        working-directory: infra/dev
+        # Always consumes the plan from the previous step; never
+        # re-plans in-band. Keeps plan↔apply symmetric so a
+        # reviewer looking at the artifact can be sure the apply
+        # matches what they saw.
+        run: terraform apply -no-color -input=false tfplan
+
+      - name: Capture terraform output
+        if: steps.apply.outcome == 'success'
+        working-directory: infra/dev
+        # `webhook_url` is the only output the operator needs
+        # after a successful apply (it's the URL the GitHub App
+        # webhook should target). Capture the full -json output
+        # to the run summary so the operator can grep for any
+        # other outputs without re-running plan/apply.
+        run: |
+          set -euo pipefail
+          terraform output -no-color -json > /tmp/tf-output.json
+          {
+            echo "## Terraform output (dev)"
+            echo
+            jq -r 'to_entries[] | "- **\(.key)**: `\(.value.value // "null")`"' /tmp/tf-output.json
+          } >> "$GITHUB_STEP_SUMMARY"
