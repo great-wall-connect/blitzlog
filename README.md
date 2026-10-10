@@ -343,21 +343,21 @@ the state bucket). The setup is one-time per repo:
 
    ```bash
    # 1. Copy the example templates to the (gitignored) real files
-   #    and edit them with your real values.
+   #    and edit them with your real values. The `*.auto.tfvars`
+   #    suffix means terraform auto-loads them — no `-var-file`
+   #    flag needed at apply time.
    cd infra/bootstrap
-   cp terraform.dev.tfvars.example terraform.dev.tfvars
-   cp terraform.prod.tfvars.example terraform.prod.tfvars
-   $EDITOR terraform.dev.tfvars terraform.prod.tfvars
+   cp terraform.dev.auto.tfvars.example terraform.dev.auto.tfvars
+   cp terraform.prod.auto.tfvars.example terraform.prod.auto.tfvars
+   $EDITOR terraform.dev.auto.tfvars terraform.prod.auto.tfvars
 
    # 2. Apply bootstrap (provisions S3 buckets + SSM parameters)
    terraform init -backend-config=bootstrap-backend.hcl
-   terraform apply \
-       -var-file=terraform.dev.tfvars \
-       -var-file=terraform.prod.tfvars
+   terraform apply
    ```
 
    Each bootstrap tfvars is a single `var.<env>` map. For
-   example, `terraform.dev.tfvars` looks like:
+   example, `terraform.dev.auto.tfvars` looks like:
 
    ```hcl
    dev = {
@@ -380,12 +380,13 @@ the state bucket). The setup is one-time per repo:
    `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
    required keys (`github-app-id`, `github-app-private-key`,
    `github-app-installation-id`, `github-webhook-secret`,
-   `opencode-api-key`) have no default — the apply fails with
-   "value is required" if the operator omits any of them.
+   `opencode-api-key`) have no default — the apply fails fast
+   at plan time (via the `lifecycle.precondition` on the SSM
+   resources) if the operator omits any of them.
 
-   The `.example` templates are tracked in git; the `.tfvars`
-   files you create from them are **gitignored**
-   (`.gitignore: *.tfvars`).
+   The `.example` templates are tracked in git; the
+   `.auto.tfvars` files you create from them are **gitignored**
+   (`.gitignore: *.tfvars, *.auto.tfvars`).
 
 4. **No `aws ssm put-parameter` step is required.** The bootstrap
    apply writes the values directly to SSM in the same run. The
@@ -407,8 +408,8 @@ the state bucket). The setup is one-time per repo:
    > anyone with read access to the repo.
 
    > **Rotation.** Edit the relevant bootstrap tfvars
-   > (`terraform.dev.tfvars` or `terraform.prod.tfvars`) with
-   > the new value, save, and re-run
+   > (`terraform.dev.auto.tfvars` or `terraform.prod.auto.tfvars`)
+   > with the new value, save, and re-run
    > `cd infra/bootstrap && terraform apply`. The bootstrap
    > writes the new value to SSM in place; the next deploy picks
    > it up. Automated rotation is tracked in issue #120.
