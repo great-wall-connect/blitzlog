@@ -21,6 +21,18 @@ def _blitzlog_env() -> str:
     return os.environ.get("BLITZLOG_ENV", "prod")
 
 
+def _blitzlog_provider() -> str:
+    """Cloud provider key. Set by Terraform as a Lambda env var
+    (`infra/modules/core/lambda.tf`). Drives the dispatch in
+    `lambda/provider/__init__.py`. Phase 1 of #83 only knows
+    `"aws"`; `"alicloud"` is a Phase 2/3 follow-up.
+
+    Defaults to `"aws"` so tests and out-of-Lambda callers
+    continue to work without the env var being explicitly set.
+    """
+    return os.environ.get("BLITZLOG_PROVIDER", "aws").strip().lower() or "aws"
+
+
 def _ssm_root() -> str:
     return f"/blitzlog/{_blitzlog_env()}"
 
@@ -32,6 +44,7 @@ def _ssm_root() -> str:
 # Defaults to "prod" so tests / out-of-Lambda callers continue to work
 # without the BLITZLOG_ENV env var being explicitly set.
 BLITZLOG_ENV = _blitzlog_env()
+BLITZLOG_PROVIDER = _blitzlog_provider()
 SSM_PATH = _ssm_root()
 
 # Per-user data (bot pools, local LLM config) is env-independent — a user

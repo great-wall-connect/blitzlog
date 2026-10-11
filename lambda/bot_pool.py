@@ -14,6 +14,13 @@ Responsibilities:
 Per-user data lives under /blitzlog/users/... (env-independent namespace) so
 prod and dev Lambda instances read the same bot pool — there's one Telegram
 bot pool per user, not per env.
+
+After #83, this module no longer instantiates its own boto3 clients.
+SSM reads go through `provider.get_secrets()` and S3 lock writes go
+through `provider.get_object_store()`. The wire shape — parameter
+names, lock keys, error codes — is byte-identical to the pre-#83
+behaviour so the test suite and the consumer in
+`lambda/handler.py` are unaffected.
 """
 
 import ipaddress
@@ -23,44 +30,33 @@ import socket
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
-import boto3
 from _env import BOT_POOL_SSM_PATH, logger
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from llm_guard import (
     _ip_always_blocked,
     _ip_is_opt_in_only,
     _resolve_endpoint_ips,
 )
-
-_ssm = boto3.client("ssm", config=Config(retries={"max_attempts": 1}))
-_s3 = boto3.client("s3")
+from provider import get_object_store, get_secrets
 
 BOT_POOL_LOCK_PREFIX = "bot-pool-locks"
 BOT_POOL_LOCK_TTL_HOURS = 4
 
 
 def list_bot_pool(sender_login: str) -> dict[str, str]:
-    paginator = _ssm.get_paginator("get_parameters_by_path")
-    pages = paginator.paginate(
-        Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/pool",
-        WithDecryption=True,
+    params = get_secrets().get_by_path(
+        f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/pool",
+        decrypt=True,
     )
-    bots: dict[str, str] = {}
-    for page in pages:
-        for param in page.get("Parameters", []):
-            name = param["Name"].split("/")[-1]
-            bots[name] = param["Value"]
-    return bots
+    return dict(params)
 
 
 def get_telegram_user_id(sender_login: str) -> str | None:
     try:
-        resp = _ssm.get_parameter(
-            Name=f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/allowed-user-id",
-            WithDecryption=False,
+        return get_secrets().get(
+            f"{BOT_POOL_SSM_PATH}/{sender_login}/telegram/allowed-user-id",
+            decrypt=False,
         )
-        return resp["Parameter"]["Value"]
     except ClientError as e:
         if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
             return None
@@ -101,16 +97,10 @@ def get_local_llm_config(sender_login: str) -> dict | None:
         return None
 
     try:
-        paginator = _ssm.get_paginator("get_parameters_by_path")
-        pages = paginator.paginate(
-            Path=f"{BOT_POOL_SSM_PATH}/{sender_login}/local-llm",
-            WithDecryption=True,
+        params = get_secrets().get_by_path(
+            f"{BOT_POOL_SSM_PATH}/{sender_login}/local-llm",
+            decrypt=True,
         )
-        params: dict[str, str] = {}
-        for page in pages:
-            for p in page.get("Parameters", []) or []:
-                key = p["Name"].rsplit("/", 1)[-1]
-                params[key] = p["Value"]
     except ClientError as e:
         if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
             return None
@@ -218,23 +208,26 @@ def _lock_key(sender_login: str, bot_name: str) -> str:
 
 def _get_lock(sender_login: str, bot_name: str, bucket: str) -> dict | None:
     try:
-        resp = _s3.get_object(Bucket=bucket, Key=_lock_key(sender_login, bot_name))
-        data = json.loads(resp["Body"].read().decode())
-        acquired_at = datetime.fromisoformat(data["acquired_at"])
-        if datetime.now(timezone.utc) - acquired_at > timedelta(
-            hours=BOT_POOL_LOCK_TTL_HOURS
-        ):
-            logger.info(
-                "Stale lock for %s (acquired %s), treating as free",
-                bot_name,
-                data["acquired_at"],
-            )
-            return None
-        return data
+        body = get_object_store().get(
+            bucket,
+            _lock_key(sender_login, bot_name),
+        )
     except ClientError as e:
-        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+        if e.response["Error"]["Code"] in ("NoSuchKey", "404", "NotFound"):
             return None
         raise
+    data = json.loads(body.decode())
+    acquired_at = datetime.fromisoformat(data["acquired_at"])
+    if datetime.now(timezone.utc) - acquired_at > timedelta(
+        hours=BOT_POOL_LOCK_TTL_HOURS
+    ):
+        logger.info(
+            "Stale lock for %s (acquired %s), treating as free",
+            bot_name,
+            data["acquired_at"],
+        )
+        return None
+    return data
 
 
 def acquire_bot_token(
@@ -266,10 +259,10 @@ def acquire_bot_token(
             }
         )
         try:
-            _s3.put_object(
-                Bucket=bucket,
-                Key=_lock_key(sender_login, bot_name),
-                Body=lock_payload.encode(),
+            get_object_store().put(
+                bucket,
+                _lock_key(sender_login, bot_name),
+                lock_payload.encode(),
             )
         except ClientError as e:
             logger.warning(
@@ -302,10 +295,10 @@ def _update_lock_instance_id(
         }
     )
     try:
-        _s3.put_object(
-            Bucket=bucket,
-            Key=_lock_key(sender_login, bot_name),
-            Body=lock_payload.encode(),
+        get_object_store().put(
+            bucket,
+            _lock_key(sender_login, bot_name),
+            lock_payload.encode(),
         )
     except ClientError as e:
         logger.warning("Failed to update lock for %s/%s: %s", sender_login, bot_name, e)

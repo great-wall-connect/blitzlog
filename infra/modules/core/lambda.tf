@@ -50,6 +50,14 @@ resource "null_resource" "lambda_build" {
     scripts_autonomous_py = filemd5("${path.module}/../../../lambda/scripts/autonomous.py")
     scripts_assisted_py   = filemd5("${path.module}/../../../lambda/scripts/assisted.py")
 
+    # provider/ subpackage — Phase 1 of #83. The ABCs + AWS concrete
+    # impl + Alicloud stub live here. The build must rebuild the zip
+    # whenever any of them change.
+    provider_init_py     = filemd5("${path.module}/../../../lambda/provider/__init__.py")
+    provider_base_py     = filemd5("${path.module}/../../../lambda/provider/base.py")
+    provider_aws_py      = filemd5("${path.module}/../../../lambda/provider/aws.py")
+    provider_alicloud_py = filemd5("${path.module}/../../../lambda/provider/alicloud.py")
+
     # Runtime deps + the embedded whisper-stt shim
     requirements = filemd5("${path.module}/../../../lambda/requirements.txt")
   }
@@ -108,6 +116,12 @@ resource "aws_lambda_function" "handler" {
   environment {
     variables = {
       BLITZLOG_ENV              = var.environment
+      # Cloud-provider key. Phase 1 of #83: only "aws" is implemented.
+      # Alicloud is a Phase 2/3 follow-up (#84, #124). The factory in
+      # lambda/provider/__init__.py reads this on cold start and dispatches
+      # to AwsCompute / AwsSecretStore / AwsObjectStore (or the Alicloud
+      # stubs, which raise NotImplementedError until #124 lands).
+      BLITZLOG_PROVIDER         = "aws"
       VPC_ID                    = var.vpc_id
       EC2_SUBNET_ID             = var.ec2_subnet_id
       EC2_SECURITY_GROUP_ID     = aws_security_group.agent_sg.id

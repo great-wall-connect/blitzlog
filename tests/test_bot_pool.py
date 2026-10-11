@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import provider
 from bot_pool import (
     acquire_bot_token,
     get_local_llm_config,
@@ -13,6 +14,30 @@ from bot_pool import (
     parse_telegram_decision,
 )
 from botocore.exceptions import ClientError
+
+
+def _boto3_dispatch(ssm=None, s3=None):
+    """Build a `side_effect` function for `provider.aws._boto3_client`
+    that returns the right mock per service. Used by tests that
+    exercise both SSM and S3 paths in a single call (e.g.
+    `acquire_bot_token` lists the bot pool from SSM, then reads
+    + writes a lock to S3).
+    """
+    table = {}
+    if ssm is not None:
+        table["ssm"] = ssm
+    if s3 is not None:
+        table["s3"] = s3
+
+    def _dispatch(service, config=None):
+        if service not in table:
+            raise AssertionError(
+                f"unexpected boto3 client requested: {service!r}; "
+                f"known: {sorted(table)}"
+            )
+        return table[service]
+
+    return _dispatch
 
 
 class TestAcquireBotToken(unittest.TestCase):
@@ -31,10 +56,26 @@ class TestAcquireBotToken(unittest.TestCase):
             }
         ]
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    def setUp(self):
+        # The bot_pool module grabs the secret-store / object-store
+        # singletons at import time. Force a fresh dispatch for each
+        # test so the patched `_boto3_client` shim is the one the
+        # singletons route through.
+        provider.reset_provider_singletons()
+
+    def _patch_boto3(self, mock_boto3_client, ssm=None, s3=None):
+        """Wire the patched `_boto3_client` shim to the right
+        per-service mocks. The shim is the single canonical patch
+        target introduced in #83.
+        """
+        mock_boto3_client.side_effect = _boto3_dispatch(ssm=ssm, s3=s3)
+
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_all_bots_free_returns_first_sorted(self, mock_ssm, mock_s3):
+    def test_all_bots_free_returns_first_sorted(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -53,10 +94,12 @@ class TestAcquireBotToken(unittest.TestCase):
         self.assertEqual(bot_name, "chaparro")
         self.assertEqual(bot_token, "token2")
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_some_bots_locked_skips_to_free(self, mock_ssm, mock_s3):
+    def test_some_bots_locked_skips_to_free(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -86,10 +129,12 @@ class TestAcquireBotToken(unittest.TestCase):
         bot_name, _ = result
         self.assertEqual(bot_name, "escobar")
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_all_bots_locked_returns_none(self, mock_ssm, mock_s3):
+    def test_all_bots_locked_returns_none(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -113,10 +158,12 @@ class TestAcquireBotToken(unittest.TestCase):
         result = acquire_bot_token(self.SENDER, "i-test", "org/repo", 42)
         self.assertIsNone(result)
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_stale_lock_overwritten(self, mock_ssm, mock_s3):
+    def test_stale_lock_overwritten(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -142,10 +189,12 @@ class TestAcquireBotToken(unittest.TestCase):
         bot_name, _ = result
         self.assertEqual(bot_name, "escobar")
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_recent_lock_not_overwritten(self, mock_ssm, mock_s3):
+    def test_recent_lock_not_overwritten(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -168,18 +217,21 @@ class TestAcquireBotToken(unittest.TestCase):
         result = acquire_bot_token(self.SENDER, "i-test", "org/repo", 42)
         self.assertIsNone(result)
 
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_empty_pool_returns_none(self, mock_ssm):
+    def test_empty_pool_returns_none(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
 
         result = acquire_bot_token(self.SENDER, "i-test", "org/repo", 42)
         self.assertIsNone(result)
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_lock_key_is_sender_scoped(self, mock_ssm, mock_s3):
+    def test_lock_key_is_sender_scoped(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -198,10 +250,12 @@ class TestAcquireBotToken(unittest.TestCase):
             f"bot-pool-locks/{self.SENDER}/escobar.json",
         )
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_get_lock_reads_sender_scoped_key(self, mock_ssm, mock_s3):
+    def test_get_lock_reads_sender_scoped_key(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = self._pool_pages(
             [
                 ("escobar", "token1"),
@@ -220,10 +274,12 @@ class TestAcquireBotToken(unittest.TestCase):
             f"bot-pool-locks/{self.SENDER}/escobar.json",
         )
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_pool_pagination_scoped_to_user(self, mock_ssm, mock_s3):
+    def test_pool_pagination_scoped_to_user(self, mock_boto3_client):
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        self._patch_boto3(mock_boto3_client, ssm=mock_ssm, s3=mock_s3)
         mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
         mock_s3.get_object.side_effect = ClientError(
             {"Error": {"Code": "NoSuchKey"}}, "GetObject"
@@ -237,10 +293,10 @@ class TestAcquireBotToken(unittest.TestCase):
             f"/blitzlog/users/{self.SENDER}/telegram/pool",
         )
 
-    @patch("bot_pool._s3")
-    @patch("bot_pool._ssm")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"S3_LOGS_BUCKET": "test-bucket"})
-    def test_user_without_pool_returns_none(self, mock_ssm, mock_s3):
+    def test_user_without_pool_returns_none(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
 
         result = acquire_bot_token("lonely-user", "i-test", "org/repo", 42)
@@ -248,8 +304,9 @@ class TestAcquireBotToken(unittest.TestCase):
 
 
 class TestGetTelegramUserId(unittest.TestCase):
-    @patch("bot_pool._ssm")
-    def test_returns_value_when_present(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_value_when_present(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "12345"}}
         self.assertEqual(get_telegram_user_id("octocat"), "12345")
         call = mock_ssm.get_parameter.call_args
@@ -258,8 +315,9 @@ class TestGetTelegramUserId(unittest.TestCase):
             "/blitzlog/users/octocat/telegram/allowed-user-id",
         )
 
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_missing(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_missing(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_parameter.side_effect = ClientError(
             {"Error": {"Code": "ParameterNotFound"}}, "GetParameter"
         )
@@ -302,7 +360,7 @@ class TestParseTelegramDecision(unittest.TestCase):
 
     def test_free_text_message_ignored(self):
         payload = {"result": [{"message": {"text": "hi"}}]}
-        self.assertIsNone(parse_telegram_decision(payload, {"retry", "cloud", "abort"}))
+        self.assertIsNone(parse_telegram_decision(payload, {"retry", "abort"}))
 
     def test_multiple_updates_first_matching_wins(self):
         payload = {
@@ -337,35 +395,40 @@ def _local_llm_pages(params, login="octocat"):
 
 
 class TestGetLocalLlmConfig(unittest.TestCase):
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_no_params(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_no_params(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
         self.assertIsNone(get_local_llm_config("octocat"))
 
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_ssm_path_missing(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_ssm_path_missing(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.side_effect = ClientError(
             {"Error": {"Code": "ParameterNotFound"}}, "GetParametersByPath"
         )
         self.assertIsNone(get_local_llm_config("octocat"))
 
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_endpoint_missing(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_endpoint_missing(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {"model": "qwen2.5-coder:32b"}
         )
         self.assertIsNone(get_local_llm_config("octocat"))
 
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_model_missing(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_model_missing(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {"endpoint": "http://100.64.0.5:11434"}
         )
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_accepts_tailscale_cgnat_when_opt_in(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_accepts_tailscale_cgnat_when_opt_in(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://100.64.0.5:11434",
@@ -383,8 +446,11 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertEqual(cfg["fallback"], "cloud")
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_rejects_tailscale_cgnat_without_opt_in(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_rejects_tailscale_cgnat_without_opt_in(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://100.64.0.5:11434",
@@ -395,8 +461,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_rejects_imds_ip(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_rejects_imds_ip(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://169.254.169.254/latest",
@@ -408,8 +475,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_rejects_loopback(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_rejects_loopback(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://127.0.0.1:11434",
@@ -421,8 +489,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_rejects_rfc1918_without_opt_in(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_rejects_rfc1918_without_opt_in(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://10.0.0.5:11434",
@@ -433,8 +502,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_accepts_rfc1918_with_opt_in(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_accepts_rfc1918_with_opt_in(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://10.0.0.5:11434",
@@ -447,8 +517,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNotNone(cfg)
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_hard_rejects_public_ip(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_hard_rejects_public_ip(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "https://llm.example.com",
@@ -460,8 +531,11 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_hard_rejects_public_ip_even_with_opt_in(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_hard_rejects_public_ip_even_with_opt_in(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "https://api.openai.com",
@@ -473,8 +547,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_rejects_non_http_scheme(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_rejects_non_http_scheme(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "ftp://10.0.0.5",
@@ -485,8 +560,11 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNone(get_local_llm_config("octocat"))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_fallback_defaults_to_closed_when_invalid(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_fallback_defaults_to_closed_when_invalid(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://10.0.0.5:11434",
@@ -500,8 +578,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertEqual(cfg["fallback"], "closed")
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_api_key_returned(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_api_key_returned(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://10.0.0.5:11434",
@@ -515,8 +594,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertEqual(cfg["api_key"], "secret-key")
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_empty_api_key_handled(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_empty_api_key_handled(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://10.0.0.5:11434",
@@ -529,13 +609,16 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         cfg = get_local_llm_config("octocat")
         self.assertEqual(cfg["api_key"], "")
 
-    @patch("bot_pool._ssm")
-    def test_returns_none_when_sender_login_empty(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_sender_login_empty(self, mock_boto3_client):
         self.assertIsNone(get_local_llm_config(""))
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_includes_tailscale_auth_key_when_set(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_includes_tailscale_auth_key_when_set(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://100.64.0.5:11434",
@@ -550,8 +633,9 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertEqual(cfg["tailscale_auth_key"], "tskey-auth-foobar")
 
     @patch("bot_pool._resolve_endpoint_ips")
-    @patch("bot_pool._ssm")
-    def test_tailscale_auth_key_empty_when_unset(self, mock_ssm, mock_resolve):
+    @patch("provider.aws._boto3_client")
+    def test_tailscale_auth_key_empty_when_unset(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://100.64.0.5:11434",
@@ -564,8 +648,8 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         self.assertIsNotNone(cfg)
         self.assertEqual(cfg["tailscale_auth_key"], "")
 
-    @patch("bot_pool._ssm")
-    def test_uses_env_independent_ssm_path(self, mock_ssm):
+    @patch("provider.aws._boto3_client")
+    def test_uses_env_independent_ssm_path(self, mock_boto3_client):
         """Regression for handler.py:196 — local-llm config is per-user, not per-env.
 
         The lookup path must be /blitzlog/users/<login>/local-llm (the env-independent
@@ -573,6 +657,7 @@ class TestGetLocalLlmConfig(unittest.TestCase):
         Using the env-prefixed path caused get_local_llm_config to silently return
         None on ParameterNotFound, with no warning logged.
         """
+        mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _local_llm_pages(
             {
                 "endpoint": "http://100.64.0.5:11434",
