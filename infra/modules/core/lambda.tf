@@ -115,7 +115,7 @@ resource "aws_lambda_function" "handler" {
 
   environment {
     variables = {
-      BLITZLOG_ENV              = var.environment
+      BLITZLOG_ENV = var.environment
       # Cloud-provider key. Phase 1 of #83: only "aws" is implemented.
       # Alicloud is a Phase 2/3 follow-up (#84, #124). The factory in
       # lambda/provider/__init__.py reads this on cold start and dispatches
