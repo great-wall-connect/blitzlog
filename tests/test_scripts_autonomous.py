@@ -24,14 +24,44 @@ class TestAutonomousNoSecrets(unittest.TestCase):
         self.assertNotIn("ghp_", script)
         self.assertNotIn("x-access-token:ghp_", script)
         # The GitHub token is set via SSM and passed to the container via
-        # the GITHUB_TOKEN env var; the host bootstrap doesn't configure
-        # git identity (the container does, in entrypoint.sh).
+        # the GITHUB_TOKEN env var. The host bootstrap now also wires
+        # GIT_USER_NAME / GIT_USER_EMAIL for issue #119's audit-trail
+        # fix; the GITHUB_TOKEN export is an unrelated plumbing line.
         self.assertIn("GITHUB_TOKEN=", script)
 
     def test_no_identity_without_sender(self):
         script = build_autonomous_user_data("org/repo", 42)
         self.assertNotIn("user.name", script)
         self.assertNotIn("user.email", script)
+
+    def test_identity_block_present_with_sender(self):
+        """Issue #119: when the Lambda forwards the issue's
+        `sender_login` / `sender_id`, the bootstrap must (a)
+        `git config --global user.{name,email}` on the host so any
+        host-side git operation (`_session_restore_script` in
+        assisted mode; future pre-clone operations in autonomous)
+        is attributed to the human who triggered the run, and (b)
+        set `GIT_USER_NAME` / `GIT_USER_EMAIL` so the
+        `/etc/blitzlog.env` heredoc forwards the identity into the
+        container. Without these, the agent's commits land as
+        `root@<hostname>` — unauditable.
+        """
+        script = build_autonomous_user_data("org/repo", 42, "octocat", "12345")
+        # Host-side git config (echo'd by _git_identity_block).
+        self.assertIn('git config --global user.name "octocat"', script)
+        self.assertIn(
+            'git config --global user.email "12345+octocat@users.noreply.github.com"',
+            script,
+        )
+        # Env-var exports so the heredoc can forward to the container.
+        self.assertIn('GIT_USER_NAME="octocat"', script)
+        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', script)
+        # Heredoc lines (the watchdog reads these and `-e`'s them into
+        # the container). Sanity check the wrapper shell-expansion
+        # shape, identical to OPENCODE_PROMPT.
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        self.assertIn('GIT_USER_NAME="${GIT_USER_NAME:-}"', heredoc)
+        self.assertIn('GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"', heredoc)
 
 
 class TestAutonomousModelAndDiagnostics(unittest.TestCase):
@@ -124,7 +154,9 @@ class TestAutonomousEnvFileQuoting(unittest.TestCase):
             "STT_MODELS_BUCKET": "stt-models",
         }
         with patch.dict(os.environ, env):
-            return build_autonomous_user_data("owner/repo", 42)
+            return build_autonomous_user_data(
+                "owner/repo", 42, sender_login="octocat", sender_id="12345"
+            )
 
     def test_blitzlog_env_lines_are_quoted(self):
         """Every `${{VAR...}}` expansion inside the heredoc must be

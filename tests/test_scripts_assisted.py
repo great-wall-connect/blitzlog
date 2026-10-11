@@ -34,10 +34,56 @@ class TestAssistedNoSecrets(unittest.TestCase):
         self.assertNotIn("ghp_", script)
         self.assertNotIn("x-access-token:ghp_", script)
         # The GitHub token is set via SSM and passed to the container via
-        # the GITHUB_TOKEN env var; the host bootstrap doesn't configure
-        # git identity (the container does, in entrypoint.sh).
+        # the GITHUB_TOKEN env var; the host bootstrap also wires
+        # GIT_USER_NAME / GIT_USER_EMAIL for issue #119's audit-trail
+        # fix.
         self.assertIn("GITHUB_TOKEN=", script)
         self.assertIn("escobar", script)
+
+    def test_identity_block_present_with_sender(self):
+        """Issue #119: assisted mode commits land as `root@<hostname>`
+        unless the bootstrap wires the issue sender (Telegram-bot-pool
+        owner) into git. _build_assisted() supplies
+        sender_login='octocat' / sender_id='12345', so the rendered
+        bootstrap must contain both the host-side `git config` lines
+        (for host-side git checkout on a resumed branch) and the
+        GIT_USER_NAME / GIT_USER_EMAIL env-var lines (for the
+        container's entrypoint.sh to pick up).
+        """
+        script = _build_assisted()
+        # Host-side git config (assisted mode's _session_restore_script
+        # does `git -C /workspace/repo fetch origin ...` then
+        # `git checkout ...`; both need a configured identity).
+        self.assertIn('git config --global user.name "octocat"', script)
+        self.assertIn(
+            'git config --global user.email "12345+octocat@users.noreply.github.com"',
+            script,
+        )
+        # Env-var exports so the heredoc forwards into /etc/blitzlog.env
+        # and the watchdog passes them via `-e` to the container.
+        self.assertIn('GIT_USER_NAME="octocat"', script)
+        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', script)
+        # Heredoc shape — same `${VAR:-}` wrapper as OPENCODE_*.
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        self.assertIn('GIT_USER_NAME="${GIT_USER_NAME:-}"', heredoc)
+        self.assertIn('GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"', heredoc)
+
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_no_identity_without_sender(self):
+        """Counterpart to `test_identity_block_present_with_sender`:
+        when the builder is called with no sender (sender_login=""),
+        the bootstrap must NOT wire any git identity — the contract
+        that the pre-#119 `test_no_identity_without_sender` test in
+        test_scripts_autonomous.py asserted (moved here verbatim for
+        symmetry; both modes share the same conditional wiring).
+        """
+        script = _build_assisted(sender_login="", sender_id="")
+        # The literal `user.name` substring should not appear at all.
+        self.assertNotIn("user.name", script)
+        self.assertNotIn("user.email", script)
 
     @patch.dict(
         os.environ,

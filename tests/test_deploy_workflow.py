@@ -1208,6 +1208,60 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "where the local-exec resolves it)",
         )
 
+    def test_validate_git_author_identity_step_present(self):
+        """Issue #119: terraform-apply-dev.yml MUST validate the
+        operator's `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`
+        and export them to GITHUB_ENV. The workflow doesn't currently
+        land commits (it's a terraform-only path), but exporting them
+        here means a future agent-driven flow on the same runner
+        (release hotfix from a feature branch, follow-up PR bot, etc.)
+        can read them without re-plumbing, and matching the
+        release.yml deploy-job contract keeps the configuration
+        surface uniform across workflows.
+
+        Regression guard for a refactor that drops the
+        fail-loud-when-missing check.
+        """
+        self.assertRegex(
+            self.text,
+            r"-\s+name:\s*Validate git author identity",
+            "terraform-apply-dev.yml must have a 'Validate git author "
+            "identity' step (issue #119 forward-compat)",
+        )
+        # Find the body of the Validate step's `run:` block.
+        m = re.search(
+            r"(?ms)- name: Validate git author identity.*?run: \|\n"
+            r"(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "terraform-apply-dev.yml's Validate step must have a run "
+            "block (issue #119)",
+        )
+        body = m.group("body")
+        # Fail-loud contract, matching the release.yml Bump step.
+        self.assertIn(
+            "FATAL: vars.GIT_AUTHOR_NAME",
+            body,
+            "terraform-apply-dev.yml's Validate step must FAIL LOUD when "
+            "vars.GIT_AUTHOR_NAME / vars.GIT_AUTHOR_EMAIL is unset (issue #119)",
+        )
+        # Forward-compat: the step writes both vars to GITHUB_ENV via the
+        # heredoc form (matching the SSM Render step's pattern).
+        self.assertRegex(
+            body,
+            r"GIT_AUTHOR_NAME<<EOF",
+            "terraform-apply-dev.yml's Validate step must export "
+            "GIT_AUTHOR_NAME to GITHUB_ENV via the heredoc form",
+        )
+        self.assertRegex(
+            body,
+            r"GIT_AUTHOR_EMAIL<<EOF",
+            "terraform-apply-dev.yml's Validate step must export "
+            "GIT_AUTHOR_EMAIL to GITHUB_ENV via the heredoc form",
+        )
+
 
 class TestDeploySecretsParameters(unittest.TestCase):
     """Static checks on infra/bootstrap/secrets.tf.

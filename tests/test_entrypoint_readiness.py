@@ -136,6 +136,35 @@ class TestEntrypointReadiness(unittest.TestCase):
                     f"rewrite to POSIX before merging."
                 )
 
+    def test_git_user_name_email_block_present(self):
+        """Issue #119: the container's audit-friendly git identity. The
+        Lambda bootstrap sets GIT_USER_NAME / GIT_USER_EMAIL via
+        `docker run -e ...` (watchdog.sh forwards them). The
+        entrypoint must read them and run `git config --global
+        user.{name,email}` so any commit the agent makes inside the
+        container is attributed to the human who triggered the run
+        (the issue's example: daniel-sarosi-gwc), NOT the EC2 default
+        `root@<hostname>`.
+        """
+        # The if-block is gated on the env var being non-empty —
+        # without the guard, `git config` with an empty user.name
+        # silently writes a malformed config and every subsequent
+        # commit gets an empty author.
+        i = self.text.index('if [ -n "${GIT_USER_NAME:-}" ]')
+        snippet = self.text[i : i + 200]
+        self.assertIn(
+            'git config --global user.name "${GIT_USER_NAME}"',
+            snippet,
+            "entrypoint.sh must apply GIT_USER_NAME to git config --global "
+            "user.name (issue #119 audit trail)",
+        )
+        self.assertIn(
+            'git config --global user.email "${GIT_USER_EMAIL:-}"',
+            snippet,
+            "entrypoint.sh must apply GIT_USER_EMAIL to git config --global "
+            "user.email (issue #119 audit trail)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

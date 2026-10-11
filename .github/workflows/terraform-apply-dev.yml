@@ -134,6 +134,37 @@ jobs:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
 
+      # Git author identity (issue #119). Currently the dev
+      # terraform-apply workflow doesn't land commits — but
+      # future agent-driven flows (release hotfix from a
+      # feature branch, an issue-driven PR bot, etc.) will
+      # need a configured identity. Surface the operator-
+      # supplied `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`
+      # as GHA env exports now so a future step can use them
+      # without re-plumbing. Fail loud when either is missing,
+      # matching the policy in release.yml's Bump step.
+      - name: Validate git author identity (forward-compat)
+        env:
+          GIT_AUTHOR_NAME: ${{ vars.GIT_AUTHOR_NAME }}
+          GIT_AUTHOR_EMAIL: ${{ vars.GIT_AUTHOR_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GIT_AUTHOR_NAME:-}" ] || [ -z "${GIT_AUTHOR_EMAIL:-}" ]; then
+            echo "FATAL: vars.GIT_AUTHOR_NAME and vars.GIT_AUTHOR_EMAIL must be set at the repo level" >&2
+            echo "  (issue #119). Run:" >&2
+            echo "    gh variable set GIT_AUTHOR_NAME --body '<name>' --repo great-wall-connect/blitzlog" >&2
+            echo "    gh variable set GIT_AUTHOR_EMAIL --body '<id>+<login>@users.noreply.github.com' --repo great-wall-connect/blitzlog" >&2
+            exit 1
+          fi
+          {
+            echo "GIT_AUTHOR_NAME<<EOF"
+            echo "${GIT_AUTHOR_NAME}"
+            echo "EOF"
+            echo "GIT_AUTHOR_EMAIL<<EOF"
+            echo "${GIT_AUTHOR_EMAIL}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       # Fetch per-env deploy config + secrets from SSM Parameter
       # Store. The deploy role (infra/bootstrap/deploy-role.tf)
       # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the

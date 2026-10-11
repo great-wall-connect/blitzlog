@@ -673,6 +673,156 @@ class TestReleaseWorkflow(unittest.TestCase):
             "fallback `gh pr create` path in the Bump step)",
         )
 
+    def test_bump_step_uses_git_author_vars(self):
+        """Issue #119: release.yml's Bump step MUST source its `git commit`
+        author from the operator-supplied `vars.GIT_AUTHOR_NAME` /
+        `vars.GIT_AUTHOR_EMAIL` repo variables, NOT the previously-
+        hardcoded `release-bot` identity. When either var is missing
+        the step must fail loud with a clear error pointing the operator
+        at `gh variable set GIT_AUTHOR_NAME --body ...`.
+
+        This is the GHA-side half of the audit-trail fix. The
+        operator-supplied identity is whatever they set the vars to —
+        the historical 'release-bot' carve-out is preserved by setting
+        them to that pair explicitly.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Bump version in source' step",
+        )
+        body = m.group("body")
+
+        # The step's `env:` block must pull GIT_AUTHOR_NAME /
+        # GIT_AUTHOR_EMAIL from the repo variables.
+        # Match a `GIT_AUTHOR_NAME: ${{ vars.GIT_AUTHOR_NAME }}`
+        # line at the step's env: indentation (4 spaces under the step).
+        self.assertRegex(
+            body,
+            r"GIT_AUTHOR_NAME:\s+\$\{\{\s*vars\.GIT_AUTHOR_NAME\s*\}\}",
+            "release.yml's Bump step env must declare GIT_AUTHOR_NAME: ${{ "
+            "vars.GIT_AUTHOR_NAME }} (issue #119)",
+        )
+        self.assertRegex(
+            body,
+            r"GIT_AUTHOR_EMAIL:\s+\$\{\{\s*vars\.GIT_AUTHOR_EMAIL\s*\}\}",
+            "release.yml's Bump step env must declare GIT_AUTHOR_EMAIL: ${{ "
+            "vars.GIT_AUTHOR_EMAIL }} (issue #119)",
+        )
+
+        # The `git config user.{name,email}` calls must read from the
+        # env vars, not be hardcoded to release-bot.
+        self.assertRegex(
+            body,
+            r'git config user\.name\s+"\$\{GIT_AUTHOR_NAME\}"',
+            "release.yml's Bump step must `git config user.name "
+            "\"${GIT_AUTHOR_NAME}\"` — the hardcoded 'release-bot' literal "
+            "is removed in #119",
+        )
+        self.assertRegex(
+            body,
+            r'git config user\.email\s+"\$\{GIT_AUTHOR_EMAIL\}"',
+            "release.yml's Bump step must `git config user.email "
+            '"${GIT_AUTHOR_EMAIL}"` — the hardcoded '
+            "'release-bot@users.noreply.github.com' literal is removed in #119",
+        )
+
+        # The hardcoded `git config user.name "release-bot"` (the old
+        # shape) must NOT appear anywhere in the Bump step's body. The
+        # FATAL guidance block, which intentionally references
+        # `release-bot` as the canonical "to preserve the carve-out"
+        # hint, is allowed to mention the literal — but it must not
+        # be the source of `git config user.name`. The carve-out is
+        # preserved by setting the vars themselves to release-bot.
+        self.assertNotRegex(
+            body,
+            r'git config user\.name\s+"release-bot"',
+            "release.yml's Bump step must not hardcode "
+            '`git config user.name "release-bot"` — that literal lived '
+            "in the Bump step's `git config` call before #119; the "
+            "carve-out is preserved by setting the vars themselves to "
+            "release-bot",
+        )
+        self.assertNotRegex(
+            body,
+            r'git config user\.email\s+"release-bot@users\.noreply\.github\.com"',
+            "release.yml's Bump step must not hardcode "
+            '`git config user.email "release-bot@users.noreply.github.com"` '
+            "— that literal lived in the Bump step's `git config` call "
+            "before #119",
+        )
+
+    def test_bump_step_fails_loud_when_git_author_vars_missing(self):
+        """Issue #119: when either vars.GIT_AUTHOR_NAME or
+        vars.GIT_AUTHOR_EMAIL is unset, the Bump step must `exit 1`
+        with a clear message (and not silently commit as the runner
+        user, which would be unauditable).
+
+        Regression guard for a refactor that drops the fail-loud
+        check while keeping the vars.GIT_AUTHOR_NAME wiring.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Bump version in source' step",
+        )
+        body = m.group("body")
+        self.assertIn(
+            "FATAL: vars.GIT_AUTHOR_NAME",
+            body,
+            "release.yml's Bump step must FAIL LOUD when vars.GIT_AUTHOR_NAME "
+            "or vars.GIT_AUTHOR_EMAIL is unset (issue #119); a silent "
+            "fallback would land commits under the runner user, breaking "
+            "the audit trail",
+        )
+        # The FATAL must include actionable guidance (gh variable set ...).
+        self.assertRegex(
+            body,
+            r"gh variable set GIT_AUTHOR_(NAME|EMAIL)",
+            "release.yml's Bump step FATAL should include "
+            "`gh variable set GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL` "
+            "so the operator has copy-pasteable remediation",
+        )
+
+    def test_deploy_job_validates_git_author_vars(self):
+        """Issue #119: the deploy job in release.yml doesn't land
+        commits today, but it must validate the operator's
+        vars.GIT_AUTHOR_NAME / vars.GIT_AUTHOR_EMAIL up-front (and
+        export them to GITHUB_ENV so a future agent-driven flow can
+        use them without re-plumbing).
+        """
+        # The deploy job's Validate step must exist.
+        self.assertRegex(
+            self.text,
+            r"-\s+name:\s*Validate git author identity",
+            "release.yml's deploy job must have a 'Validate git author "
+            "identity' step (issue #119 forward-compat)",
+        )
+        # And it must fail loud when either var is missing, matching
+        # the Bump step's contract.
+        deploy_step_match = re.search(
+            r"(?ms)- name: Validate git author identity.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            deploy_step_match,
+            "release.yml's deploy job must have a 'Validate git author "
+            "identity' step with a run block",
+        )
+        body = deploy_step_match.group("body")
+        self.assertIn(
+            "FATAL: vars.GIT_AUTHOR_NAME",
+            body,
+            "release.yml's Validate step must FAIL LOUD when "
+            "vars.GIT_AUTHOR_NAME / vars.GIT_AUTHOR_EMAIL is unset",
+        )
+
     def test_bump_step_sed_pattern_matches_digits(self):
         """release.yml's Bump step updates lambda/version.py via sed. The
         version literal is ``__version__ = "X.Y.Z"`` and the sed regex

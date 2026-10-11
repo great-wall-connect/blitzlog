@@ -68,6 +68,8 @@ S3_LOG_PREFIX="${S3_LOG_PREFIX}"
 OPENCODE_API_KEY="${OPENCODE_API_KEY}"
 OPENCODE_MODEL="${OPENCODE_MODEL}"
 OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
+GIT_USER_NAME="${GIT_USER_NAME:-}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"
 LOCAL_LLM_ENDPOINT="${LOCAL_LLM_ENDPOINT:-}"
 LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"
 LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-}"
@@ -113,7 +115,14 @@ echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> /etc/blitzlog.env
 mkdir -p /var/log/blitzlog
 mkdir -p /workspace
 
-# Common env vars (passed to every container launch).
+# GIT_USER_NAME / GIT_USER_EMAIL are the audit-friendly git
+# identity that the Lambda bootstrap set from the issue sender
+# (issue #119). Without them, the container falls back to EC2's
+# git-default `root@<hostname>` for any commit the agent makes,
+# which is unauditable. The container's entrypoint.sh reads them
+# and runs `git config --global user.{name,email}` so the
+# attribution survives into the agent's session artifacts and the
+# PR it opens.
 COMMON_ARGS=(
     -e "MODE=$MODE"
     -e "ISSUE_NUMBER=$ISSUE_NUMBER"
@@ -121,6 +130,8 @@ COMMON_ARGS=(
     -e "OPENCODE_MODEL=$OPENCODE_MODEL"
     -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
     -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    -e "GIT_USER_NAME=$GIT_USER_NAME"
+    -e "GIT_USER_EMAIL=$GIT_USER_EMAIL"
     -e "LOCAL_LLM_ENDPOINT=$LOCAL_LLM_ENDPOINT"
     -e "LOCAL_LLM_MODEL=$LOCAL_LLM_MODEL"
     -e "LOCAL_LLM_API_KEY=$LOCAL_LLM_API_KEY"

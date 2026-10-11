@@ -427,17 +427,44 @@ jobs:
       # fallback to release branch + gh pr create if direct push to
       # BUILD_REF fails), then tag. lambda/version.py is the only
       # source of truth — no manifest file to keep in sync.
+      #
+      # The Bump step's `git commit` author comes from the operator-
+      # supplied `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL` repo
+      # variables (issue #119). The previous shape hardcoded
+      # `release-bot` / `release-bot@users.noreply.github.com`; that's
+      # a deliberate carve-out (deterministic bot identity for [skip
+      # ci] bumps), and operators keep that carve-out by setting
+      # those two vars to exactly those values. We fail loud when
+      # either is missing so a misconfigured install can't silently
+      # land commits under the runner's identity.
       - name: Bump version in source (release only)
         if: steps.detect.outputs.mode == 'release'
         id: bump
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fail loud when the operator hasn't configured these
+          # repo variables yet (see README §One-time operator setup).
+          # The Bump step's `git config user.{name,email}` below
+          # requires both to be present, so we check up-front rather
+          # than letting `git config` succeed with an empty value
+          # and a commit whose author is " <>".
+          GIT_AUTHOR_NAME: ${{ vars.GIT_AUTHOR_NAME }}
+          GIT_AUTHOR_EMAIL: ${{ vars.GIT_AUTHOR_EMAIL }}
         run: |
           set -euo pipefail
           NEW_VERSION="${{ steps.detect.outputs.new_version }}"
+          if [ -z "${GIT_AUTHOR_NAME:-}" ] || [ -z "${GIT_AUTHOR_EMAIL:-}" ]; then
+            echo "FATAL: vars.GIT_AUTHOR_NAME and vars.GIT_AUTHOR_EMAIL must be set at the repo level" >&2
+            echo "  (issue #119). Run:" >&2
+            echo "    gh variable set GIT_AUTHOR_NAME --body '<name>' --repo great-wall-connect/blitzlog" >&2
+            echo "    gh variable set GIT_AUTHOR_EMAIL --body '<id>+<login>@users.noreply.github.com' --repo great-wall-connect/blitzlog" >&2
+            echo "  To preserve the historical 'release-bot' carve-out, use:" >&2
+            echo "    GIT_AUTHOR_NAME=release-bot  GIT_AUTHOR_EMAIL=release-bot@users.noreply.github.com" >&2
+            exit 1
+          fi
           sed -i -E "s/^__version__\\s*=\\s*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"/__version__ = \"${NEW_VERSION}\"/" lambda/version.py
-          git config user.name "release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
+          git config user.name "${GIT_AUTHOR_NAME}"
+          git config user.email "${GIT_AUTHOR_EMAIL}"
           git add lambda/version.py
           git commit -m "chore(release): ${NEW_VERSION} [skip ci]"
 
@@ -627,6 +654,36 @@ jobs:
           # is used by the Packer workflow above.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
+
+      # Git author identity (issue #119). The deploy job doesn't
+      # currently land commits — terraform apply is the only thing
+      # that runs here — but exporting these vars now means a
+      # future step that DOES land a commit (release hotfix from a
+      # feature branch, a follow-up PR bot, etc.) can read them
+      # from `$GIT_AUTHOR_NAME` / `$GIT_AUTHOR_EMAIL` without re-
+      # plumbing. Fail loud when either is missing, matching the
+      # Bump step's contract in the release job.
+      - name: Validate git author identity (forward-compat)
+        env:
+          GIT_AUTHOR_NAME: ${{ vars.GIT_AUTHOR_NAME }}
+          GIT_AUTHOR_EMAIL: ${{ vars.GIT_AUTHOR_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GIT_AUTHOR_NAME:-}" ] || [ -z "${GIT_AUTHOR_EMAIL:-}" ]; then
+            echo "FATAL: vars.GIT_AUTHOR_NAME and vars.GIT_AUTHOR_EMAIL must be set at the repo level" >&2
+            echo "  (issue #119). Run:" >&2
+            echo "    gh variable set GIT_AUTHOR_NAME --body '<name>' --repo great-wall-connect/blitzlog" >&2
+            echo "    gh variable set GIT_AUTHOR_EMAIL --body '<id>+<login>@users.noreply.github.com' --repo great-wall-connect/blitzlog" >&2
+            exit 1
+          fi
+          {
+            echo "GIT_AUTHOR_NAME<<EOF"
+            echo "${GIT_AUTHOR_NAME}"
+            echo "EOF"
+            echo "GIT_AUTHOR_EMAIL<<EOF"
+            echo "${GIT_AUTHOR_EMAIL}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       # Fetch per-env deploy config + secrets from SSM Parameter
       # Store. The deploy role (infra/bootstrap/deploy-role.tf)

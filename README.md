@@ -332,6 +332,18 @@ the state bucket). The setup is one-time per repo:
      (default `gwc-infra-tf-state`; the variable exists for
      non-default state buckets). **Not a secret** — bucket names
      are world-readable once any state is published from them.
+   - `GIT_AUTHOR_NAME` (issue #119) = the author name any
+     GitHub-Actions-landed commit should carry. The release
+     workflow's Bump step and the deploy workflows' pre-flight
+     step fail loud (`exit 1` with a `gh variable set` hint) if
+     either this var or `GIT_AUTHOR_EMAIL` is unset. To keep
+     the historical `[skip ci]` bump commit attributed to a
+     deterministic bot, set this to `release-bot` (and the email
+     to `release-bot@users.noreply.github.com`); an
+     agent-driven workflow would set them to the human owner.
+   - `GIT_AUTHOR_EMAIL` (issue #119) = the `<id>+<login>@users.noreply.github.com`
+     noreply email the commit should carry. Same fail-loud
+     contract as `GIT_AUTHOR_NAME`.
 
 2. **Repo Settings → Environments → `production` → Required reviewers**
    = CODEOWNERS (gates the prod apply).

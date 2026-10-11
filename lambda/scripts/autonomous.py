@@ -82,6 +82,8 @@ def build_autonomous_user_data(
         local_llm_env=local_llm_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
+        sender_login=sender_login,
+        sender_id=sender_id,
     )
 
     return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
@@ -129,6 +131,8 @@ S3_LOG_PREFIX="{s3_log_prefix}"
 OPENCODE_API_KEY="${{OPENCODE_API_KEY}}"
 OPENCODE_MODEL="${{OPENCODE_MODEL}}"
 OPENCODE_PROMPT="${{OPENCODE_PROMPT:-}}"
+GIT_USER_NAME="${{GIT_USER_NAME:-}}"
+GIT_USER_EMAIL="${{GIT_USER_EMAIL:-}}"
 LOCAL_LLM_ENDPOINT="${{LOCAL_LLM_ENDPOINT:-}}"
 LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"
 LOCAL_LLM_API_KEY="${{LOCAL_LLM_API_KEY:-}}"

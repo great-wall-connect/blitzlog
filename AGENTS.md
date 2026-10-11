@@ -43,6 +43,36 @@ Why the rule exists:
 
 Filing or batching issues in this repo is, by definition, an agent task — so this rule applies to every issue created by an automated agent on this repository.
 
+## Agent Commit Attribution (Audit Trail)
+
+A blitzlog agent's commits must be attributed to the human who triggered the run, **not** to the EC2 default (`root@<hostname>`), the worker hostname, or any fictional runner identity. "A bot cannot be audited. The owner — the person who chose to trigger the event — is responsible for the task."
+
+The plumbing for this is in three places (issue #119):
+
+- **EC2 runtime** (assisted and autonomous modes). The Lambda
+  forwards the issue's `sender_login` / `sender_id` into the
+  bootstrap (`scripts/autonomous.py`, `scripts/assisted.py`,
+  `_common.py:script_header`); the bootstrap `git config
+  --global user.{name,email}` on the host and exports
+  `GIT_USER_NAME` / `GIT_USER_EMAIL` env vars. The
+  Packer-baked watchdog (`infra/packer/scripts-docker-ubuntu/
+  watchdog.sh`) forwards them via `-e` flags into the container.
+  The container's `entrypoint.sh` (lines 88-91) runs the matching
+  `git config --global` so any commit the agent makes inside the
+  container is attributed to the bot-pool `owner_login` (assisted)
+  or the GitHub user who applied the `autonomous` label.
+- **GHA worker** (`release.yml` Bump step,
+  `terraform-apply-dev.yml` Validate step). The workflow reads
+  `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL` and fails loud
+  (`FATAL: vars.GIT_AUTHOR_NAME and vars.GIT_AUTHOR_EMAIL must be
+  set at the repo level`) when either is missing. The Bump step
+  uses these vars for `git config user.{name,email}` in the
+  chore(release) commit. To preserve the historical `release-bot`
+  carve-out for `[skip ci]` bumps, the operator sets the two vars
+  to `release-bot` / `release-bot@users.noreply.github.com`.
+
+**Operational rule**: if you (or the automation that opened this PR) land a commit via the agent or via the GHA workflow, the commit author must be the human who chose to trigger the event — never `root@<hostname>`, never `blitzlog-agent`, never the runner hostname. Do not edit the bootstrap or the workflows to remove the identity wiring; if the operator-supplied vars are missing, surface that as a setup error to the operator instead of falling back to a fictional identity.
+
 ## Implementation Standards
 
 1. **Read the issue** — Fetch full issue body and comments from GitHub API before starting

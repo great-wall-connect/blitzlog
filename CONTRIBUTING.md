@@ -29,6 +29,15 @@ Before you write code, read **[AGENTS.md](AGENTS.md)**. It defines the conventio
 - **Linting required**: `mise run lint` (ruff + black for Python).
 - **No breaking changes** without explicit discussion in an issue first.
 - **One purpose per PR.** Bundle unrelated changes into separate PRs.
+- **Agent commits must be attributable** (issue #119). Any `git
+  commit` the agent or a GitHub-Actions workflow lands on a blitzlog
+  branch must carry the operator's identity — the issue sender (for
+  EC2-routed runs) or `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`
+  (for GHA-runs). Do not fall back to `root@<hostname>` or any
+  fictional runner identity; the workflows fail loud if the
+  upstream identity isn't set up, and that failure is the correct
+  surface to the operator. See `AGENTS.md § Agent Commit Attribution`
+  for the full design.
 
 ### Local development
 
