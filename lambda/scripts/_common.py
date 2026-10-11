@@ -127,6 +127,13 @@ log() {{
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }}
 
+# Issue #123: source the host-side S3 abstraction installed at AMI
+# bake time under /usr/local/bin/. All S3 verbs in this bootstrap go
+# through the `blitzlog_s3_*` helpers from this library — one
+# canonical call site per S3 verb (cf. watchdog.sh). Sourced AFTER
+# `log()` is defined so library ERROR output uses the same channel.
+source /usr/local/bin/blitzlog_uploader.sh
+
 ISSUE_NUMBER={issue_number}
 REPO="{repo}"
 {opencode_interactive_lines}OPENCODE_MODEL="{opencode_model}"

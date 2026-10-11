@@ -99,6 +99,15 @@ build {
     script = "${path.root}/scripts-docker-ubuntu/01-system.sh"
   }
 
+  # 1a. Upload the host-side S3 abstraction (issue #123) BEFORE
+  # 03-bake-images.sh runs, because that bake script `source`s
+  # /tmp/blitzlog-uploader.sh to download the Whisper model. The
+  # final copy to /usr/local/bin/ is done by 02-systemd.sh (step 3).
+  provisioner "file" {
+    source      = "${path.root}/scripts-docker-ubuntu/blitzlog_uploader.sh"
+    destination = "/tmp/blitzlog-uploader.sh"
+  }
+
   # 2. Bake the blitzlog-agent container image
   provisioner "shell" {
     environment_vars = [
@@ -128,6 +137,13 @@ build {
 
   provisioner "shell" {
     script = "${path.root}/scripts-docker-ubuntu/02-systemd.sh"
+    # Issue #123: re-run the systemd install when the S3 abstraction
+    # changes, so the /usr/local/bin/ copy stays in sync with the
+    # source. Without this trigger, Packer would only re-run 02-systemd.sh
+    # when 02-systemd.sh itself changes (or on a fresh build).
+    triggers = [
+      filemd5("${path.root}/scripts-docker-ubuntu/blitzlog_uploader.sh"),
+    ]
   }
 
   # 4. Publish AMI id to SSM. Two-step post-processor:
