@@ -29,6 +29,11 @@ Before you write code, read **[AGENTS.md](AGENTS.md)**. It defines the conventio
 - **Linting required**: `mise run lint` (ruff + black for Python).
 - **No breaking changes** without explicit discussion in an issue first.
 - **One purpose per PR.** Bundle unrelated changes into separate PRs.
+- **Agent commits require a pre-configured identity** — see the
+  [AGENTS.md Agent Commit Attribution](AGENTS.md#agent-commit-attribution-audit-trail-issue-119)
+  section. Never land a commit authored as `root@<hostname>` or under a
+  fictional runner identity; the operator-managed identity lives in
+  `infra/user-pool/terraform.tfvars` and surfaces through SSM.
 
 ### Local development
 

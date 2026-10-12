@@ -722,6 +722,122 @@ class TestReleaseWorkflow(unittest.TestCase):
             "numeric parts of the version regex",
         )
 
+    def test_bump_step_reads_git_identity_from_ssm(self):
+        """Issue #119: the Bump step's commit author comes from
+        /blitzlog/users/<OWNER_LOGIN>/git-author/{name,email} in SSM
+        (same params the EC2 agent runtime reads), NOT from a
+        GHA repo variable. Pin the SSM-fetch shape so the
+        audit-trail identity is sourced from a single
+        operator-managed location.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # Collapse the YAML continuation-indent (the long
+        # aws-cli lines wrap with `\` at the YAML column, so the
+        # next line starts with the same 10-space indent) into a
+        # single space. Without this, a contiguously-keyed
+        # assertIn against a single-line aws-cli invocation
+        # would fail because the args are split across lines
+        # with double-space glue.
+        flat = re.sub(r"\\\n          ", " ", body)
+        flat = re.sub(r"  +", " ", flat)
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/${OWNER_LOGIN}/git-author/name"',
+            flat,
+            "Bump step must read git author name from "
+            "/blitzlog/users/${OWNER_LOGIN}/git-author/name in SSM",
+        )
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/${OWNER_LOGIN}/git-author/email"',
+            flat,
+            "Bump step must read git author email from "
+            "/blitzlog/users/${OWNER_LOGIN}/git-author/email in SSM",
+        )
+        self.assertIn(
+            'git config user.name "${GIT_AUTHOR_NAME}"',
+            body,
+            "Bump step must use the SSM-fetched GIT_AUTHOR_NAME for the commit",
+        )
+        self.assertIn(
+            'git config user.email "${GIT_AUTHOR_EMAIL}"',
+            body,
+            "Bump step must use the SSM-fetched GIT_AUTHOR_EMAIL for the commit",
+        )
+
+    def test_bump_step_uses_owner_login_repo_var(self):
+        """The Bump step identifies the pool to read git-author
+        params from via `vars.OWNER_LOGIN`. The deploy-role's
+        SSMGitAuthorIdentityRead grant (in
+        infra/bootstrap/deploy-role.tf) targets the same
+        /blitzlog/users/*/git-author/* subtree the packer role
+        needs to read. OWNER_LOGIN is the only new repo variable
+        the operator must set — terraform-apply-dev.yml doesn't
+        need any git-identity plumbing.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?env:\n(?P<env>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m, "Bump step must have an env block")
+        self.assertIn(
+            "OWNER_LOGIN: ${{ vars.OWNER_LOGIN }}",
+            m.group("env"),
+            "Bump step env must source OWNER_LOGIN from vars.OWNER_LOGIN",
+        )
+
+    def test_bump_step_fails_loud_when_ssm_param_missing(self):
+        """When /blitzlog/users/<OWNER_LOGIN>/git-author/{name,email}
+        isn't set in SSM (operator hasn't run `terraform apply`
+        in infra/user-pool, or the user-pool stack is stale),
+        the Bump step must abort with a clear setup error
+        rather than land the commit under a fictional identity
+        (the runner hostname). The `FATAL:` line and the
+        `cd infra/user-pool && terraform apply` hint are the
+        contract.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        self.assertIn(
+            "FATAL:", body, "Bump step must emit a FATAL: line on missing SSM params"
+        )
+        self.assertIn(
+            "terraform apply",
+            body,
+            "Bump step's FATAL hint must point the operator at `terraform apply` "
+            "in infra/user-pool (the single source of truth for the identity)",
+        )
+
+    def test_release_workflow_does_not_use_gha_git_author_vars(self):
+        """Issue #119: the GHA worker identity is sourced from SSM
+        (per the test_bump_step_reads_git_identity_from_ssm
+        contract), not from a GHA repo variable like
+        `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`. The
+        release.yml contract has no `vars.GIT_AUTHOR_*` references
+        anywhere — keeping the operator setup in terraform
+        (infra/user-pool/terraform.tfvars) rather than scattered
+        between terraform and `gh variable set` calls.
+        """
+        self.assertNotIn(
+            "vars.GIT_AUTHOR_NAME",
+            self.text,
+            "release.yml must not read vars.GIT_AUTHOR_NAME — the "
+            "identity is sourced from SSM (issue #119)",
+        )
+        self.assertNotIn(
+            "vars.GIT_AUTHOR_EMAIL",
+            self.text,
+            "release.yml must not read vars.GIT_AUTHOR_EMAIL — the "
+            "identity is sourced from SSM (issue #119)",
+        )
+
 
 class TestDockerImagesWorkflow(unittest.TestCase):
     @classmethod

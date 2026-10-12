@@ -250,6 +250,15 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           # Per-user local LLM config is env-independent — same Mac mini, same
           # endpoint, used by both prod and dev EC2 instances.
           "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
+          # Per-user git author identity (issue #119). Same broad
+          # `users/*/git-author/*` shape as the local-llm grant
+          # above — narrow enough to exclude the telegram bot
+          # tokens and allowed-user-id params, which the EC2
+          # instance role must NOT be able to read (the instance
+          # runs user code, not operator code). The two
+          # git-author params are non-secret String types whose
+          # values appear on every agent commit.
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*/git-author/*",
         ]
       },
       {

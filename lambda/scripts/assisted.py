@@ -41,6 +41,7 @@ import os
 from _common import (
     _local_llm_env_block,
     _local_llm_log_line,
+    _read_git_identity_ssm_script,
     _read_secrets_from_ssm_script,
     script_header,
 )
@@ -120,6 +121,15 @@ def build_assisted_user_data(
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
+    # The `export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL` line is emitted
+    # by `script_header` (so the watchdog/container see the values
+    # the fetch below assigns); the actual `aws ssm get-parameter`
+    # call lives in `_read_git_identity_ssm_script` and runs AFTER
+    # `$REGION` is set by `_read_secrets_from_ssm_script` so the
+    # `--region "$REGION"` expansion doesn't trip `set -u`.
+    git_identity_env = (
+        "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n" if sender_login else ""
+    )
 
     opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
 
@@ -133,11 +143,12 @@ def build_assisted_user_data(
         s3_archive_prefix=s3_archive_prefix,
         s3_log_prefix=s3_log_prefix,
         local_llm_env=local_llm_env,
+        git_identity_env=git_identity_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=None,
     )
 
-    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_ssm_script(sender_login)}
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
@@ -198,6 +209,12 @@ TELEGRAM_BOT_TOKEN="${{TELEGRAM_BOT_TOKEN}}"
 TELEGRAM_USER_ID="${{TELEGRAM_USER_ID}}"
 TELEGRAM_BOT_NAME="{bot_name}"
 TELEGRAM_SENDER_LOGIN="{sender_login}"
+# Audit-trail identity (issue #119). Fetched from
+# /blitzlog/users/{{owner}}/git-author/{{name,email}} above; the
+# watchdog forwards to the container so entrypoint.sh can
+# `git config --global user.{{name,email}}`.
+GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
+GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 STT_API_URL="${{STT_API_URL}}"
 STT_API_KEY="${{STT_API_KEY}}"
 STT_MODEL="${{STT_MODEL}}"

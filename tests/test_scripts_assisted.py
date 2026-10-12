@@ -34,10 +34,68 @@ class TestAssistedNoSecrets(unittest.TestCase):
         self.assertNotIn("ghp_", script)
         self.assertNotIn("x-access-token:ghp_", script)
         # The GitHub token is set via SSM and passed to the container via
-        # the GITHUB_TOKEN env var; the host bootstrap doesn't configure
-        # git identity (the container does, in entrypoint.sh).
+        # the GITHUB_TOKEN env var; the host bootstrap also wires
+        # GIT_USER_NAME / GIT_USER_EMAIL for issue #119's audit-trail
+        # fix.
         self.assertIn("GITHUB_TOKEN=", script)
         self.assertIn("escobar", script)
+
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_no_identity_without_sender(self):
+        """Counterpart to `test_git_identity_ssm_block_emitted_when_sender_present`:
+        when the builder is called with no sender (sender_login=""),
+        the bootstrap must NOT include the git-author SSM-fetch snippet
+        — the contract that the pre-#119 `test_no_identity_without_sender`
+        test in test_scripts_autonomous.py asserted (the identity is
+        empty when no sender, which is the same as the no-identity case
+        from the entrypoint.sh's perspective).
+        """
+        script = _build_assisted(sender_login="", sender_id="")
+        # The git-author SSM-fetch snippet must not appear in the
+        # bootstrap prologue (everything before the /etc/blitzlog.env
+        # heredoc). The heredoc itself mentions git-author in a
+        # comment, but the SSM-fetch is gated on a non-empty
+        # sender_login.
+        prologue = script.split("cat > /etc/blitzlog.env")[0]
+        self.assertNotIn("git-author", prologue)
+        # The consolidated export line in the bootstrap prologue must
+        # NOT carry GIT_AUTHOR_* vars (the no-sender case keeps the
+        # pre-#119 byte layout).
+        for line in prologue.split("\n"):
+            if line.startswith("export ISSUE_NUMBER"):
+                self.assertNotIn("GIT_AUTHOR", line)
+                break
+
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_git_identity_ssm_block_emitted_when_sender_present(self):
+        # Issue #119: the audit-trail identity is sourced from
+        # /blitzlog/users/<sender>/git-author/{name,email} in SSM
+        # (same params the GHA worker reads). The bootstrap
+        # fetches them at launch and re-emits them in
+        # /etc/blitzlog.env so the watchdog passes them to the
+        # container via `-e`. Mirrors the autonomous-mode test.
+        script = _build_assisted()
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/name"',
+            script,
+        )
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/email"',
+            script,
+        )
+        self.assertIn("export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL", script)
+        # /etc/blitzlog.env heredoc carries both vars.
+        env_start = script.index("cat > /etc/blitzlog.env")
+        env_end = script.index("\nENVEOF\n", env_start)
+        env_section = script[env_start:env_end]
+        self.assertIn('GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-}"', env_section)
+        self.assertIn('GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"', env_section)
 
     @patch.dict(
         os.environ,

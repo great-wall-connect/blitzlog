@@ -43,6 +43,36 @@ Why the rule exists:
 
 Filing or batching issues in this repo is, by definition, an agent task — so this rule applies to every issue created by an automated agent on this repository.
 
+## Agent Commit Attribution (Audit Trail)
+
+A blitzlog agent's commits must be attributed to the human who triggered the run, **not** to the EC2 default (`root@<hostname>`), the worker hostname, or any fictional runner identity. "A bot cannot be audited. The owner — the person who chose to trigger the event — is responsible for the task."
+
+The plumbing for this is in three places (issue #119):
+
+- **EC2 runtime** (assisted and autonomous modes). The Lambda
+  forwards the issue's `sender_login` / `sender_id` into the
+  bootstrap (`scripts/autonomous.py`, `scripts/assisted.py`,
+  `_common.py:script_header`); the bootstrap `git config
+  --global user.{name,email}` on the host and exports
+  `GIT_USER_NAME` / `GIT_USER_EMAIL` env vars. The
+  Packer-baked watchdog (`infra/packer/scripts-docker-ubuntu/
+  watchdog.sh`) forwards them via `-e` flags into the container.
+  The container's `entrypoint.sh` (lines 88-91) runs the matching
+  `git config --global` so any commit the agent makes inside the
+  container is attributed to the bot-pool `owner_login` (assisted)
+  or the GitHub user who applied the `autonomous` label.
+- **GHA worker** (`release.yml` Bump step,
+  `terraform-apply-dev.yml` Validate step). The workflow reads
+  `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL` and fails loud
+  (`FATAL: vars.GIT_AUTHOR_NAME and vars.GIT_AUTHOR_EMAIL must be
+  set at the repo level`) when either is missing. The Bump step
+  uses these vars for `git config user.{name,email}` in the
+  chore(release) commit. To preserve the historical `release-bot`
+  carve-out for `[skip ci]` bumps, the operator sets the two vars
+  to `release-bot` / `release-bot@users.noreply.github.com`.
+
+**Operational rule**: if you (or the automation that opened this PR) land a commit via the agent or via the GHA workflow, the commit author must be the human who chose to trigger the event — never `root@<hostname>`, never `blitzlog-agent`, never the runner hostname. Do not edit the bootstrap or the workflows to remove the identity wiring; if the operator-supplied vars are missing, surface that as a setup error to the operator instead of falling back to a fictional identity.
+
 ## Implementation Standards
 
 1. **Read the issue** — Fetch full issue body and comments from GitHub API before starting
@@ -87,6 +117,24 @@ pytest
 If any step fails, fix it locally, re-run the full sequence (a fix in one file can fail the linter in another), and only then commit and push. Do not push on the assumption that "CI will tell me what's wrong" — that wastes a CI cycle and slows you down.
 
 For other stacks, mirror this with the equivalent "build + lint + test" sequence from the Testing Commands / Linting tables above.
+
+## Agent Commit Attribution (Audit Trail, issue #119)
+
+The agent never commits as a fictional identity. Every commit — EC2 host (assisted + autonomous) and GHA worker (release Bump step) — is attributed to the operator of this blitzlog deployment via two SSM parameters that the `infra/user-pool/` module manages:
+
+- `/blitzlog/users/<owner_login>/git-author/name`
+- `/blitzlog/users/<owner_login>/git-author/email`
+
+The values default to `var.owner_login` and `"<owner_login>@users.noreply.github.com"`; override either in `infra/user-pool/terraform.tfvars` when you need a different attribution (e.g. the canonical `release-bot` carve-out for `[skip ci]` bumps).
+
+Hard rules:
+
+1. **Never `root@<hostname>`.** That happens when the user-pool stack hasn't been applied yet (no SSM params to read); the bootstrap's `2>/dev/null || echo ""` fallback is behaviour-preserving, but the operator must run `terraform apply` in `infra/user-pool/` so the params exist.
+2. **Never a GHA repo variable like `vars.GIT_AUTHOR_NAME`.** The release Bump step reads from SSM, not from a repo variable. The only GHA-side knob is `vars.OWNER_LOGIN` (the pool whose git-author params to fetch).
+3. **Never per-sender identity in the bootstrap.** The audit-trail identity is owned by the operator, not by the webhook `sender_login`. Assisted commits and autonomous commits get the same identity, sourced from the same SSM parameters.
+4. **Surface setup errors loudly.** When the Bump step finds a missing `OWNER_LOGIN` or missing SSM param, it aborts with `FATAL: ... terraform apply in infra/user-pool/`. The EC2 bootstrap's `2>/dev/null || echo ""` swallow only covers the case where the user-pool stack simply hasn't been applied yet — never fall back to a fictional identity silently.
+
+The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` from env and runs `git config --global user.{name,email}`. The watchdog (`infra/packer/scripts-docker-ubuntu/watchdog.sh`) passes both vars to the container via `-e`. The bootstrap writes them to `/etc/blitzlog.env` so the watchdog's rewrite preserves them.
 
 ## Pull Request
 

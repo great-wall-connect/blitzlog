@@ -314,12 +314,23 @@ class TestDeployRole(unittest.TestCase):
             "deploy policy must NOT widen SSM to /blitzlog/* "
             "(would cross the per-env boundary the env-isolation tests protect)",
         )
-        # Must NOT touch the user-pool namespace.
+        # Must NOT touch the user-pool namespace at large. The
+        # narrow git-author subtree (issue #119) is a separate,
+        # explicit grant — see the SSMGitAuthorIdentityRead Sid
+        # below — and is not caught by this substring check
+        # because it only widens to the users/*/git-author/*
+        # subtree, not the user-pool as a whole.
         self.assertNotIn(
-            "parameter/blitzlog/users",
+            "parameter/blitzlog/users/*/telegram",
             body,
-            "deploy policy must NOT include the user-pool namespace "
-            "(per-env stacks don't write there; user-pool is a separate stack)",
+            "deploy policy must NOT include the user-pool telegram subtree "
+            "(the deploy job's job is terraform apply, not bot-pool auth)",
+        )
+        self.assertNotIn(
+            "parameter/blitzlog/users/*/local-llm",
+            body,
+            "deploy policy must NOT include the user-pool local-llm subtree "
+            "(agent-runtime config, not deploy-time config)",
         )
 
     def test_passrole_lambda_conditional(self):

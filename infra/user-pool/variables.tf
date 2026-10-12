@@ -9,6 +9,18 @@ variable "owner_login" {
   type        = string
 }
 
+variable "git_author_name" {
+  description = "Git author name every agent run on this pool uses for its commits (EC2 runtime + GHA worker). Defaults to var.owner_login when unset. The default is the auditable operator identity for the pool — overrides should be rare. To attribute commits to a bot (e.g. for the canonical [skip ci] release-bot carve-out), set this to the bot's name and set git_author_email to the matching <login>@users.noreply.github.com form. Empty disables the audit-trail identity entirely (commits fall back to root@<hostname> on EC2 / runner hostname on GHA)."
+  type        = string
+  default     = ""
+}
+
+variable "git_author_email" {
+  description = "Git author email every agent run on this pool uses for its commits (EC2 runtime + GHA worker). Defaults to '<owner_login>@users.noreply.github.com' when unset — the public-facing noreply form. To use the audit-friendly <id>+<login>@users.noreply.github.com form (find the id with 'gh api /users/<login> | jq .id'), override here. Must be set when git_author_name is set explicitly."
+  type        = string
+  default     = ""
+}
+
 variable "telegram_bot_tokens" {
   description = "Map of Telegram bot names to tokens for this user's pool"
   type        = map(string)

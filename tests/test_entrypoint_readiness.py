@@ -136,6 +136,34 @@ class TestEntrypointReadiness(unittest.TestCase):
                     f"rewrite to POSIX before merging."
                 )
 
+    def test_git_author_identity_block_present(self):
+        """The container's entrypoint reads GIT_AUTHOR_NAME /
+        GIT_AUTHOR_EMAIL (issue #119, audit trail) and runs
+        `git config --global user.{name,email}` so every agent
+        commit is attributed to the operator, not the
+        root@<hostname> fallback. The check is gated on the
+        name being non-empty so a pool that hasn't been
+        provisioned yet still falls back to the runner's
+        default (matching the pre-#119 contract).
+        """
+        i = self.text.index('git config --global user.name "${GIT_AUTHOR_NAME}"')
+        block = self.text[i : i + 300]
+        self.assertIn('git config --global user.email "${GIT_AUTHOR_EMAIL:-}"', block)
+        # Gate: the block is wrapped in `if [ -n "${GIT_AUTHOR_NAME:-}" ]`
+        # — confirm the gate is intact so empty identity falls back
+        # to the runner default rather than git erroring on "".
+        preceding = self.text[max(0, i - 200) : i]
+        self.assertIn('[ -n "${GIT_AUTHOR_NAME:-}" ]', preceding)
+
+    def test_no_legacy_git_user_name_references(self):
+        """Issue #119 renamed GIT_USER_NAME / GIT_USER_EMAIL to
+        GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL so the host env,
+        container env, and git config share one namespace.
+        Assert no stale references remain.
+        """
+        self.assertNotIn("GIT_USER_NAME", self.text)
+        self.assertNotIn("GIT_USER_EMAIL", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()

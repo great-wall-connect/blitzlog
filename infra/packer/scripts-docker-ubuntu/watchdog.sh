@@ -79,6 +79,16 @@ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
 TELEGRAM_BOT_NAME="${TELEGRAM_BOT_NAME:-}"
 TELEGRAM_SENDER_LOGIN="${TELEGRAM_SENDER_LOGIN:-}"
+# Audit-trail identity (issue #119). The bootstrap fetched
+# these from /blitzlog/users/<owner>/git-author/{name,email} and
+# sourced them into scope; we re-emit them here so the
+# rewrite of /etc/blitzlog.env (which overwrites the bootstrap's
+# write) doesn't lose them. The container's entrypoint.sh
+# reads GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL and runs
+# `git config --global user.{name,email}` so agent commits
+# are attributed to the operator, not root@<hostname>.
+GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-}"
+GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"
 STT_MODEL="${STT_MODEL:-base.en}"
 STT_LANGUAGE="${STT_LANGUAGE:-en}"
 AWS_REGION="${REGION}"
@@ -134,6 +144,8 @@ COMMON_ARGS=(
     -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
     -e "S3_LOG_PREFIX=$S3_LOG_PREFIX"
     -e "GITHUB_TOKEN=$GITHUB_TOKEN"
+    -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
+    -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
 )
 
 # Mode-specific env vars. We don't reference these outside the

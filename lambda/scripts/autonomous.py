@@ -37,6 +37,7 @@ import os
 from _common import (
     _local_llm_env_block,
     _local_llm_log_line,
+    _read_git_identity_ssm_script,
     _read_secrets_from_ssm_script,
     script_header,
 )
@@ -67,6 +68,15 @@ def build_autonomous_user_data(
 
     local_llm_env = _local_llm_env_block(local_llm)
     local_llm_log = _local_llm_log_line(local_llm)
+    # The `export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL` line is emitted
+    # by `script_header` (so the watchdog/container see the values
+    # the fetch below assigns); the actual `aws ssm get-parameter`
+    # call lives in `_read_git_identity_ssm_script` and runs AFTER
+    # `$REGION` is set by `_read_secrets_from_ssm_script` so the
+    # `--region "$REGION"` expansion doesn't trip `set -u`.
+    git_identity_env = (
+        "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n" if sender_login else ""
+    )
 
     opencode_max_steps = int(os.environ.get("OPENCODE_AGENT_MAX_STEPS", "500"))
 
@@ -80,11 +90,12 @@ def build_autonomous_user_data(
         s3_archive_prefix=s3_archive_prefix,
         s3_log_prefix=s3_log_prefix,
         local_llm_env=local_llm_env,
+        git_identity_env=git_identity_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
     )
 
-    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_ssm_script(sender_login)}
 
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
@@ -134,6 +145,13 @@ LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"
 LOCAL_LLM_API_KEY="${{LOCAL_LLM_API_KEY:-}}"
 LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
 TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
+# Audit-trail identity (issue #119). The bootstrap above fetched
+# these from /blitzlog/users/{{owner}}/git-author/{{name,email}};
+# the watchdog forwards them to the container via `-e` so the
+# container's `git config --global user.{{name,email}}` step
+# (entrypoint.sh) attributes commits to the operator.
+GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
+GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 OPENCODE_SERVER_USERNAME="agent"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}"
 ENVEOF
