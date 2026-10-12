@@ -1,6 +1,25 @@
 owner_login              = "your-github-username"
 telegram_allowed_user_id = "12345678"
 
+# Git author identity (issue #119). Every agent run on this pool —
+# EC2 runtime + GHA worker — uses these values for its commits.
+# Leave both unset to use the audit-friendly defaults derived from
+# owner_login (git_author_name = owner_login, git_author_email =
+# "<owner_login>@users.noreply.github.com"). Override only when
+# you need a different identity, e.g. the canonical
+# `release-bot <release-bot@users.noreply.github.com>` carve-out
+# for [skip ci] bumps.
+#
+# git_author_name  = "release-bot"
+# git_author_email = "release-bot@users.noreply.github.com"
+#
+# To attribute to a human, use the audit-friendly form
+# `<sender_id>+<login>@users.noreply.github.com` (find the id with
+# `gh api /users/<login> --jq .id`):
+#
+# git_author_name  = "your-github-username"
+# git_author_email = "12345678+your-github-username@users.noreply.github.com"
+
 telegram_bot_tokens = {
   bot1 = "<BOT_TOKEN>"
   bot2 = "<BOT_TOKEN>"

@@ -52,6 +52,15 @@ locals {
   }
 
   local_llm_secure_keys = ["endpoint", "model", "api-key", "tailscale-auth-key"]
+
+  # Git author identity for every agent commit on this pool's behalf
+  # (EC2 runtime + GHA worker — see issue #119). The defaults derive
+  # from var.owner_login so an operator who only sets owner_login gets
+  # the correct noreply form; explicit overrides are rare and should
+  # keep the two values in sync (setting name but leaving email empty
+  # is rejected by the precondition below).
+  git_author_name_resolved  = trimspace(var.git_author_name) != "" ? trimspace(var.git_author_name) : var.owner_login
+  git_author_email_resolved = trimspace(var.git_author_email) != "" ? trimspace(var.git_author_email) : "${var.owner_login}@users.noreply.github.com"
 }
 
 resource "aws_ssm_parameter" "telegram_bot_pool" {
@@ -77,4 +86,46 @@ resource "aws_ssm_parameter" "local_llm" {
   type        = contains(local.local_llm_secure_keys, each.value) ? "SecureString" : "String"
   value       = local.local_llm_param_values[each.value]
   description = "Local LLM config for ${var.owner_login}: ${each.value}"
+}
+
+# Per-pool git author identity (issue #119). Always emit when the
+# pool is provisioned — the defaults derived from var.owner_login
+# guarantee a usable identity for every pool. The two params land
+# under /blitzlog/users/<owner>/git-author/{name,email} so both the
+# EC2 agent runtime (existing /blitzlog/users/* grant on the EC2
+# role) and the GHA worker (new narrow grant in
+# infra/bootstrap/deploy-role.tf) can fetch them with a single
+# GetParameter call.
+#
+# Parameters are typed String (not SecureString) because the
+# git author name and noreply email are public by design — they
+# appear on every commit. The local-llm namespace is the
+# precedent: 'allow-private-cidrs' and 'fallback' are also
+# non-secret String params under /blitzlog/users/*.
+resource "aws_ssm_parameter" "git_author_name" {
+  name        = "/blitzlog/users/${var.owner_login}/git-author/name"
+  type        = "String"
+  value       = local.git_author_name_resolved
+  description = "Git author name for ${var.owner_login}'s agent commits (issue #119)"
+
+  lifecycle {
+    # The resolved value derives from var.owner_login (or its
+    # override) — ignore upstream changes so a re-apply after
+    # owner_login edits doesn't churn the param when only the
+    # resolved default changed. Operators who actually want to
+    # change the value can update it via `aws ssm put-parameter
+    # --overwrite` (the operator owns the value, not this stack).
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "git_author_email" {
+  name        = "/blitzlog/users/${var.owner_login}/git-author/email"
+  type        = "String"
+  value       = local.git_author_email_resolved
+  description = "Git author email for ${var.owner_login}'s agent commits (issue #119)"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }

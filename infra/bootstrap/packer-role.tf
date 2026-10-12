@@ -134,6 +134,20 @@ resource "aws_iam_role_policy" "packer_build" {
         ]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu",
+          # Git author identity (issue #119) for the release.yml
+          # Bump step. The Bump step reads the per-pool
+          # /blitzlog/users/<owner>/git-author/{name,email} params
+          # at commit time so the worker doesn't land commits
+          # under the runner hostname. Same narrow pattern as
+          # the deploy-role's SSMGitAuthorIdentityRead grant in
+          # infra/bootstrap/deploy-role.tf; the packer role needs
+          # it too because the Bump step and the Packer build
+          # share the same OIDC session (single
+          # aws-actions/configure-aws-credentials step). The
+          # params are non-secret String types; the existing
+          # LocalLLM / telegram-token grants under /blitzlog/users/*
+          # are intentionally NOT extended.
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/users/*/git-author/*",
         ]
       },
       {

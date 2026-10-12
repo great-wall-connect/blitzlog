@@ -332,18 +332,15 @@ the state bucket). The setup is one-time per repo:
      (default `gwc-infra-tf-state`; the variable exists for
      non-default state buckets). **Not a secret** — bucket names
      are world-readable once any state is published from them.
-   - `GIT_AUTHOR_NAME` (issue #119) = the author name any
-     GitHub-Actions-landed commit should carry. The release
-     workflow's Bump step and the deploy workflows' pre-flight
-     step fail loud (`exit 1` with a `gh variable set` hint) if
-     either this var or `GIT_AUTHOR_EMAIL` is unset. To keep
-     the historical `[skip ci]` bump commit attributed to a
-     deterministic bot, set this to `release-bot` (and the email
-     to `release-bot@users.noreply.github.com`); an
-     agent-driven workflow would set them to the human owner.
-   - `GIT_AUTHOR_EMAIL` (issue #119) = the `<id>+<login>@users.noreply.github.com`
-     noreply email the commit should carry. Same fail-loud
-     contract as `GIT_AUTHOR_NAME`.
+   - `OWNER_LOGIN` = the GitHub login that owns this blitzlog
+     deployment. The release Bump step reads the operator's
+     git-author identity from
+     `/blitzlog/users/${OWNER_LOGIN}/git-author/{name,email}` in
+     SSM (see [Agent commit attribution](#agent-commit-attribution-issue-119)
+     below). Set with:
+     ```bash
+     gh variable set OWNER_LOGIN --body 'your-github-username' --repo great-wall-connect/blitzlog
+     ```
 
 2. **Repo Settings → Environments → `production` → Required reviewers**
    = CODEOWNERS (gates the prod apply).
@@ -567,6 +564,10 @@ What gets created in AWS (all under `/blitzlog/users/<owner_login>/` — no env 
 |-----------------------------------------------|-------------|
 | `telegram/allowed-user-id`                    | `String`    |
 | `telegram/pool/<each key of telegram_bot_tokens>` | `SecureString` |
+| `git-author/name`                             | `String`    |
+| `git-author/email`                            | `String`    |
+
+The two `git-author/*` parameters carry the operator-configured commit identity (see [Agent commit attribution](#agent-commit-attribution-issue-119) below). Defaults derive from `owner_login` when `git_author_name` / `git_author_email` are unset in `terraform.tfvars`.
 
 ### Step 3 — Verify
 
@@ -605,6 +606,36 @@ terraform init -migrate-state
 ```
 
 Or, since the resolution is deterministic from `terraform.tfvars`, simply delete the local `.terraform/`, `terraform.tfstate`, and `terraform.tfstate.backup`, then re-run `terraform init && terraform apply` to recreate the local cache.
+
+---
+
+## Agent commit attribution (issue #119)
+
+Every commit the agent makes — on the EC2 host (assisted + autonomous) and on the GHA worker (the release Bump step) — is attributed to the **operator of this blitzlog deployment**, not the webhook `sender_login`, not `root@<hostname>`, not the runner hostname. The identity is a single operator-managed value living in your `infra/user-pool/terraform.tfvars` and surfaced through two non-secret String parameters in SSM:
+
+- `/blitzlog/users/<owner_login>/git-author/name`
+- `/blitzlog/users/<owner_login>/git-author/email`
+
+The defaults derive from `var.owner_login` (`git_author_name = owner_login`, `git_author_email = "<owner_login>@users.noreply.github.com"`), so an operator who only sets `owner_login` gets a working identity. Override either field in your `terraform.tfvars` when you need a different attribution — e.g. the canonical `[skip ci]` `release-bot` carve-out:
+
+```hcl
+# infra/user-pool/terraform.tfvars
+owner_login     = "release-bot"
+git_author_name = "release-bot"                                       # optional (defaults to owner_login)
+git_author_email = "release-bot@users.noreply.github.com"              # optional (defaults to "<owner_login>@users.noreply.github.com")
+```
+
+For a human operator, the audit-friendly `<id>+<login>@users.noreply.github.com` form works too (find the id with `gh api /users/<login> --jq .id`):
+
+```hcl
+owner_login      = "your-github-username"
+git_author_name  = "your-github-username"
+git_author_email = "12345678+your-github-username@users.noreply.github.com"
+```
+
+After editing `terraform.tfvars`, run `terraform apply` in `infra/user-pool/` to push the new values to SSM. The agent and the GHA worker read them on every run.
+
+The audit-friendly URL form requires the GitHub numeric user id; the public-facing `<login>@users.noreply.github.com` form (the default) does not.
 
 ---
 

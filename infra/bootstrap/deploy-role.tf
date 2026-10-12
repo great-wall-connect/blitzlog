@@ -446,6 +446,26 @@ resource "aws_iam_role_policy" "deploy" {
         ]
       },
       {
+        # Git author identity (issue #119) for the GHA worker's
+        # release Bump step. The Bump step reads the per-pool
+        # git-author params at
+        # /blitzlog/users/<owner>/git-author/{name,email} so commit
+        # authors on the worker are attributed to the operator
+        # (not the runner hostname). Narrow grant: only the
+        # git-author subtree under users/, never the telegram bot
+        # pool or the per-user local-llm secrets. The values are
+        # non-secret Strings; an operator who needs to override
+        # uses `aws ssm put-parameter --overwrite` on the leaf.
+        Sid    = "SSMGitAuthorIdentityRead"
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/users/*/git-author/*",
+        ]
+      },
+      {
         # SSM Parameter Store: account-level reads the per-env
         # apply needs to enumerate parameters and tags. The two
         # actions in this Sid are account-scoped (they don't

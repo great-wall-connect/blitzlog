@@ -30,38 +30,84 @@ class TestAutonomousNoSecrets(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN=", script)
 
     def test_no_identity_without_sender(self):
+        # Pre-#119 contract preserved: an autonomous re-launch
+        # without a webhook payload (no sender_login) skips the
+        # SSM lookup. The /etc/blitzlog.env heredoc still mentions
+        # GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL (always — the
+        # watchdog re-emits them so the bootstrap's write
+        # survives the rewrite), but they expand to empty when
+        # no identity was loaded, and the consolidated export
+        # line in the bootstrap prologue omits them. The
+        # container's entrypoint.sh gates the `git config
+        # --global` step on GIT_AUTHOR_NAME being non-empty, so
+        # the unconfigured case falls back to the pre-#119
+        # behaviour (no `user.name` / `user.email` set).
         script = build_autonomous_user_data("org/repo", 42)
-        self.assertNotIn("user.name", script)
-        self.assertNotIn("user.email", script)
+        # The prologue must NOT include the SSM-fetch snippet
+        # (no sender → no lookup) and the consolidated export
+        # line must NOT carry GIT_AUTHOR_* vars.
+        prologue = script.split("cat > /etc/blitzlog.env")[0]
+        self.assertNotIn("git-author", prologue)
+        for line in prologue.split("\n"):
+            if line.startswith("export ISSUE_NUMBER"):
+                self.assertNotIn("GIT_AUTHOR", line)
+                break
+        else:
+            self.fail("Consolidated export line not found in script")
 
-    def test_identity_block_present_with_sender(self):
-        """Issue #119: when the Lambda forwards the issue's
-        `sender_login` / `sender_id`, the bootstrap must (a)
-        `git config --global user.{name,email}` on the host so any
-        host-side git operation (`_session_restore_script` in
-        assisted mode; future pre-clone operations in autonomous)
-        is attributed to the human who triggered the run, and (b)
-        set `GIT_USER_NAME` / `GIT_USER_EMAIL` so the
-        `/etc/blitzlog.env` heredoc forwards the identity into the
-        container. Without these, the agent's commits land as
-        `root@<hostname>` — unauditable.
-        """
+    def test_git_identity_ssm_block_emitted_when_sender_present(self):
+        # Issue #119: the audit-trail identity is sourced from
+        # /blitzlog/users/<sender>/git-author/{name,email} in SSM
+        # (the same params the GHA worker reads). The bootstrap
+        # fetches them at launch and re-emits them in
+        # /etc/blitzlog.env so the watchdog passes them to the
+        # container via `-e`.
         script = build_autonomous_user_data("org/repo", 42, "octocat", "12345")
-        # Host-side git config (echo'd by _git_identity_block).
-        self.assertIn('git config --global user.name "octocat"', script)
         self.assertIn(
-            'git config --global user.email "12345+octocat@users.noreply.github.com"',
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/name"',
             script,
         )
-        # Env-var exports so the heredoc can forward to the container.
-        self.assertIn('GIT_USER_NAME="octocat"', script)
-        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', script)
-        # Heredoc lines (the watchdog reads these and `-e`'s them into
-        # the container). Sanity check the wrapper shell-expansion
-        # shape, identical to OPENCODE_PROMPT.
-        heredoc = _extract_blitzlog_env_heredoc(script)
-        self.assertIn('GIT_USER_NAME="${GIT_USER_NAME:-}"', heredoc)
-        self.assertIn('GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"', heredoc)
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/email"',
+            script,
+        )
+        self.assertIn("export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL", script)
+        # /etc/blitzlog.env heredoc carries both vars so the
+        # watchdog can pass them through to the container.
+        self.assertIn('GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-}"', script)
+        self.assertIn('GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"', script)
+
+    def test_ssm_fetch_runs_after_region_is_set(self):
+        # Regression guard for the issue-#119 production
+        # failure: emitting the `aws ssm get-parameter` call
+        # for the git-author params in the header (BEFORE
+        # `$REGION` is set) trips `set -u` on a fresh EC2
+        # instance with `REGION: unbound variable`. The fix
+        # is to concatenate the fetch with
+        # `_read_secrets_from_ssm_script` so it runs AFTER
+        # the IMDSv2 region dance. Pin the offset ordering
+        # so a future refactor doesn't reintroduce the bug.
+        script = build_autonomous_user_data("org/repo", 42, "octocat", "12345")
+        region_idx = script.find("REGION=$(curl")
+        ssm_idx = script.find("git-author/name")
+        self.assertNotEqual(
+            region_idx,
+            -1,
+            "REGION=$(curl ...) assignment must be present in the bootstrap",
+        )
+        self.assertNotEqual(
+            ssm_idx,
+            -1,
+            "git-author/name SSM fetch must be present in the bootstrap",
+        )
+        self.assertLess(
+            region_idx,
+            ssm_idx,
+            "git-author SSM fetch must run AFTER REGION is set "
+            "(concatenated with _read_secrets_from_ssm_script) so the "
+            '`--region "$REGION"` expansion doesn\'t trip `set -u` on a '
+            "fresh EC2 instance (issue #119 regression).",
+        )
 
 
 class TestAutonomousModelAndDiagnostics(unittest.TestCase):

@@ -17,3 +17,13 @@ output "tailscale_auth_key_parameter_arn" {
   description = "ARN of the per-user Tailscale auth key SSM parameter (empty string when not configured)"
   value       = try(aws_ssm_parameter.local_llm["tailscale-auth-key"].arn, "")
 }
+
+output "git_author_name_parameter_arn" {
+  description = "ARN of the per-user git author name SSM parameter (issue #119). Lives under /blitzlog/users/<owner>/git-author/name."
+  value       = aws_ssm_parameter.git_author_name.arn
+}
+
+output "git_author_email_parameter_arn" {
+  description = "ARN of the per-user git author email SSM parameter (issue #119). Lives under /blitzlog/users/<owner>/git-author/email."
+  value       = aws_ssm_parameter.git_author_email.arn
+}

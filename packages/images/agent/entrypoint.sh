@@ -85,9 +85,9 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     unset GITHUB_TOKEN GH_TOKEN
     printf '%s\n' "$local_token" | gh auth login --with-token --hostname github.com >/dev/null
 fi
-if [ -n "${GIT_USER_NAME:-}" ]; then
-    git config --global user.name "${GIT_USER_NAME}"
-    git config --global user.email "${GIT_USER_EMAIL:-}"
+if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
+    git config --global user.name "${GIT_AUTHOR_NAME}"
+    git config --global user.email "${GIT_AUTHOR_EMAIL:-}"
 fi
 
 # --- 2. (plugins/tools baked into the image by the Dockerfile) ---

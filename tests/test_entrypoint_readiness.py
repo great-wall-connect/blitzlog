@@ -136,34 +136,33 @@ class TestEntrypointReadiness(unittest.TestCase):
                     f"rewrite to POSIX before merging."
                 )
 
-    def test_git_user_name_email_block_present(self):
-        """Issue #119: the container's audit-friendly git identity. The
-        Lambda bootstrap sets GIT_USER_NAME / GIT_USER_EMAIL via
-        `docker run -e ...` (watchdog.sh forwards them). The
-        entrypoint must read them and run `git config --global
-        user.{name,email}` so any commit the agent makes inside the
-        container is attributed to the human who triggered the run
-        (the issue's example: daniel-sarosi-gwc), NOT the EC2 default
-        `root@<hostname>`.
+    def test_git_author_identity_block_present(self):
+        """The container's entrypoint reads GIT_AUTHOR_NAME /
+        GIT_AUTHOR_EMAIL (issue #119, audit trail) and runs
+        `git config --global user.{name,email}` so every agent
+        commit is attributed to the operator, not the
+        root@<hostname> fallback. The check is gated on the
+        name being non-empty so a pool that hasn't been
+        provisioned yet still falls back to the runner's
+        default (matching the pre-#119 contract).
         """
-        # The if-block is gated on the env var being non-empty —
-        # without the guard, `git config` with an empty user.name
-        # silently writes a malformed config and every subsequent
-        # commit gets an empty author.
-        i = self.text.index('if [ -n "${GIT_USER_NAME:-}" ]')
-        snippet = self.text[i : i + 200]
-        self.assertIn(
-            'git config --global user.name "${GIT_USER_NAME}"',
-            snippet,
-            "entrypoint.sh must apply GIT_USER_NAME to git config --global "
-            "user.name (issue #119 audit trail)",
-        )
-        self.assertIn(
-            'git config --global user.email "${GIT_USER_EMAIL:-}"',
-            snippet,
-            "entrypoint.sh must apply GIT_USER_EMAIL to git config --global "
-            "user.email (issue #119 audit trail)",
-        )
+        i = self.text.index('git config --global user.name "${GIT_AUTHOR_NAME}"')
+        block = self.text[i : i + 300]
+        self.assertIn('git config --global user.email "${GIT_AUTHOR_EMAIL:-}"', block)
+        # Gate: the block is wrapped in `if [ -n "${GIT_AUTHOR_NAME:-}" ]`
+        # — confirm the gate is intact so empty identity falls back
+        # to the runner default rather than git erroring on "".
+        preceding = self.text[max(0, i - 200) : i]
+        self.assertIn('[ -n "${GIT_AUTHOR_NAME:-}" ]', preceding)
+
+    def test_no_legacy_git_user_name_references(self):
+        """Issue #119 renamed GIT_USER_NAME / GIT_USER_EMAIL to
+        GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL so the host env,
+        container env, and git config share one namespace.
+        Assert no stale references remain.
+        """
+        self.assertNotIn("GIT_USER_NAME", self.text)
+        self.assertNotIn("GIT_USER_EMAIL", self.text)
 
 
 if __name__ == "__main__":

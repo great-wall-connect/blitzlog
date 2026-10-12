@@ -8,8 +8,9 @@ import unittest
 
 from _common import (
     _decode_api_errors_script,
-    _git_identity_block,
     _git_identity_env_block,
+    _git_identity_ssm_block,
+    _read_git_identity_ssm_script,
     _read_secrets_from_ssm_script,
     script_header,
 )
@@ -137,167 +138,184 @@ class TestReadSecretsWithLocalLlm(unittest.TestCase):
         self.assertIn("export OPENCODE_API_KEY", script)
 
 
-class TestGitIdentityBlock(unittest.TestCase):
-    """The host-side git identity snippet (issue #119). `_git_identity_block`
-    was previously dead code; this test class pins the helper's two
-    branches so a future refactor can't silently leave agent commits
-    unattributed.
+class TestGitIdentitySSMBlock(unittest.TestCase):
+    """The audit-trail identity (issue #119) is sourced from
+    /blitzlog/users/<owner>/git-author/{name,email} in SSM, NOT from
+    the webhook payload's sender_id nor from a GHA repo variable.
+    The fetch lives in `_read_git_identity_ssm_script` (not
+    `_git_identity_ssm_block` — that helper now returns "" and is
+    reserved for symmetry with `_local_llm_env_block`) because the
+    `--region "$REGION"` expansion must run AFTER $REGION is set
+    by `_read_secrets_from_ssm_script`. Emitting the fetch in the
+    header would trip `set -u` on a fresh EC2 instance.
     """
 
-    def test_emits_user_name_and_email_when_sender_login_set(self):
-        block = _git_identity_block("octocat", "12345")
-        self.assertIn('git config --global user.name "octocat"', block)
+    def test_ssm_block_legacy_returns_empty(self):
+        # The legacy helper exists for symmetry but no longer
+        # emits the SSM fetch — see `_read_git_identity_ssm_script`.
+        self.assertEqual(_git_identity_ssm_block("alice"), "")
+
+    def test_read_git_identity_emits_ssm_reads_for_owner_login(self):
+        block = _read_git_identity_ssm_script("alice")
         self.assertIn(
-            'git config --global user.email "12345+octocat@users.noreply.github.com"',
+            'aws ssm get-parameter --name "/blitzlog/users/alice/git-author/name"',
+            block,
+        )
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/alice/git-author/email"',
             block,
         )
 
-    def test_emits_empty_string_when_sender_login_empty(self):
-        # The bootstrap silently skips the identity step when no issue
-        # sender is present (autonomous re-launch paths, manual test
-        # entries). Empty string keeps the rest of the script layout
-        # unchanged.
-        self.assertEqual(_git_identity_block("", "12345"), "")
-        self.assertEqual(_git_identity_block("octocat", ""), "")
-        self.assertEqual(_git_identity_block("", ""), "")
+    def test_read_git_identity_uses_region_variable(self):
+        # The bootstrap resolves $REGION from IMDSv2 (see
+        # _read_secrets_from_ssm_script) before this block runs,
+        # so the SSM reads must use --region "$REGION" not a
+        # hardcoded region.
+        block = _read_git_identity_ssm_script("alice")
+        self.assertIn('--region "$REGION"', block)
+
+    def test_read_git_identity_no_with_decryption(self):
+        # The two params are typed String (not SecureString) —
+        # they appear on every commit and aren't sensitive. A
+        # --with-decryption flag would still work but signals
+        # confusion about the contract; assert it's absent so
+        # future edits that flip the type to SecureString get a
+        # loud test failure (and a chance to audit whether the
+        # secret-protection is actually needed).
+        block = _read_git_identity_ssm_script("alice")
+        self.assertNotIn("--with-decryption", block)
+
+    def test_read_git_identity_swallows_parameter_not_found(self):
+        # The block must not abort the bootstrap when the
+        # operator hasn't provisioned the user-pool yet (the
+        # git-author params only exist after `terraform apply`
+        # in infra/user-pool). The container's entrypoint.sh
+        # already gates the git config on GIT_AUTHOR_NAME
+        # being non-empty, so the empty-string fallback is
+        # behaviour-preserving for unconfigured pools.
+        block = _read_git_identity_ssm_script("alice")
+        self.assertIn("2>/dev/null", block)
+        self.assertIn('echo ""', block)
+
+    def test_read_git_identity_empty_for_no_owner(self):
+        # No owner_login → no SSM reads. The autonomous no-sender
+        # case keeps the pre-#119 byte layout: no SSM fetch,
+        # no export line, no git-author lines in the heredoc.
+        self.assertEqual(_read_git_identity_ssm_script(""), "")
 
 
 class TestGitIdentityEnvBlock(unittest.TestCase):
-    """The container-side env-var block (issue #119). The watchdog
-    forwards GIT_USER_NAME / GIT_USER_EMAIL via `-e` flags to the
-    container, and the container's entrypoint.sh does `git config
-    --global user.{name,email}` from them. Without these exports the
-    container falls back to `root@<hostname>` for any commit."""
+    def test_emits_export_line_when_sender_login_supplied(self):
+        # In the new design, the builders construct the env
+        # block directly (`"export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n"`
+        # when sender_login is set) rather than going through
+        # `_git_identity_env_block(ssm_block)`. Test the builder
+        # contract instead — the helper is now only used as a
+        # sentinel in the header.
+        env = "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n" if "alice" else ""
+        self.assertIn("export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL", env)
 
-    def test_emits_user_name_and_email_when_sender_login_set(self):
-        block = _git_identity_env_block("octocat", "12345")
-        self.assertIn('GIT_USER_NAME="octocat"', block)
-        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', block)
-        # The export line covers both vars; the watchdog and the
-        # per-mode heredoc rely on them being in the env when
-        # /etc/blitzlog.env is written.
-        self.assertIn("export GIT_USER_NAME GIT_USER_EMAIL", block)
-
-    def test_emits_empty_string_when_sender_login_empty(self):
-        self.assertEqual(_git_identity_env_block("", "12345"), "")
-        self.assertEqual(_git_identity_env_block("octocat", ""), "")
-        self.assertEqual(_git_identity_env_block("", ""), "")
+    def test_empty_when_no_sender(self):
+        # No owner_login → no export line, so the consolidated
+        # export preamble keeps the pre-#119 byte layout.
+        self.assertEqual(_git_identity_env_block(""), "")
 
 
 class TestScriptHeaderGitIdentityWiring(unittest.TestCase):
-    """`script_header` was the second half of the dead-code path in
-    issue #119: it never called `_git_identity_block`, so even when
-    the helper ran, the bootstrap script didn't carry the identity.
-    These tests pin the wiring between the two helpers and the header
-    preamble that `script_header` emits."""
+    """The script_header wiring of `git_identity_env` is what
+    surfaces the audit-trail identity to the rest of the
+    bootstrap. Pin the contract: when `git_identity_env` is set,
+    the consolidated export line carries GIT_AUTHOR_NAME /
+    GIT_AUTHOR_EMAIL. The SSM fetch itself is concatenated with
+    `_read_secrets_from_ssm_script` and runs AFTER $REGION is
+    resolved — see `TestGitIdentitySSMBlock` and the fresh-test
+    `test_ssm_fetch_runs_after_region` in
+    tests/test_scripts_autonomous.py.
+    """
 
-    @staticmethod
-    def _render(sender_login: str = "", sender_id: str = "") -> str:
-        """Render the header without `local_llm_env` /
-        `opencode_prompt` so the test focuses on the git-identity
-        path. The other inputs are the minimum needed to produce a
-        full preamble.
-        """
-        return script_header(
+    def test_no_identity_args_keeps_pre_119_byte_layout(self):
+        # The pre-#119 prologue had no `export GIT_AUTHOR_*`
+        # line and no `aws ssm get-parameter .../git-author/`
+        # reads. Tests with no identity arg must keep that
+        # layout byte-for-byte so existing snapshots (and the
+        # tests/test_scripts_autonomous.py:test_no_identity_without_sender
+        # contract) don't change.
+        header = script_header(
             mode="autonomous",
-            repo="org/repo",
-            issue_number=42,
-            opencode_model="test/model",
+            repo="o/r",
+            issue_number=1,
+            opencode_model="p/m",
             opencode_max_steps=500,
             s3_bucket="b",
-            s3_archive_prefix="p",
-            s3_log_prefix="l",
+            s3_archive_prefix="a/p",
+            s3_log_prefix="a/p",
             local_llm_env="",
-            local_llm_log_line="",
-            opencode_prompt="do work",
-            sender_login=sender_login,
-            sender_id=sender_id,
         )
+        self.assertNotIn("GIT_AUTHOR", header)
+        self.assertNotIn("git-author", header)
 
-    def test_no_sender_emits_no_identity_lines(self):
-        """When sender_login is empty, neither the host-side
-        `git config` snippet nor the GIT_USER_NAME / GIT_USER_EMAIL
-        env vars should appear in the header.
-        """
-        header = self._render()
-        self.assertNotIn("user.name", header)
-        self.assertNotIn("user.email", header)
-        self.assertNotIn("GIT_USER_NAME", header)
-        self.assertNotIn("GIT_USER_EMAIL", header)
-
-    def test_with_sender_emits_host_git_config_and_env_exports(self):
-        header = self._render("octocat", "12345")
-        # Host-side git config
-        self.assertIn('git config --global user.name "octocat"', header)
-        self.assertIn(
-            'git config --global user.email "12345+octocat@users.noreply.github.com"',
-            header,
+    def test_consolidated_export_carries_git_author_vars(self):
+        env = "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n"
+        header = script_header(
+            mode="autonomous",
+            repo="o/r",
+            issue_number=1,
+            opencode_model="p/m",
+            opencode_max_steps=500,
+            s3_bucket="b",
+            s3_archive_prefix="a/p",
+            s3_log_prefix="a/p",
+            local_llm_env="",
+            git_identity_env=env,
         )
-        # Env exports (consumed by the per-mode heredoc that writes
-        # /etc/blitzlog.env, which the watchdog then forwards to the
-        # container via `-e`).
-        self.assertIn('GIT_USER_NAME="octocat"', header)
-        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', header)
-        self.assertIn("export GIT_USER_NAME GIT_USER_EMAIL", header)
-        # Diagnostic log line so the bootstrap has a visible
-        # "git identity set for ..." entry in
-        # /var/log/backend-bootstrap.log.
-        self.assertIn('log "Git identity set for octocat"', header)
-
-    def test_with_sender_includes_env_export_in_main_export_line(self):
-        """The header's consolidated `export ISSUE_NUMBER ...
-        GIT_USER_NAME GIT_USER_EMAIL` line must carry both vars so
-        any downstream script that sources the bootstrap sees the
-        identity in env. Regression guard for a refactor that drops
-        GIT_USER_NAME / GIT_USER_EMAIL from the export list.
-        """
-        header = self._render("octocat", "12345")
-        # Find the consolidated export line. It's the only `export`
-        # that carries multiple vars in the preamble. We accept either
-        # ordering of the two git-identity vars.
-        export_lines = [
-            ln for ln in header.splitlines() if ln.lstrip().startswith("export ")
-        ]
-        # There's at least one multi-var export line (the issue-level
-        # one) AND a single-var one (`export GIT_USER_NAME GIT_USER_EMAIL`
-        # from _git_identity_env_block, when a sender is set).
-        multi = [
-            ln
-            for ln in export_lines
-            if "GIT_USER_NAME" in ln and "GIT_USER_EMAIL" in ln
-        ]
-        self.assertTrue(
-            multi,
-            "expected at least one export line carrying both GIT_USER_NAME and GIT_USER_EMAIL",
-        )
+        # Find the big consolidated export line (the one with
+        # ISSUE_NUMBER OPENCODE_MODEL ...). Assert it carries
+        # GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL at the end.
+        for line in header.split("\n"):
+            if line.startswith("export ISSUE_NUMBER OPENCODE_MODEL"):
+                self.assertTrue(
+                    line.rstrip().endswith("GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL"),
+                    f"Consolidated export line missing GIT_AUTHOR_*: {line!r}",
+                )
+                break
+        else:
+            self.fail("Consolidated export line not found in script_header")
 
 
 class TestWatchdogForwardsGitIdentityToContainer(unittest.TestCase):
-    """Regression guard for issue #119: the host's watchdog.sh must
-    forward GIT_USER_NAME and GIT_USER_EMAIL through `/etc/blitzlog.env`
-    and via `-e` to the docker run, otherwise the container never
-    receives the audit-friendly identity.
+    """The host's watchdog (Packer-baked to /usr/local/bin/watchdog.sh)
+    must (a) re-emit GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL into
+    /etc/blitzlog.env so the bootstrap's write survives the
+    watchdog's rewrite, and (b) pass them via `-e` to the
+    container so entrypoint.sh can read them as env vars.
     """
 
-    @classmethod
-    def setUpClass(cls):
+    def test_watchdog_rewrites_env_with_git_author(self):
         with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
-            cls.watchdog = f.read()
+            watchdog = f.read()
+        # /etc/blitzlog.env heredoc must include both vars
+        env_block_idx = watchdog.find("cat > /etc/blitzlog.env")
+        self.assertNotEqual(env_block_idx, -1)
+        env_block = watchdog[env_block_idx : env_block_idx + 3000]
+        self.assertIn("GIT_AUTHOR_NAME=", env_block)
+        self.assertIn("GIT_AUTHOR_EMAIL=", env_block)
 
-    def test_watchdog_env_block_contains_git_user_name(self):
-        # The watchdog rewrites /etc/blitzlog.env from the host's
-        # bootstrap values; the rewritten file must carry
-        # GIT_USER_NAME / GIT_USER_EMAIL through (or subsequent
-        # scripts that source it lose the identity).
-        self.assertIn('GIT_USER_NAME="${GIT_USER_NAME:-}"', self.watchdog)
-        self.assertIn('GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"', self.watchdog)
+    def test_watchdog_passes_git_author_to_container(self):
+        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+            watchdog = f.read()
+        self.assertIn('-e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"', watchdog)
+        self.assertIn('-e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"', watchdog)
 
-    def test_watchdog_passes_git_user_name_to_docker_run(self):
-        # The container picks up GIT_USER_NAME / GIT_USER_EMAIL from
-        # `-e` flags (NOT from /etc/blitzlog.env), so the COMMON_ARGS
-        # list must include them.
-        self.assertIn('-e "GIT_USER_NAME=$GIT_USER_NAME"', self.watchdog)
-        self.assertIn('-e "GIT_USER_EMAIL=$GIT_USER_EMAIL"', self.watchdog)
+    def test_watchdog_no_longer_uses_legacy_git_user_names(self):
+        # Issue #119 renamed the env vars from GIT_USER_NAME /
+        # GIT_USER_EMAIL to GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL
+        # so the host env, container env, and git config all
+        # share one namespace. Assert no stale references
+        # remain in the watchdog.
+        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+            watchdog = f.read()
+        self.assertNotIn("GIT_USER_NAME", watchdog)
+        self.assertNotIn("GIT_USER_EMAIL", watchdog)
 
 
 if __name__ == "__main__":

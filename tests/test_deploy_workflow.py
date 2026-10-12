@@ -314,12 +314,23 @@ class TestDeployRole(unittest.TestCase):
             "deploy policy must NOT widen SSM to /blitzlog/* "
             "(would cross the per-env boundary the env-isolation tests protect)",
         )
-        # Must NOT touch the user-pool namespace.
+        # Must NOT touch the user-pool namespace at large. The
+        # narrow git-author subtree (issue #119) is a separate,
+        # explicit grant — see the SSMGitAuthorIdentityRead Sid
+        # below — and is not caught by this substring check
+        # because it only widens to the users/*/git-author/*
+        # subtree, not the user-pool as a whole.
         self.assertNotIn(
-            "parameter/blitzlog/users",
+            "parameter/blitzlog/users/*/telegram",
             body,
-            "deploy policy must NOT include the user-pool namespace "
-            "(per-env stacks don't write there; user-pool is a separate stack)",
+            "deploy policy must NOT include the user-pool telegram subtree "
+            "(the deploy job's job is terraform apply, not bot-pool auth)",
+        )
+        self.assertNotIn(
+            "parameter/blitzlog/users/*/local-llm",
+            body,
+            "deploy policy must NOT include the user-pool local-llm subtree "
+            "(agent-runtime config, not deploy-time config)",
         )
 
     def test_passrole_lambda_conditional(self):
@@ -1206,60 +1217,6 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "terraform-apply-dev.yml must run `mise install` "
             "(puts Python 3.12 in ~/.local/share/mise/installs/python/... "
             "where the local-exec resolves it)",
-        )
-
-    def test_validate_git_author_identity_step_present(self):
-        """Issue #119: terraform-apply-dev.yml MUST validate the
-        operator's `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`
-        and export them to GITHUB_ENV. The workflow doesn't currently
-        land commits (it's a terraform-only path), but exporting them
-        here means a future agent-driven flow on the same runner
-        (release hotfix from a feature branch, follow-up PR bot, etc.)
-        can read them without re-plumbing, and matching the
-        release.yml deploy-job contract keeps the configuration
-        surface uniform across workflows.
-
-        Regression guard for a refactor that drops the
-        fail-loud-when-missing check.
-        """
-        self.assertRegex(
-            self.text,
-            r"-\s+name:\s*Validate git author identity",
-            "terraform-apply-dev.yml must have a 'Validate git author "
-            "identity' step (issue #119 forward-compat)",
-        )
-        # Find the body of the Validate step's `run:` block.
-        m = re.search(
-            r"(?ms)- name: Validate git author identity.*?run: \|\n"
-            r"(?P<body>(?:          .*\n)+)",
-            self.text,
-        )
-        self.assertIsNotNone(
-            m,
-            "terraform-apply-dev.yml's Validate step must have a run "
-            "block (issue #119)",
-        )
-        body = m.group("body")
-        # Fail-loud contract, matching the release.yml Bump step.
-        self.assertIn(
-            "FATAL: vars.GIT_AUTHOR_NAME",
-            body,
-            "terraform-apply-dev.yml's Validate step must FAIL LOUD when "
-            "vars.GIT_AUTHOR_NAME / vars.GIT_AUTHOR_EMAIL is unset (issue #119)",
-        )
-        # Forward-compat: the step writes both vars to GITHUB_ENV via the
-        # heredoc form (matching the SSM Render step's pattern).
-        self.assertRegex(
-            body,
-            r"GIT_AUTHOR_NAME<<EOF",
-            "terraform-apply-dev.yml's Validate step must export "
-            "GIT_AUTHOR_NAME to GITHUB_ENV via the heredoc form",
-        )
-        self.assertRegex(
-            body,
-            r"GIT_AUTHOR_EMAIL<<EOF",
-            "terraform-apply-dev.yml's Validate step must export "
-            "GIT_AUTHOR_EMAIL to GITHUB_ENV via the heredoc form",
         )
 
 

@@ -28,51 +28,31 @@ the agent runtime — that's the container's job now.
 from _env import _blitzlog_env, _ssm_root
 
 
-def _git_identity_block(sender_login: str, sender_id: str) -> str:
-    """Return the host-side `git config --global user.name/email` snippet,
-    or "" if either sender field is missing (the helper requires BOTH
-    `sender_login` and `sender_id` to compose the canonical
-    `<sender_id>+<sender_login>@users.noreply.github.com` noreply
-    email; a partial sender set would emit a malformed "+oct
-    @users.noreply.github.com" string. The bootstrap silently skips the
-    identity step when either is missing).
-
-    The same identity is surfaced to the container via the
-    GIT_USER_NAME / GIT_USER_EMAIL env exports in `script_header`
-    (which the watchdog passes through `-e` flags into the container;
-    the container's entrypoint.sh then runs the matching
-    `git config --global` so the commits the agent makes inside the
-    container are attributed to the same human).
+def _git_identity_ssm_block(owner_login: str) -> str:
+    """Reserved for symmetry with `_local_llm_env_block`; the SSM
+    fetch itself lives in `_read_git_identity_ssm_script` so it runs
+    AFTER `$REGION` is set by `_read_secrets_from_ssm_script`.
+    Calling this from `script_header` would place the `aws ssm
+    get-parameter` call before `$REGION` is bound, which trips
+    `set -u` on a fresh EC2 instance (issue #119 regression — the
+    fetched value isn't visible to the header, and the `--region
+    "$REGION"` expansion aborts the bootstrap). Returns "" so the
+    header's consolidated export line and the byte layout are
+    unchanged.
     """
-    if not sender_login or not sender_id:
-        return ""
-    return (
-        f'\ngit config --global user.name "{sender_login}"\n'
-        f'git config --global user.email "{sender_id}+{sender_login}@users.noreply.github.com"\n'
-    )
+    return ""
 
 
-def _git_identity_env_block(sender_login: str, sender_id: str) -> str:
-    """Return the GIT_USER_NAME / GIT_USER_EMAIL env-export block for
-    `script_header`. Returns "" when either sender field is missing
-    so the bootstrap is a no-op when the webhook payload doesn't
-    carry one.
-
-    The values are exported as shell variables so the
-    `cat > /etc/blitzlog.env <<ENVEOF ... ENVEOF` heredoc in the
-    per-mode builder can reference `${GIT_USER_NAME}` /
-    `${GIT_USER_EMAIL}` (matching the OPENCODE_* /
-    LOCAL_LLM_* pattern). The watchdog then passes them through `-e`
-    to the container.
+def _git_identity_env_block(ssm_block: str) -> str:
+    """Emit the GIT_AUTHOR_* export line for the consolidated export
+    preamble. `ssm_block` is the output of `_git_identity_ssm_block`.
+    Returns "" when no SSM block was emitted (no `owner_login`) so
+    the no-identity case keeps the byte layout of the pre-#119
+    prologue verbatim.
     """
-    if not sender_login or not sender_id:
+    if not ssm_block:
         return ""
-    email = f"{sender_id}+{sender_login}@users.noreply.github.com"
-    return (
-        f'GIT_USER_NAME="{sender_login}"\n'
-        f'GIT_USER_EMAIL="{email}"\n'
-        "export GIT_USER_NAME GIT_USER_EMAIL\n"
-    )
+    return "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n"
 
 
 def _local_llm_env_block(local_llm: dict | None) -> str:
@@ -111,10 +91,10 @@ def script_header(
     s3_archive_prefix: str,
     s3_log_prefix: str,
     local_llm_env: str,
+    git_identity_ssm: str = "",
+    git_identity_env: str = "",
     local_llm_log_line: str = "",
     opencode_prompt: str | None = None,
-    sender_login: str = "",
-    sender_id: str = "",
 ) -> str:
     """Return the shebang + `set -euo pipefail` + defensive env scrub +
     `LOG_FILE`/`log()` + env-export preamble every bootstrap needs.
@@ -124,6 +104,18 @@ def script_header(
     the same defensive `unset OPENCODE_API_KEY HTTPS_PROXY HTTP_PROXY
     https_proxy http_proxy` so a leaked proxy var can't redirect the
     SSM reads or the LLM API calls.
+
+    `git_identity_env` is the output of `_git_identity_env_block(...)`.
+    When non-empty, the consolidated export line carries
+    `GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL` so the values the
+    `_read_git_identity_ssm_script` block assigns downstream
+    (after `$REGION` is set) are visible to the watchdog and
+    forwarded to the container. The `git_identity_ssm` block
+    itself is NOT emitted here — that fetch is concatenated with
+    `_read_secrets_from_ssm_script` (see
+    `_read_git_identity_ssm_script`) so `$REGION` is bound before
+    the `--region "$REGION"` expansion. Emitting it here would
+    trip `set -u` on a fresh EC2 instance (issue #119 regression).
 
     Autonomous mode additionally sets `OPENCODE_NONINTERACTIVE=1` and
     `OPENCODE_PROMPT="<prompt>"`. Assisted mode does not — the opencode
@@ -139,27 +131,6 @@ def script_header(
 
     `opencode_max_steps` is exported as `OPENCODE_AGENT_MAX_STEPS="N"` and
     is read by the container's entrypoint.sh when it writes opencode.json.
-
-    `sender_login` / `sender_id` (issue #119) flow through to two
-    places:
-
-    1. The git-identity env block (`GIT_USER_NAME` / `GIT_USER_EMAIL`)
-       is exported so the per-mode heredoc that writes
-       `/etc/blitzlog.env` can reference them; the watchdog then
-       passes them to the container, and the container's entrypoint.sh
-       runs `git config --global user.{name,email}` so any `git commit`
-       the agent makes inside the container is attributed to the
-       human who triggered the run (not the EC2 default
-       `root@<hostname>`).
-    2. The host-side `git config --global` snippet is emitted just
-       before the "Reading secrets from SSM" log so any host-side git
-       operation (the assisted-mode `_session_restore_script`'s
-       `git fetch` / `git checkout`) is also attributed correctly.
-
-    Both are no-ops when `sender_login` is empty (autonomous launches
-    without a webhook payload, manual test paths, etc.) — the helpers
-    return "" in that case and the bootstrap silently skips the
-    identity step.
     """
     if opencode_prompt is not None:
         opencode_interactive_lines = (
@@ -170,26 +141,8 @@ def script_header(
         opencode_interactive_lines = ""
         interactive_export = ""
 
-    git_identity_env_block = _git_identity_env_block(sender_login, sender_id)
-    git_identity_block = _git_identity_block(sender_login, sender_id)
-    if git_identity_block:
-        # git_identity_block from the helper already starts with "\n"
-        # so it inserts a blank line in front of the `git config`
-        # lines. We follow it with a one-liner so the bootstrap has
-        # a visible "git identity set for ..." diagnostic in
-        # /var/log/backend-bootstrap.log.
-        host_git_identity_block = (
-            git_identity_block + f'log "Git identity set for {sender_login}"\n'
-        )
-    else:
-        host_git_identity_block = ""
-
-    # Add GIT_USER_NAME / GIT_USER_EMAIL to the consolidated export
-    # line only when the env-block is non-empty (i.e., a sender was
-    # supplied). An empty identity case still emits the rest of the
-    # prologue verbatim so the byte layout doesn't drift.
     git_identity_export = (
-        " GIT_USER_NAME GIT_USER_EMAIL" if git_identity_env_block else ""
+        " GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL" if git_identity_env else ""
     )
 
     return f"""#!/bin/bash
@@ -213,13 +166,13 @@ S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 S3_LOG_PREFIX="{s3_log_prefix}"
-{local_llm_env}{git_identity_env_block}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX S3_LOG_PREFIX{git_identity_export}
+{local_llm_env}{git_identity_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX S3_LOG_PREFIX{git_identity_export}
 
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
 {local_llm_log_line}
 
-{host_git_identity_block}log "Reading secrets from SSM..."
+log "Reading secrets from SSM..."
 """
 
 
@@ -264,6 +217,44 @@ export STT_LANGUAGE
 STT_MODELS_BUCKET=$(aws ssm get-parameter --name "{ssm_root}/stt/models-bucket" --query Parameter.Value --output text --region "$REGION")
 export STT_MODELS_BUCKET
 """
+
+
+def _read_git_identity_ssm_script(owner_login: str) -> str:
+    """Render the bootstrap snippet that fetches the operator-configured
+    git author identity from SSM and assigns it to GIT_AUTHOR_NAME /
+    GIT_AUTHOR_EMAIL. Concatenated with `_read_secrets_from_ssm_script`
+    so the fetch runs AFTER `$REGION` is resolved (the IMDSv2 token +
+    region dance is the first thing the secrets block does — by the
+    time this fires, `$REGION` is set, so the `--region "$REGION"`
+    expansion no longer trips `set -u` on a fresh EC2 instance).
+
+    The `2>/dev/null || echo ""` swallow keeps the bootstrap working
+    when the operator hasn't provisioned the user-pool yet (the
+    git-author params are emitted by `infra/user-pool/main.tf`; a
+    fresh deploy that's running the lambda before the user-pool
+    stack falls back to root@<hostname>). The container's
+    `entrypoint.sh` already gates the `git config --global` step on
+    `GIT_AUTHOR_NAME` being non-empty, so the fallback is
+    behaviour-preserving for unconfigured pools.
+
+    `owner_login` empty → return "". The autonomous no-sender case
+    (`build_autonomous_user_data(...)` with no webhook payload)
+    keeps the pre-#119 byte layout — no SSM fetch, no export, no
+    `/etc/blitzlog.env` git-author lines.
+    """
+    if not owner_login:
+        return ""
+    root = f"/blitzlog/users/{owner_login}/git-author"
+    return (
+        f"\nGIT_AUTHOR_NAME=$(aws ssm get-parameter "
+        f'--name "{root}/name" '
+        f'--query Parameter.Value --output text --region "$REGION" '
+        f'2>/dev/null || echo "")\n'
+        f"GIT_AUTHOR_EMAIL=$(aws ssm get-parameter "
+        f'--name "{root}/email" '
+        f'--query Parameter.Value --output text --region "$REGION" '
+        f'2>/dev/null || echo "")\n'
+    )
 
 
 def _decode_api_errors_script() -> str:

@@ -118,6 +118,24 @@ If any step fails, fix it locally, re-run the full sequence (a fix in one file c
 
 For other stacks, mirror this with the equivalent "build + lint + test" sequence from the Testing Commands / Linting tables above.
 
+## Agent Commit Attribution (Audit Trail, issue #119)
+
+The agent never commits as a fictional identity. Every commit — EC2 host (assisted + autonomous) and GHA worker (release Bump step) — is attributed to the operator of this blitzlog deployment via two SSM parameters that the `infra/user-pool/` module manages:
+
+- `/blitzlog/users/<owner_login>/git-author/name`
+- `/blitzlog/users/<owner_login>/git-author/email`
+
+The values default to `var.owner_login` and `"<owner_login>@users.noreply.github.com"`; override either in `infra/user-pool/terraform.tfvars` when you need a different attribution (e.g. the canonical `release-bot` carve-out for `[skip ci]` bumps).
+
+Hard rules:
+
+1. **Never `root@<hostname>`.** That happens when the user-pool stack hasn't been applied yet (no SSM params to read); the bootstrap's `2>/dev/null || echo ""` fallback is behaviour-preserving, but the operator must run `terraform apply` in `infra/user-pool/` so the params exist.
+2. **Never a GHA repo variable like `vars.GIT_AUTHOR_NAME`.** The release Bump step reads from SSM, not from a repo variable. The only GHA-side knob is `vars.OWNER_LOGIN` (the pool whose git-author params to fetch).
+3. **Never per-sender identity in the bootstrap.** The audit-trail identity is owned by the operator, not by the webhook `sender_login`. Assisted commits and autonomous commits get the same identity, sourced from the same SSM parameters.
+4. **Surface setup errors loudly.** When the Bump step finds a missing `OWNER_LOGIN` or missing SSM param, it aborts with `FATAL: ... terraform apply in infra/user-pool/`. The EC2 bootstrap's `2>/dev/null || echo ""` swallow only covers the case where the user-pool stack simply hasn't been applied yet — never fall back to a fictional identity silently.
+
+The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` from env and runs `git config --global user.{name,email}`. The watchdog (`infra/packer/scripts-docker-ubuntu/watchdog.sh`) passes both vars to the container via `-e`. The bootstrap writes them to `/etc/blitzlog.env` so the watchdog's rewrite preserves them.
+
 ## Pull Request
 
 1. **Create PR** against `main` (or `master` if that's the default)

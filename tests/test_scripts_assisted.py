@@ -40,50 +40,62 @@ class TestAssistedNoSecrets(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN=", script)
         self.assertIn("escobar", script)
 
-    def test_identity_block_present_with_sender(self):
-        """Issue #119: assisted mode commits land as `root@<hostname>`
-        unless the bootstrap wires the issue sender (Telegram-bot-pool
-        owner) into git. _build_assisted() supplies
-        sender_login='octocat' / sender_id='12345', so the rendered
-        bootstrap must contain both the host-side `git config` lines
-        (for host-side git checkout on a resumed branch) and the
-        GIT_USER_NAME / GIT_USER_EMAIL env-var lines (for the
-        container's entrypoint.sh to pick up).
-        """
-        script = _build_assisted()
-        # Host-side git config (assisted mode's _session_restore_script
-        # does `git -C /workspace/repo fetch origin ...` then
-        # `git checkout ...`; both need a configured identity).
-        self.assertIn('git config --global user.name "octocat"', script)
-        self.assertIn(
-            'git config --global user.email "12345+octocat@users.noreply.github.com"',
-            script,
-        )
-        # Env-var exports so the heredoc forwards into /etc/blitzlog.env
-        # and the watchdog passes them via `-e` to the container.
-        self.assertIn('GIT_USER_NAME="octocat"', script)
-        self.assertIn('GIT_USER_EMAIL="12345+octocat@users.noreply.github.com"', script)
-        # Heredoc shape — same `${VAR:-}` wrapper as OPENCODE_*.
-        heredoc = _extract_blitzlog_env_heredoc(script)
-        self.assertIn('GIT_USER_NAME="${GIT_USER_NAME:-}"', heredoc)
-        self.assertIn('GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"', heredoc)
-
     @patch.dict(
         os.environ,
         {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
     )
     def test_no_identity_without_sender(self):
-        """Counterpart to `test_identity_block_present_with_sender`:
+        """Counterpart to `test_git_identity_ssm_block_emitted_when_sender_present`:
         when the builder is called with no sender (sender_login=""),
-        the bootstrap must NOT wire any git identity — the contract
-        that the pre-#119 `test_no_identity_without_sender` test in
-        test_scripts_autonomous.py asserted (moved here verbatim for
-        symmetry; both modes share the same conditional wiring).
+        the bootstrap must NOT include the git-author SSM-fetch snippet
+        — the contract that the pre-#119 `test_no_identity_without_sender`
+        test in test_scripts_autonomous.py asserted (the identity is
+        empty when no sender, which is the same as the no-identity case
+        from the entrypoint.sh's perspective).
         """
         script = _build_assisted(sender_login="", sender_id="")
-        # The literal `user.name` substring should not appear at all.
-        self.assertNotIn("user.name", script)
-        self.assertNotIn("user.email", script)
+        # The git-author SSM-fetch snippet must not appear in the
+        # bootstrap prologue (everything before the /etc/blitzlog.env
+        # heredoc). The heredoc itself mentions git-author in a
+        # comment, but the SSM-fetch is gated on a non-empty
+        # sender_login.
+        prologue = script.split("cat > /etc/blitzlog.env")[0]
+        self.assertNotIn("git-author", prologue)
+        # The consolidated export line in the bootstrap prologue must
+        # NOT carry GIT_AUTHOR_* vars (the no-sender case keeps the
+        # pre-#119 byte layout).
+        for line in prologue.split("\n"):
+            if line.startswith("export ISSUE_NUMBER"):
+                self.assertNotIn("GIT_AUTHOR", line)
+                break
+
+    @patch.dict(
+        os.environ,
+        {"S3_LOGS_BUCKET": "test-bucket", "OPENCODE_MODEL": "test/model"},
+    )
+    def test_git_identity_ssm_block_emitted_when_sender_present(self):
+        # Issue #119: the audit-trail identity is sourced from
+        # /blitzlog/users/<sender>/git-author/{name,email} in SSM
+        # (same params the GHA worker reads). The bootstrap
+        # fetches them at launch and re-emits them in
+        # /etc/blitzlog.env so the watchdog passes them to the
+        # container via `-e`. Mirrors the autonomous-mode test.
+        script = _build_assisted()
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/name"',
+            script,
+        )
+        self.assertIn(
+            'aws ssm get-parameter --name "/blitzlog/users/octocat/git-author/email"',
+            script,
+        )
+        self.assertIn("export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL", script)
+        # /etc/blitzlog.env heredoc carries both vars.
+        env_start = script.index("cat > /etc/blitzlog.env")
+        env_end = script.index("\nENVEOF\n", env_start)
+        env_section = script[env_start:env_end]
+        self.assertIn('GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-}"', env_section)
+        self.assertIn('GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"', env_section)
 
     @patch.dict(
         os.environ,
