@@ -1,35 +1,41 @@
 """EC2 spot instance launch + subnet/AMI/price helpers.
 
-The launch function uploads the user-data (autonomous or assisted) to S3
-and writes a tiny S3 downloader as the EC2 `UserData` field (which has a
-16 KB cap; the full bootstrap is multi-kilobyte and well over that).
-Also responsible for picking the cheapest available AZ/instance-type
-combination for the configured instance types.
+After #83, this module is a thin adapter over `provider.aws.AwsCompute`
+and the other two provider singletons. The original behaviours
+(spot pricing discovery, AMI lookup with custom-or-fallback chain,
+user-data downloader that fits EC2's 16 KB cap, and the launch
+loop with on-demand fallback) all live in the provider now; this
+module preserves the function names that the test suite and the
+handler import so the diff stays narrow.
 
-The downloader script itself is intentionally tiny (well under the 16 KB
-EC2 UserData limit) and downloads the full bootstrap from S3 at first
-boot via IMDSv2-fetched credentials.
+The user-data upload to S3 (the bootstrap script EC2 fetches at
+first boot) goes through `get_object_store()` rather than a
+dedicated boto3 client. The ephemeral GitHub token write to SSM
+goes through `get_secrets()`.
+
+`grep -r boto3 lambda/ --exclude-dir=provider` returns no hits —
+verified by the `#83` acceptance test.
 """
 
 import base64
-import json
 import os
 import uuid
-from datetime import datetime, timezone
 
-import boto3
 from _env import BLITZLOG_ENV, SSM_PATH, logger
-from botocore.config import Config
 from botocore.exceptions import ClientError
-
-ec2 = boto3.client("ec2", config=Config(retries={"max_attempts": 1}))
-s3 = boto3.client("s3")
+from provider import (
+    LaunchSpec,
+    get_compute,
+    get_object_store,
+    get_secrets,
+)
+from provider.aws import AwsCompute
 
 # Fallback used when SPOT_INSTANCE_TYPES_JSON is unset or unparseable. Kept
 # in sync with the default of `var.spot_instance_types` in infra/modules/core
 # /variables.tf — Terraform is the source of truth at deploy time; this only
 # protects unit tests and out-of-Lambda callers from a hard failure.
-_DEFAULT_SPOT_INSTANCE_TYPES = ["t4g.medium", "t4g.large", "t4g.xlarge"]
+_DEFAULT_SPOT_INSTANCE_TYPES = AwsCompute._default_spot_instance_types()
 
 
 def _load_spot_instance_types() -> list[str]:
@@ -40,31 +46,17 @@ def _load_spot_instance_types() -> list[str]:
     unparseable, or not a non-empty list of strings. Logging at warning
     on parse failure so a misconfigured Terraform apply is visible in
     CloudWatch without aborting the request.
+
+    Implementation lives in `AwsCompute._load_spot_instance_types`
+    (post-#83). Kept as a top-level shim so `tests/test_ec2.py`
+    can still import it via `from ec2 import _load_spot_instance_types`.
     """
-    raw = os.environ.get("SPOT_INSTANCE_TYPES_JSON", "").strip()
-    if not raw:
-        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError) as e:
-        logger.warning(
-            "SPOT_INSTANCE_TYPES_JSON is not valid JSON (%s); falling back to defaults",
-            e,
-        )
-        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
-    if (
-        not isinstance(parsed, list)
-        or not parsed
-        or not all(isinstance(item, str) and item for item in parsed)
-    ):
-        logger.warning(
-            "SPOT_INSTANCE_TYPES_JSON must be a non-empty JSON list of strings; "
-            "falling back to defaults",
-        )
-        return list(_DEFAULT_SPOT_INSTANCE_TYPES)
-    return parsed
+    return AwsCompute()._load_spot_instance_types()
 
 
+# `SPOT_INSTANCE_TYPES` is the module-level frozen copy other code
+# might import. Reads the env var at import time so out-of-Lambda
+# callers (and tests that don't reload) see the operator override.
 SPOT_INSTANCE_TYPES: list[str] = _load_spot_instance_types()
 
 
@@ -72,14 +64,11 @@ def get_latest_ubuntu_ami() -> str:
     """Fallback source for the Ubuntu 26.04 LTS arm64 agent AMI when no
     Packer build has populated /blitzlog/<env>/agent-ami-id-docker-ubuntu.
 
-    Reads the Canonical-published Ubuntu 26.04 LTS arm64 minimal AMI id
-    from the AWS-managed parameter store namespace; matches the
-    source_ami_filter used by infra/packer/agent-docker-ubuntu.pkr.hcl.
+    Delegates to `AwsCompute.get_latest_image("26.04")` which reads the
+    Canonical-published image id from the AWS-managed parameter store.
+    Kept as a public function so the test suite can import it.
     """
-    resp = boto3.client("ssm").get_parameter(
-        Name="/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
-    )
-    return resp["Parameter"]["Value"]
+    return get_compute().get_latest_image("26.04")
 
 
 def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
@@ -87,7 +76,7 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
 
     The custom agent AMI is published by the Packer pipelines in
     infra/packer/ to this SSM parameter. We validate the id is still
-    launchable via ec2.describe_images so a retired/deregistered AMI
+    launchable via compute.describe_image so a retired/deregistered AMI
     doesn't silently turn every webhook into a 500.
 
     Fallback chain:
@@ -99,10 +88,9 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
     from _env import _ssm_root  # late import to read env at call time
 
     param_name = f"{_ssm_root()}/{ssm_param_suffix}"
-    ssm = boto3.client("ssm")
+    secrets = get_secrets()
     try:
-        resp = ssm.get_parameter(Name=param_name)
-        ami_id = resp["Parameter"]["Value"]
+        ami_id = secrets.get(param_name, decrypt=False)
     except ClientError as e:
         if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
             logger.info("No custom agent AMI at %s; falling back", param_name)
@@ -110,7 +98,7 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
         raise
 
     try:
-        ec2.describe_images(ImageIds=[ami_id])
+        get_compute().describe_image(ami_id)
     except ClientError as e:
         code = e.response["Error"]["Code"]
         if code in ("InvalidAMIID.NotFound", "InvalidAMIID.Unavailable"):
@@ -120,7 +108,7 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
                 code,
             )
             try:
-                ssm.delete_parameter(Name=param_name)
+                secrets.delete(param_name)
             except ClientError as del_err:
                 logger.warning(
                     "Failed to delete stale agent-ami-id param %s: %s",
@@ -147,59 +135,72 @@ def get_agent_ami() -> str:
 
 
 def get_instance_profile_arn() -> str:
-    iam = boto3.client("iam")
-    resp = iam.get_instance_profile(
-        InstanceProfileName=os.environ["EC2_INSTANCE_PROFILE_NAME"]
+    """Thin shim over `AwsCompute.get_instance_profile_arn` that
+    reads the profile name from the env var Terraform injected.
+    """
+    return get_compute().get_instance_profile_arn(
+        os.environ["EC2_INSTANCE_PROFILE_NAME"],
     )
-    return resp["InstanceProfile"]["Arn"]
 
 
 def get_spot_prices(instance_types: list[str]) -> list[tuple[str, str, float]]:
-    try:
-        resp = ec2.describe_spot_price_history(
-            InstanceTypes=instance_types,
-            ProductDescriptions=["Linux/UNIX"],
-            StartTime=datetime.now(timezone.utc),
-            EndTime=datetime.now(timezone.utc),
-        )
-        results: list[tuple[str, str, float]] = []
-        for entry in resp.get("SpotPriceHistory", []):
-            price = float(entry["SpotPrice"])
-            results.append((entry["AvailabilityZone"], entry["InstanceType"], price))
-        results.sort(key=lambda x: x[2])
-        return results
-    except ClientError as e:
-        logger.warning("DescribeSpotPriceHistory failed: %s", e)
-        return []
+    """Return `(az, instance_type, price_usd_per_hour)` tuples sorted
+    cheapest-first. Kept as a tuple-shaped shim over the new
+    `AwsCompute.spot_prices` (which returns `list[SpotQuote]`) so
+    the consumer in `launch_ec2_spot_instance` is unchanged.
+    """
+    quotes = get_compute().spot_prices(instance_types)
+    return [(q.availability_zone, q.instance_type, q.price_usd_hour) for q in quotes]
 
 
 def get_az_subnet_map() -> dict[str, str]:
-    vpc_id = os.environ.get("VPC_ID", "")
-    if not vpc_id:
-        return {}
-    try:
-        resp = ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
-        return {
-            subnet["AvailabilityZone"]: subnet["SubnetId"]
-            for subnet in resp.get("Subnets", [])
-        }
-    except ClientError as e:
-        logger.warning("DescribeSubnets failed: %s", e)
-        return {}
+    """Return `{az: subnet_id}` for the configured VPC. Empty dict
+    when `VPC_ID` is unset (the consumer falls back to
+    `EC2_SUBNET_ID`).
+    """
+    return get_compute().az_subnet_map(os.environ.get("VPC_ID", ""))
 
 
 def _build_s3_downloader_script(bucket: str, key: str) -> str:
     """Render the tiny bootstrapper that EC2's UserData field runs at
-    first boot. It uses IMDSv2 to find the region, then `aws s3 cp`s the
-    full bootstrap from S3 and `bash`-es it. Kept under 16 KB so the
-    base64-encoded EC2 UserData payload stays under the cap.
+    first boot. Delegates to `AwsCompute.build_user_data_downloader_script`
+    — kept as a public shim so `tests/test_ec2.py::TestS3Downloader`
+    can still import the symbol and assert the wire format.
     """
-    return f"""#!/bin/bash
-TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
-aws s3 cp s3://{bucket}/{key} /tmp/bootstrap.sh --region "$REGION"
-bash /tmp/bootstrap.sh
-"""
+    return get_compute().build_user_data_downloader_script(bucket, key)
+
+
+def _build_launch_spec(
+    *,
+    image_id: str,
+    user_data_b64: str,
+    security_group_id: str,
+    instance_profile_name: str,
+    issue_number: int,
+    mode: str,
+) -> LaunchSpec:
+    """Build a `LaunchSpec` from the parameters `launch_ec2_spot_instance`
+    computed inline. Tags include the `Environment` tag the watchdog's
+    IAM condition keys on (`ec2:ResourceTag/Environment = var.environment`).
+    """
+    return LaunchSpec(
+        image_id=image_id,
+        instance_type="",  # filled per-iteration inside `launch_spot`
+        user_data_b64=user_data_b64,
+        subnet_id="",  # filled per-iteration inside `launch_spot`
+        security_group_id=security_group_id,
+        instance_profile_name=instance_profile_name,
+        volume_size_gb=20,
+        tags={
+            "Purpose": "autonomous-agent",
+            "Mode": mode,
+            "Issue": str(issue_number),
+            "Environment": BLITZLOG_ENV,
+            "Name": (
+                f"blitzlog-{BLITZLOG_ENV}-opencode-agent-{mode}-issue-{issue_number}"
+            ),
+        },
+    )
 
 
 def launch_ec2_spot_instance(
@@ -211,19 +212,31 @@ def launch_ec2_spot_instance(
     sender_login: str = "",
     sender_id: str = "",
 ) -> str:
+    """Launch a single spot instance for `issue_number`. Mirrors the
+    pre-#83 function's contract: returns the instance id, raises
+    `ClientError` on unrecoverable failure.
+
+    The function is now a thin orchestration layer that:
+      1. Writes the GitHub token to the ephemeral SSM namespace.
+      2. Builds the user-data and uploads it to S3 (object store).
+      3. Renders the user-data downloader (compute provider).
+      4. Resolves the agent AMI (compute provider).
+      5. Builds a `LaunchSpec` and asks the compute provider to
+         launch it (with spot + on-demand fallback).
+    """
     ephemeral_param = f"{SSM_PATH}/ephemeral/github-token-{issue_number}"
-    boto3.client("ssm").put_parameter(
-        Name=ephemeral_param,
-        Value=github_token,
-        Type="SecureString",
-        Overwrite=True,
+    get_secrets().put(
+        ephemeral_param,
+        github_token,
+        type="SecureString",
+        overwrite=True,
     )
 
     user_data = user_data_builder(repo, issue_number, sender_login, sender_id)
 
     s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
     s3_key = f"user-data/{mode}-issue-{issue_number}-{uuid.uuid4().hex[:8]}.sh"
-    s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=user_data.encode())
+    get_object_store().put(s3_bucket, s3_key, user_data.encode())
     logger.info(
         "Uploaded user-data to s3://%s/%s (%d bytes)",
         s3_bucket,
@@ -235,99 +248,29 @@ def launch_ec2_spot_instance(
     user_data_b64 = base64.b64encode(downloader.encode()).decode()
 
     image_id = get_agent_ami()
-    instance_profile_arn = get_instance_profile_arn()
+    instance_profile_name = os.environ["EC2_INSTANCE_PROFILE_NAME"]
+    security_group_id = os.environ["EC2_SECURITY_GROUP_ID"]
 
-    common_params = {
-        "MinCount": 1,
-        "MaxCount": 1,
-        "ImageId": image_id,
-        "SecurityGroupIds": [os.environ["EC2_SECURITY_GROUP_ID"]],
-        "UserData": user_data_b64,
-        "InstanceInitiatedShutdownBehavior": "terminate",
-        "IamInstanceProfile": {"Arn": instance_profile_arn},
-        "BlockDeviceMappings": [
-            {
-                "DeviceName": "/dev/xvda",
-                "Ebs": {
-                    "VolumeSize": 20,
-                    "VolumeType": "gp3",
-                    "DeleteOnTermination": True,
-                },
-            },
-        ],
-        "TagSpecifications": [
-            {
-                "ResourceType": "instance",
-                "Tags": [
-                    {"Key": "Purpose", "Value": "autonomous-agent"},
-                    {"Key": "Mode", "Value": mode},
-                    {"Key": "Issue", "Value": str(issue_number)},
-                    {
-                        "Key": "Environment",
-                        "Value": BLITZLOG_ENV,
-                    },
-                    {
-                        "Key": "Name",
-                        "Value": f"blitzlog-{BLITZLOG_ENV}-opencode-agent-{mode}-issue-{issue_number}",
-                    },
-                ],
-            },
-        ],
-    }
-
-    az_subnet_map = get_az_subnet_map()
-    spot_prices = get_spot_prices(SPOT_INSTANCE_TYPES)
-
-    if spot_prices and az_subnet_map:
-        for az, instance_type, price in spot_prices:
-            subnet_id = az_subnet_map.get(az)
-            if not subnet_id:
-                logger.info("No subnet in %s, skipping", az)
-                continue
-            try:
-                logger.info("Trying spot %s in %s ($%.6f)...", instance_type, az, price)
-                resp = ec2.run_instances(
-                    **common_params,
-                    SubnetId=subnet_id,
-                    InstanceType=instance_type,
-                    InstanceMarketOptions={
-                        "MarketType": "spot",
-                        "SpotOptions": {
-                            "SpotInstanceType": "one-time",
-                            "InstanceInterruptionBehavior": "terminate",
-                        },
-                    },
-                )
-                return resp["Instances"][0]["InstanceId"]
-            except ClientError as e:
-                logger.warning("Spot %s in %s failed: %s", instance_type, az, e)
-                continue
-    else:
-        fallback_subnet = os.environ.get("EC2_SUBNET_ID", "")
-        for instance_type in SPOT_INSTANCE_TYPES:
-            try:
-                logger.info("Trying spot %s (fallback order)...", instance_type)
-                resp = ec2.run_instances(
-                    **common_params,
-                    SubnetId=fallback_subnet,
-                    InstanceType=instance_type,
-                    InstanceMarketOptions={
-                        "MarketType": "spot",
-                        "SpotOptions": {
-                            "SpotInstanceType": "one-time",
-                            "InstanceInterruptionBehavior": "terminate",
-                        },
-                    },
-                )
-                return resp["Instances"][0]["InstanceId"]
-            except ClientError as e:
-                logger.warning("Spot %s failed: %s", instance_type, e)
-                continue
-
-    logger.warning("All spot types failed, falling back to on-demand t4g.medium")
-    resp = ec2.run_instances(
-        **common_params,
-        SubnetId=os.environ.get("EC2_SUBNET_ID", ""),
-        InstanceType="t4g.medium",
+    spec = _build_launch_spec(
+        image_id=image_id,
+        user_data_b64=user_data_b64,
+        security_group_id=security_group_id,
+        instance_profile_name=instance_profile_name,
+        issue_number=issue_number,
+        mode=mode,
     )
-    return resp["Instances"][0]["InstanceId"]
+
+    return get_compute().launch_spot(spec)
+
+
+__all__ = [
+    "_DEFAULT_SPOT_INSTANCE_TYPES",
+    "_build_s3_downloader_script",
+    "_load_spot_instance_types",
+    "get_agent_ami",
+    "get_az_subnet_map",
+    "get_instance_profile_arn",
+    "get_latest_ubuntu_ami",
+    "get_spot_prices",
+    "launch_ec2_spot_instance",
+]

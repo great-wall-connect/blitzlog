@@ -19,6 +19,13 @@ Two responsibilities:
     the `idle_watchdog` 3 h hard-shutdown) on purpose: a single static
     token keeps `git push` and `gh auth login` both alive without giving
     the agent AWS credentials to refresh them.
+
+Both `get_ssm_param` and `get_github_app_token` read parameters through
+the `provider.aws.AwsSecretStore` so the Lambda no longer instantiates
+its own SSM client (issue #83). The wire shape — parameter name format,
+`WithDecryption` flag, return value — is byte-identical to the
+pre-#83 behaviour so callers in `lambda/handler.py` and the test
+suite are unaffected.
 """
 
 import base64
@@ -27,13 +34,10 @@ import hmac
 import os
 from datetime import datetime, timedelta, timezone
 
-import boto3
 import jwt
 import requests
 from _env import SSM_PATH, logger
-from botocore.config import Config
-
-_ssm = boto3.client("ssm", config=Config(retries={"max_attempts": 1}))
+from provider import get_secrets
 
 # Installation-token lifetime in hours. Read from the Lambda env on every
 # call so the Terraform `github_token_lifetime_hours` variable can tune
@@ -68,11 +72,14 @@ def _get_github_token_lifetime_hours() -> int:
 
 
 def get_ssm_param(name: str, with_decryption: bool = True) -> str:
-    resp = _ssm.get_parameter(
-        Name=f"{SSM_PATH}/{name}",
-        WithDecryption=with_decryption,
+    """Thin shim around `get_secrets().get(...)`. Kept as the
+    public entry point for `lambda/handler.py` and the test suite
+    so the diff stays narrow (issue #83's "Naming" section).
+    """
+    return get_secrets().get(
+        f"{SSM_PATH}/{name}",
+        decrypt=with_decryption,
     )
-    return resp["Parameter"]["Value"]
 
 
 def get_github_app_token(repo: str) -> str:

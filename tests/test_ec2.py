@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import ec2 as ec2_module
+import provider
 from botocore.exceptions import ClientError
 from ec2 import (
     _DEFAULT_SPOT_INSTANCE_TYPES,
@@ -18,9 +19,36 @@ from ec2 import (
 )
 
 
+def _boto3_dispatch(ssm=None, ec2=None, iam=None, s3=None):
+    """Build a `side_effect` function for `provider.aws._boto3_client`
+    that returns the right per-service mock. Used by tests that
+    touch multiple boto3 services through the same shim.
+    """
+    table = {}
+    if ssm is not None:
+        table["ssm"] = ssm
+    if ec2 is not None:
+        table["ec2"] = ec2
+    if iam is not None:
+        table["iam"] = iam
+    if s3 is not None:
+        table["s3"] = s3
+
+    def _dispatch(service, config=None):
+        if service not in table:
+            raise AssertionError(
+                f"unexpected boto3 client requested: {service!r}; "
+                f"known: {sorted(table)}"
+            )
+        return table[service]
+
+    return _dispatch
+
+
 class TestGetSpotPrices(unittest.TestCase):
-    @patch("ec2.ec2")
-    def test_returns_sorted_by_price(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_returns_sorted_by_price(self, mock_boto3_client):
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_spot_price_history.return_value = {
             "SpotPriceHistory": [
                 {
@@ -46,8 +74,9 @@ class TestGetSpotPrices(unittest.TestCase):
         self.assertEqual(result[1], ("ap-east-1c", "t4g.medium", 0.0105))
         self.assertEqual(result[2], ("ap-east-1b", "t4g.medium", 0.0185))
 
-    @patch("ec2.ec2")
-    def test_multiple_instance_types(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_multiple_instance_types(self, mock_boto3_client):
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_spot_price_history.return_value = {
             "SpotPriceHistory": [
                 {
@@ -72,16 +101,18 @@ class TestGetSpotPrices(unittest.TestCase):
         self.assertEqual(result[1], ("ap-east-1a", "t4g.large", 0.02))
         self.assertEqual(result[2], ("ap-east-1c", "t4g.xlarge", 0.035))
 
-    @patch("ec2.ec2")
-    def test_empty_response(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_empty_response(self, mock_boto3_client):
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         result = get_spot_prices(["t4g.medium"])
         self.assertEqual(result, [])
 
-    @patch("ec2.ec2")
-    def test_api_failure_returns_empty(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_api_failure_returns_empty(self, mock_boto3_client):
         from botocore.exceptions import ClientError
 
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_spot_price_history.side_effect = ClientError(
             {"Error": {"Code": "InternalError", "Message": "boom"}},
             "DescribeSpotPriceHistory",
@@ -92,8 +123,9 @@ class TestGetSpotPrices(unittest.TestCase):
 
 class TestGetAzSubnetMap(unittest.TestCase):
     @patch.dict(os.environ, {"VPC_ID": "vpc-12345"})
-    @patch("ec2.ec2")
-    def test_returns_az_to_subnet_mapping(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_returns_az_to_subnet_mapping(self, mock_boto3_client):
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_subnets.return_value = {
             "Subnets": [
                 {"AvailabilityZone": "ap-east-1a", "SubnetId": "subnet-aaa"},
@@ -112,8 +144,9 @@ class TestGetAzSubnetMap(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {"VPC_ID": "vpc-12345"})
-    @patch("ec2.ec2")
-    def test_empty_subnets(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_empty_subnets(self, mock_boto3_client):
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_subnets.return_value = {"Subnets": []}
         result = get_az_subnet_map()
         self.assertEqual(result, {})
@@ -124,10 +157,11 @@ class TestGetAzSubnetMap(unittest.TestCase):
         self.assertEqual(result, {})
 
     @patch.dict(os.environ, {"VPC_ID": "vpc-12345"})
-    @patch("ec2.ec2")
-    def test_api_failure_returns_empty(self, mock_ec2):
+    @patch("provider.aws._boto3_client")
+    def test_api_failure_returns_empty(self, mock_boto3_client):
         from botocore.exceptions import ClientError
 
+        mock_ec2 = mock_boto3_client.return_value
         mock_ec2.describe_subnets.side_effect = ClientError(
             {"Error": {"Code": "InternalError", "Message": "boom"}}, "DescribeSubnets"
         )
@@ -151,14 +185,35 @@ class TestS3Downloader(unittest.TestCase):
 
 
 class TestLaunchEc2SpotInstance(unittest.TestCase):
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
+    """The launch path is heavy — it writes the GitHub token to
+    SSM, uploads user-data to S3, resolves the AMI (SSM +
+    `ec2.describe_images`), looks up the instance profile ARN
+    (IAM), and runs the spot-iteration loop. The `#83` rewrite
+    routes all of these through the `provider.aws._boto3_client`
+    shim so we have to wire multiple per-service mocks in each
+    test.
+    """
+
+    def setUp(self):
+        # Reset the provider singletons so the patched `_boto3_client`
+        # shim is the one the cached `get_compute()` / `get_secrets()`
+        # / `get_object_store()` call into.
+        provider.reset_provider_singletons()
+
+    def _wire_clients(self, mock_boto3_client):
+        """Build per-service mocks and wire them into the
+        `_boto3_client` shim's `side_effect`. Returns the four
+        mocks so each test can assert on the right one.
+        """
+        mock_ssm = MagicMock()
+        mock_s3 = MagicMock()
+        mock_ec2 = MagicMock()
+        mock_iam = MagicMock()
+        mock_boto3_client.side_effect = _boto3_dispatch(
+            ssm=mock_ssm, s3=mock_s3, ec2=mock_ec2, iam=mock_iam
+        )
+        return mock_ssm, mock_s3, mock_ec2, mock_iam
+
     @patch.dict(
         os.environ,
         {
@@ -166,14 +221,23 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2_SUBNET_ID": "subnet-123",
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_stores_token_in_ssm(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
-        mock_ssm = mock_boto3.client.return_value
+    @patch("provider.aws._boto3_client")
+    def test_stores_token_in_ssm(self, mock_boto3_client):
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.autonomous import build_autonomous_user_data
@@ -196,14 +260,6 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertEqual(call_args[1]["Value"], "ghp_testtoken")
         self.assertEqual(call_args[1]["Type"], "SecureString")
 
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
     @patch.dict(
         os.environ,
         {
@@ -211,17 +267,23 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2_SUBNET_ID": "subnet-123",
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_instance_name_has_env_prefix(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
-        """EC2 instance Name tag must include the env prefix so prod and dev
-        instances are visually distinguishable in the AWS console and don't
-        collide on a shared Name (which AWS treats as a soft-uniqueness hint).
-        """
+    @patch("provider.aws._boto3_client")
+    def test_instance_name_has_env_prefix(self, mock_boto3_client):
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.autonomous import build_autonomous_user_data
@@ -244,14 +306,6 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2 instance Name tag must be `blitzlog-<env>-opencode-agent-<mode>-issue-<N>`",
         )
 
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
     @patch.dict(
         os.environ,
         {
@@ -259,13 +313,23 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2_SUBNET_ID": "subnet-123",
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_uploads_userdata_to_s3(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
+    @patch("provider.aws._boto3_client")
+    def test_uploads_userdata_to_s3(self, mock_boto3_client):
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.assisted import build_assisted_user_data
@@ -291,14 +355,6 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         # bootstrap only writes the env-var plumbing.
         self.assertIn("GITHUB_TOKEN=", body)
 
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
     @patch.dict(
         os.environ,
         {
@@ -306,13 +362,23 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2_SUBNET_ID": "subnet-123",
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_ec2_receives_downloader_not_full_script(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
+    @patch("provider.aws._boto3_client")
+    def test_ec2_receives_downloader_not_full_script(self, mock_boto3_client):
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.autonomous import build_autonomous_user_data
@@ -334,14 +400,6 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertIn("bash /tmp/bootstrap.sh", user_data)
         self.assertNotIn("opencode", user_data)
 
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
     @patch.dict(
         os.environ,
         {
@@ -349,13 +407,23 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "EC2_SUBNET_ID": "subnet-123",
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_ec2_volume_size_is_20gb(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
+    @patch("provider.aws._boto3_client")
+    def test_ec2_volume_size_is_20gb(self, mock_boto3_client):
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.autonomous import build_autonomous_user_data
@@ -372,14 +440,6 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         self.assertEqual(block_device[0]["Ebs"]["VolumeType"], "gp3")
         self.assertTrue(block_device[0]["Ebs"]["DeleteOnTermination"])
 
-    @patch(
-        "ec2.get_instance_profile_arn",
-        return_value="arn:aws:iam::123:instance-profile/test",
-    )
-    @patch("ec2.get_agent_ami", return_value="ami-12345")
-    @patch("ec2.s3")
-    @patch("ec2.boto3")
-    @patch("ec2.ec2")
     @patch.dict(
         os.environ,
         {
@@ -388,11 +448,11 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             "VPC_ID": "vpc-123",
             "S3_LOGS_BUCKET": "test-bucket",
             "BLITZLOG_ENV": "prod",
+            "EC2_INSTANCE_PROFILE_NAME": "blitzlog-agent-profile",
         },
     )
-    def test_instance_has_environment_tag(
-        self, mock_ec2, mock_boto3, mock_s3, mock_ami, mock_profile
-    ):
+    @patch("provider.aws._boto3_client")
+    def test_instance_has_environment_tag(self, mock_boto3_client):
         """EC2 instances must carry an `Environment` tag matching the
         Lambda's BLITZLOG_ENV. The ec2_agent_role's `ec2:TerminateInstances`
         IAM condition (infra/modules/core/iam.tf:178-190) keys on
@@ -401,8 +461,18 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         `UnauthorizedOperation` and the instance waits the full 2-hour EC2
         lifecycle timeout.
         """
+        mock_ssm, mock_s3, mock_ec2, mock_iam = self._wire_clients(mock_boto3_client)
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-12345"}}
+        mock_ssm.delete_parameter.return_value = {}
+        mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-12345"}]}
         mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
         mock_ec2.run_instances.return_value = {"Instances": [{"InstanceId": "i-123"}]}
+        mock_iam.get_instance_profile.return_value = {
+            "InstanceProfile": {
+                "Arn": "arn:aws:iam::123:instance-profile/blitzlog-agent-profile"
+            }
+        }
+        mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
         from scripts.autonomous import build_autonomous_user_data
@@ -431,56 +501,63 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
 class TestGetAgentAmi(unittest.TestCase):
     """Tests for get_agent_ami() (Ubuntu 26.04 only — issue #55)."""
 
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
+    def setUp(self):
+        provider.reset_provider_singletons()
+
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"BLITZLOG_ENV": "dev"})
-    def test_reads_docker_ubuntu_param(self, mock_boto3, mock_ec2):
+    def test_reads_docker_ubuntu_param(self, mock_boto3_client):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
+        mock_ec2 = MagicMock()
+        mock_boto3_client.side_effect = _boto3_dispatch(ssm=mock_ssm, ec2=mock_ec2)
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "ami-ubuntu"}}
-        mock_boto3.client.return_value = mock_ssm
         mock_ec2.describe_images.return_value = {"Images": [{"ImageId": "ami-ubuntu"}]}
 
         result = get_agent_ami()
         self.assertEqual(result, "ami-ubuntu")
+        # The AMI id is not a secret; AwsSecretStore.get passes
+        # `WithDecryption=False` for the lookup. (The pre-#83 code
+        # called `boto3.client("ssm").get_parameter(Name=...)`
+        # without the WithDecryption kwarg — the AWS SDK defaulted
+        # it to False. The new code makes the default explicit.)
         mock_ssm.get_parameter.assert_called_once_with(
-            Name="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+            Name="/blitzlog/dev/agent-ami-id-docker-ubuntu",
+            WithDecryption=False,
         )
 
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
-    def test_falls_back_to_upstream_ubuntu_when_param_missing(
-        self, mock_boto3, mock_ec2
-    ):
+    def test_falls_back_to_upstream_ubuntu_when_param_missing(self, mock_boto3_client):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
+        mock_ec2 = MagicMock()
+        mock_boto3_client.side_effect = _boto3_dispatch(ssm=mock_ssm, ec2=mock_ec2)
         # First call (primary): SSM param missing. Second call
         # (fallback via get_latest_ubuntu_ami): returns upstream AMI.
         mock_ssm.get_parameter.side_effect = [
             ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter"),
             {"Parameter": {"Value": "ami-upstream-ubuntu"}},
         ]
-        mock_boto3.client.return_value = mock_ssm
 
         result = get_agent_ami()
         self.assertEqual(result, "ami-upstream-ubuntu")
         self.assertEqual(mock_ssm.get_parameter.call_count, 2)
 
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
-    def test_clears_param_and_falls_back_when_ami_retired(self, mock_boto3, mock_ec2):
+    def test_clears_param_and_falls_back_when_ami_retired(self, mock_boto3_client):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
+        mock_ec2 = MagicMock()
+        mock_boto3_client.side_effect = _boto3_dispatch(ssm=mock_ssm, ec2=mock_ec2)
         mock_ssm.get_parameter.side_effect = [
             {"Parameter": {"Value": "ami-stale"}},
             {"Parameter": {"Value": "ami-upstream-ubuntu"}},
         ]
-        mock_boto3.client.return_value = mock_ssm
         mock_ec2.describe_images.side_effect = ClientError(
             {"Error": {"Code": "InvalidAMIID.NotFound"}}, "DescribeImages"
         )
@@ -491,17 +568,17 @@ class TestGetAgentAmi(unittest.TestCase):
             Name="/blitzlog/prod/agent-ami-id-docker-ubuntu"
         )
 
-    @patch("ec2.ec2")
-    @patch("ec2.boto3")
+    @patch("provider.aws._boto3_client")
     @patch.dict(os.environ, {"BLITZLOG_ENV": "prod"})
-    def test_propagates_unexpected_client_error(self, mock_boto3, mock_ec2):
+    def test_propagates_unexpected_client_error(self, mock_boto3_client):
         from ec2 import get_agent_ami
 
         mock_ssm = MagicMock()
+        mock_ec2 = MagicMock()
+        mock_boto3_client.side_effect = _boto3_dispatch(ssm=mock_ssm, ec2=mock_ec2)
         mock_ssm.get_parameter.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException"}}, "GetParameter"
         )
-        mock_boto3.client.return_value = mock_ssm
         with self.assertRaises(ClientError):
             get_agent_ami()
 
