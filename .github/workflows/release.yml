@@ -437,36 +437,70 @@ jobs:
           # SSM params hold the commit author identity. The
           # deploy-role's SSMGitAuthorIdentityRead grant (see
           # infra/bootstrap/deploy-role.tf) lets the worker fetch
-          # them. Fail loud when unset so a misconfigured operator
-          # gets a clear setup error rather than a fictional
-          # runner hostname on the Bump commit.
+          # them. Optional: when unset, the Bump step falls back
+          # to the historical `release-bot` identity (issue #119
+          # legacy carve-out) so the canonical release pipeline
+          # works on a repo that hasn't yet provisioned a
+          # user-pool stack. Operators who want the per-pool
+          # identity set vars.OWNER_LOGIN at the repo level and
+          # `cd infra/user-pool && terraform apply` once; the
+          # fallback then silently picks up the SSM-sourced
+          # identity.
           OWNER_LOGIN: ${{ vars.OWNER_LOGIN }}
         run: |
           set -euo pipefail
-          if [ -z "${OWNER_LOGIN:-}" ]; then
-            echo "FATAL: vars.OWNER_LOGIN must be set at the repo level" >&2
-            echo "  (issue #119). It identifies the pool whose git-author" >&2
-            echo "  SSM params the Bump step reads for commit identity." >&2
-            echo "  Set it with:" >&2
-            echo "    gh variable set OWNER_LOGIN --body '<github-login>' --repo great-wall-connect/blitzlog" >&2
-            exit 1
-          fi
-          GIT_AUTHOR_NAME=$(aws ssm get-parameter \
-            --name "/blitzlog/users/${OWNER_LOGIN}/git-author/name" \
-            --query Parameter.Value --output text --region ap-east-1 \
-            2>/dev/null || echo "")
-          GIT_AUTHOR_EMAIL=$(aws ssm get-parameter \
-            --name "/blitzlog/users/${OWNER_LOGIN}/git-author/email" \
-            --query Parameter.Value --output text --region ap-east-1 \
-            2>/dev/null || echo "")
-          if [ -z "$GIT_AUTHOR_NAME" ] || [ -z "$GIT_AUTHOR_EMAIL" ]; then
-            echo "FATAL: /blitzlog/users/${OWNER_LOGIN}/git-author/{name,email}" >&2
-            echo "  are not set in SSM (issue #119). Run:" >&2
-            echo "    cd infra/user-pool && terraform apply" >&2
-            echo "  after setting git_author_name / git_author_email in" >&2
-            echo "  infra/user-pool/terraform.tfvars (defaults derive from" >&2
-            echo "  owner_login when both are unset)." >&2
-            exit 1
+          # Identity resolution (issue #119, fallback to release-bot):
+          #   1. vars.OWNER_LOGIN set + SSM git-author params set
+          #      -> use the operator-managed identity
+          #   2. vars.OWNER_LOGIN unset OR SSM params missing
+          #      -> use the historical `release-bot` literal
+          #         (matches pre-#119 behavior, keeps the canonical
+          #         [skip ci] Bump commit attributable to a stable
+          #         bot identity that any reviewer can map to a
+          #         GitHub account)
+          #
+          # This is a deliberate relaxation from the strict
+          # fail-loud in PR #128: the strict version required
+          # operator setup before any release could run, which
+          # broke the canonical release pipeline on main where
+          # no operator has run the bootstrap yet. The fallback
+          # is opt-out (set vars.OWNER_LOGIN to a real owner to
+          # turn it off; the SSM-missing branch then triggers
+          # the FATAL with the same operator-actionable hint as
+          # before).
+          if [ -n "${OWNER_LOGIN:-}" ]; then
+            GIT_AUTHOR_NAME=$(aws ssm get-parameter \
+              --name "/blitzlog/users/${OWNER_LOGIN}/git-author/name" \
+              --query Parameter.Value --output text --region ap-east-1 \
+              2>/dev/null || echo "")
+            GIT_AUTHOR_EMAIL=$(aws ssm get-parameter \
+              --name "/blitzlog/users/${OWNER_LOGIN}/git-author/email" \
+              --query Parameter.Value --output text --region ap-east-1 \
+              2>/dev/null || echo "")
+            if [ -z "$GIT_AUTHOR_NAME" ] || [ -z "$GIT_AUTHOR_EMAIL" ]; then
+              echo "FATAL: /blitzlog/users/${OWNER_LOGIN}/git-author/{name,email}" >&2
+              echo "  are not set in SSM (issue #119). Either:" >&2
+              echo "  - run 'cd infra/user-pool && terraform apply' after" >&2
+              echo "    setting git_author_name / git_author_email in" >&2
+              echo "    infra/user-pool/terraform.tfvars (defaults derive" >&2
+              echo "    from owner_login when both are unset), OR" >&2
+              echo "  - unset vars.OWNER_LOGIN to fall back to the" >&2
+              echo "    historical release-bot identity." >&2
+              exit 1
+            fi
+            echo "Using operator-managed git identity from /blitzlog/users/${OWNER_LOGIN}/git-author/{name,email}"
+          else
+            # Legacy fallback. Matches the pre-#119 Bump step's
+            # hardcoded identity verbatim so the canonical release
+            # pipeline works on a repo that hasn't yet provisioned
+            # a user-pool. Emitting a WARN (not a fatal) keeps
+            # the operator's attention on the migration path
+            # without blocking releases.
+            echo "WARN: vars.OWNER_LOGIN is unset; falling back to the historical 'release-bot' identity" >&2
+            echo "  (issue #119 legacy carve-out). To use an operator-managed identity instead, set" >&2
+            echo "  vars.OWNER_LOGIN to a GitHub login and run 'cd infra/user-pool && terraform apply'." >&2
+            GIT_AUTHOR_NAME="release-bot"
+            GIT_AUTHOR_EMAIL="release-bot@users.noreply.github.com"
           fi
           git config user.name "${GIT_AUTHOR_NAME}"
           git config user.email "${GIT_AUTHOR_EMAIL}"

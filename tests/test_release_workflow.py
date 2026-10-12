@@ -838,6 +838,93 @@ class TestReleaseWorkflow(unittest.TestCase):
             "identity is sourced from SSM (issue #119)",
         )
 
+    def test_bump_step_falls_back_to_release_bot_when_owner_login_unset(self):
+        """When `vars.OWNER_LOGIN` is unset the Bump step must
+        fall back to the historical `release-bot` identity
+        (issue #119 legacy carve-out) so the canonical release
+        pipeline works on a repo that hasn't yet provisioned a
+        user-pool stack. The strict fail-loud from PR #128 broke
+        release #31 on main; this is the relaxation that unblocks
+        it without sacrificing the operator-managed-identity path
+        (which still triggers when OWNER_LOGIN is set).
+
+        Regression guard: a future refactor that drops the
+        fallback will surface here, not in a 17-minute release
+        run on main.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The fallback branch must be guarded by a string-empty
+        # OWNER_LOGIN test (not a numeric / a different var).
+        self.assertRegex(
+            body,
+            r"if \[ -n \"\$\{OWNER_LOGIN:-?\}\" \]",
+            "Bump step's operator-identity path must be guarded by "
+            '[ -n "${OWNER_LOGIN}" ] (so the empty-string unset '
+            "case falls through to the release-bot default).",
+        )
+        # The else branch must set the historical identity verbatim.
+        self.assertIn(
+            'GIT_AUTHOR_NAME="release-bot"',
+            body,
+            "Bump step's fallback must use the historical "
+            "'release-bot' name (matches the pre-#119 Bump step "
+            "verbatim so any reviewer can map the Bump commit to a "
+            "stable bot identity).",
+        )
+        self.assertIn(
+            'GIT_AUTHOR_EMAIL="release-bot@users.noreply.github.com"',
+            body,
+            "Bump step's fallback must use the historical "
+            "'release-bot@users.noreply.github.com' email.",
+        )
+        # The fallback path is a WARN, not a FATAL — the canonical
+        # release pipeline must not be blocked by an unset
+        # OWNER_LOGIN. Operators who want the strict path opt in
+        # by setting the var.
+        self.assertIn(
+            "WARN: vars.OWNER_LOGIN is unset",
+            body,
+            "Bump step's fallback must log a WARN (not FATAL) when "
+            "OWNER_LOGIN is unset so the canonical release pipeline "
+            "keeps working without operator setup. The migration "
+            "path (set OWNER_LOGIN + run infra/user-pool apply) is "
+            "documented in the WARN line.",
+        )
+
+    def test_bump_step_still_fails_loud_when_ssm_param_missing(self):
+        """The strict-FATAL branch must still trigger when
+        OWNER_LOGIN is set but the SSM git-author params are
+        missing — that's the operator-actionable misconfiguration.
+        The fix relaxes the OWNER_LOGIN-unset case to a WARN,
+        NOT the SSM-missing case. Pin the SSM-missing contract.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The SSM-missing case is still a fatal with a
+        # `terraform apply` hint.
+        self.assertIn(
+            "FATAL: /blitzlog/users/${OWNER_LOGIN}/git-author",
+            body,
+            "Bump step must still FATAL when OWNER_LOGIN is set but "
+            "the SSM git-author params are missing (the operator-"
+            "actionable misconfiguration).",
+        )
+        self.assertIn(
+            "terraform apply",
+            body,
+            "Bump step's SSM-missing FATAL hint must still point the "
+            "operator at `terraform apply` in infra/user-pool.",
+        )
+
 
 class TestDockerImagesWorkflow(unittest.TestCase):
     @classmethod
