@@ -34,6 +34,14 @@ sudo chmod +x /usr/local/bin/load-image.sh
 sudo cp /tmp/blitzlog-watchdog.sh /usr/local/bin/watchdog.sh
 sudo chmod 0755 /usr/local/bin/watchdog.sh
 
+# Install the host-side S3 abstraction (issue #123). Sourced by
+# watchdog.sh at boot and by the Lambda-bootstrap user-data heredoc
+# (cf. lambda/scripts/_common.py::script_header) at first boot. One
+# canonical call site per S3 verb across watchdog.sh, 03-bake-images.sh,
+# lambda/scripts/assisted.py, and lambda/scripts/autonomous.py.
+sudo cp /tmp/blitzlog-uploader.sh /usr/local/bin/blitzlog_uploader.sh
+sudo chmod 0755 /usr/local/bin/blitzlog_uploader.sh
+
 # systemd unit that runs the watchdog on instance start. The watchdog
 # runs the blitzlog-agent container, waits for it to exit, then does
 # all AWS cleanup (S3 upload + EC2 terminate + bot-lock release).

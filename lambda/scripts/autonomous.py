@@ -89,9 +89,9 @@ def build_autonomous_user_data(
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
 if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
-    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
-        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
-        --region "$REGION"
+    blitzlog_s3_get "${{STT_MODELS_BUCKET}}" \
+        "models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin"
 fi
 
 log "Effective opencode config: model=$OPENCODE_MODEL"
