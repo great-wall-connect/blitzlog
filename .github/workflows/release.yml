@@ -1,50 +1,69 @@
 name: release
 
 # Manual release workflow. Triggered only via workflow_dispatch.
-# The behavior is auto-detected from the dispatched ref:
+# The mode (pr-test vs release) and the bump type are auto-detected
+# from the dispatched ref + the conventional commits in its diff.
+# The only operator input is `ref`; everything else is computed.
 #
-#   - ref has an open PR             -> PR-test path:
-#                                       * reads version from lambda/version.py
-#                                       * auto-detects bump type from the
-#                                         conventional commits in the PR's diff
-#                                         via git-cliff (BREAKING CHANGE:/
-#                                         feat!:/feat(...):/fix:/
-#                                         default = major/minor/minor/patch)
-#                                       * builds and pushes the agent image
-#                                         with tag v{X}-pr{N} (no :latest)
-#                                       * bakes a dev AMI from that image and
-#                                         publishes its id to
-#                                         /blitzlog/dev/agent-ami-id-docker-ubuntu
-#                                       * posts a PR comment describing the
-#                                         build (fails loudly if no PR is
-#                                         found)
-#                                       * does NOT touch the source
+# Mode selection (ref-gated, issue #131):
+#   The Detect step's primary gate is the REF, not the PR status.
+#   This is the safety mechanism that prevents an accidental
+#   `gh workflow run release.yml --ref feature/foo` from deploying
+#   to prod. The PR check is a secondary signal that picks
+#   between pr-test and "refuse to run" on non-release refs.
 #
-#   - ref has no open PR (main,
-#     release/*, etc.)               -> Release path:
-#                                       * reads current version
-#                                       * auto-detects bump type from the
-#                                         conventional commits in the diff
-#                                         range (last release tag -> ref)
-#                                         via git-cliff
-#                                       * updates lambda/version.py
-#                                       * commits with [skip ci]
-#                                       * pushes (with fallback to a
-#                                         release/vX.Y.Z-<ts> branch +
-#                                         gh pr create if direct push
-#                                         to BUILD_REF fails)
-#                                       * builds and pushes the agent image
-#                                         with tags v{X} + :latest
-#                                       * bakes a prod AMI from that image
-#                                         and publishes its id to
-#                                         /blitzlog/prod/agent-ami-id-docker-ubuntu
-#                                       * tags v{X} and pushes the tag
-#                                       * uploads the Lambda zip to a
-#                                         GitHub Release
+#   - BUILD_REF = "main"                       -> MODE = release
+#                                                 (canonical release path)
+#   - BUILD_REF = "release/*"                  -> MODE = release
+#                                                 (fallback when direct push
+#                                                 to main fails; the
+#                                                 release/vX.Y.Z-<ts>
+#                                                 branch + gh pr create
+#                                                 path in the Bump step)
+#   - BUILD_REF = anything else, has open PR   -> MODE = pr-test
+#                                                 (build PR image, comment
+#                                                 on the PR, no tag, no
+#                                                 prod apply)
+#   - BUILD_REF = anything else, no open PR    -> FATAL
+#                                                 (refuses to run; the
+#                                                 operator must either
+#                                                 merge to main, or push
+#                                                 a release/* branch, or
+#                                                 open a PR if they want
+#                                                 a pr-test)
+#
+# PR-test path (open PR on the dispatched ref):
+#   * reads version from lambda/version.py
+#   * auto-detects bump type from the conventional commits in the
+#     PR's diff via git-cliff (BREAKING CHANGE:/feat!:/feat(...):/fix:/
+#     default = major/minor/minor/patch)
+#   * builds and pushes the agent image with tag v{X}-pr{N} (no :latest)
+#   * bakes a dev AMI from that image and publishes its id to
+#     /blitzlog/dev/agent-ami-id-docker-ubuntu
+#   * posts a PR comment describing the build (fails loudly if no
+#     PR is found)
+#   * does NOT touch the source (no version bump, no tag, no
+#     push back to the dispatch ref)
+#
+# Release path (BUILD_REF is main or release/*):
+#   * reads current version
+#   * auto-detects bump type from the conventional commits in the
+#     diff range (last release tag -> ref) via git-cliff
+#   * updates lambda/version.py
+#   * commits with [skip ci]
+#   * pushes (with fallback to a release/vX.Y.Z-<ts> branch +
+#     gh pr create if direct push to BUILD_REF fails; the
+#     release branch becomes the ref the Tag step uses)
+#   * builds and pushes the agent image with tags v{X} + :latest
+#   * bakes a prod AMI from that image and publishes its id to
+#     /blitzlog/prod/agent-ami-id-docker-ubuntu
+#   * tags v{X} and pushes the tag
+#   * uploads the Lambda zip to a GitHub Release
 #
 # The operator runs ONE of:
-#   gh workflow run release.yml --ref fix/issue-110-foo
 #   gh workflow run release.yml --ref main
+#   gh workflow run release.yml --ref release/v0.4.0
+#   gh workflow run release.yml --ref <feature-branch-with-open-PR>
 #
 # Packer integration added by issue #91: the previous local `packer build`
 # step is gone; everything goes through this workflow.
@@ -52,7 +71,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Branch to build from. Mode is auto-detected: open PR for the ref -> PR-test (image only); no open PR -> Release (bump source + commit + tag)."
+        description: "Branch to build from. Mode is auto-detected from the ref: main or release/* -> release (bump source + commit + tag + prod apply); any other ref with an open PR -> pr-test (image only); any other ref without an open PR -> refused. See the workflow header for the full ref-gate table."
         required: false
         type: string
 
@@ -98,11 +117,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Decide the mode (pr-test vs release) by whether $BUILD_REF has
-      # an open PR. The bump type is auto-detected from the conventional
+      # Decide the mode (pr-test vs release) from the BUILD_REF +
+      # the ref's open-PR status. The primary gate is the ref itself
+      # (issue #131): only `main` and `release/*` are eligible for the
+      # canonical release path. The PR check is a secondary signal
+      # that picks between pr-test and "refuse to run" on non-release
+      # refs. The bump type is auto-detected from the conventional
       # commits in the diff (last release tag -> $BUILD_REF) via
-      # git-cliff (a battle-hardened conventional-commits parser). The
-      # single dispatch input is `ref`; everything else is computed.
+      # git-cliff (a battle-hardened conventional-commits parser).
       - name: Detect mode and bump type
         id: detect
         env:
@@ -139,15 +161,77 @@ jobs:
             | tar -xz --strip-components=1 -C /usr/local/bin
           git-cliff --version
 
-          # Mode: open PR on $BUILD_REF -> pr-test, else release.
-          PR_NUMBER=$(gh pr list --state open \
-            --head "${{ env.BUILD_REF }}" \
-            --json number --jq '.[0].number' || true)
-          if [ -n "$PR_NUMBER" ]; then
-            MODE=pr-test
-          else
-            MODE=release
-          fi
+          # Ref-gate (issue #131). The primary safety mechanism: only
+          # `main` and `release/*` are eligible for the canonical
+          # release path. Any other ref must have an open PR (pr-test
+          # path) or it is refused outright. This is the regression
+          # guard for release #32 (where dispatching on a feature
+          # branch without an open PR produced a prod v0.4.0
+          # release because the previous "no PR -> release" gate
+          # treated any feature branch as a release candidate).
+          #
+          # Match the BUILD_REF exactly. The earlier `--head "$ref"`
+          # form had a known prefix-collision failure mode (Gemini
+          # analysis, 2026-10-12): if a ref like `feature/foo` is
+          # queried, branches like `feature/foo-bar` and `feature/foobar`
+          # all match because the filter is a `startsWith` style match.
+          # The pipe-to-jq form below does an exact-string match
+          # on `headRefName` and is the safe replacement for the
+          # broken `gh pr list --head "$ref"` form (which is
+          # startsWith-style and silently returns empty for fork
+          # PRs — release #32 regressed on this; see issue #131).
+          #
+          # Why the pipe shape, NOT the broken form (passing the
+          # `jq` flag `--arg r VALUE` to `gh` as a positional arg):
+          # `gh` doesn't accept `--arg` and errors with
+          # `unknown arguments ["r" VALUE EXPR]` (regression caught
+          # by run #38261612554 on 2026-10-12 14:15 UTC). Pushing
+          # the expression to a real `jq` invocation via a pipe
+          # lets `--arg` route correctly. Pinned by
+          # `test_pr_list_pipes_to_jq_not_uses_gh_arg` (the
+          # matching regression-guard test).
+          PR_NUMBER=$(gh pr list --state open --json number,headRefName \
+            | jq --arg r "${{ env.BUILD_REF }}" \
+                 '.[] | select(.headRefName == $r) | .number' \
+            | head -1 || true)
+          case "${{ env.BUILD_REF }}" in
+            main)
+              # Canonical release path. If a PR is open against
+              # main, the operator is running a pr-test against the
+              # main tip — downgrade to pr-test.
+              if [ -n "$PR_NUMBER" ]; then
+                MODE=pr-test
+              else
+                MODE=release
+              fi
+              ;;
+            release/*)
+              # Fallback release branch path. PRs against a
+              # release/* branch are also pr-test.
+              if [ -n "$PR_NUMBER" ]; then
+                MODE=pr-test
+              else
+                MODE=release
+              fi
+              ;;
+            *)
+              # Any other ref. Must have an open PR to qualify
+              # as pr-test. Without one, refuse with a clear
+              # operator-actionable message — the previous gate
+              # silently fell into release mode and deployed
+              # to prod.
+              if [ -n "$PR_NUMBER" ]; then
+                MODE=pr-test
+              else
+                echo "FATAL: BUILD_REF='${{ env.BUILD_REF }}' is not a release ref and has no open PR." >&2
+                echo "  Allowed release refs: 'main' (canonical) or 'release/*' (fallback branch path)." >&2
+                echo "  For a PR-test image, open a PR with '${{ env.BUILD_REF }}' as the head first." >&2
+                echo "  For a production release, dispatch on 'main' (or merge this branch to main and dispatch from there)." >&2
+                echo "  Refusing to run so a feature-branch dispatch cannot accidentally deploy to prod (issue #131)." >&2
+                exit 1
+              fi
+              ;;
+          esac
 
           # Bump type: ask git-cliff. It reads the conventional commits
           # since the last v* tag and outputs the next SemVer on stdout.

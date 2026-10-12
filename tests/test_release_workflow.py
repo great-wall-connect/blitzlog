@@ -925,6 +925,301 @@ class TestReleaseWorkflow(unittest.TestCase):
             "operator at `terraform apply` in infra/user-pool.",
         )
 
+    def test_ref_gate_mode_release_on_main(self):
+        """Issue #131: BUILD_REF=main with no open PR must produce
+        MODE=release (canonical release path). Pin the case branch
+        + the absence-of-PR -> release fallback.
+        """
+        # The Detect step must have a `case "$BUILD_REF"` (or
+        # equivalent shell-switch) that explicitly enumerates
+        # `main` -> release.
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The case statement must be present.
+        self.assertRegex(
+            body,
+            r'case\s+"?\$\{\{\s*env\.BUILD_REF\s*\}\}"?\s+in',
+            "Detect step must dispatch on BUILD_REF via a `case` "
+            "statement (the ref-gate is the primary safety mechanism).",
+        )
+        # The `main` case must set MODE=release when there's no PR
+        # (canonical release path). The contract is the literal
+        # `main)` token followed (across the if/else block) by
+        # `MODE=release`. Use [\s\S] to span newlines (assertRegex
+        # uses re.search which is single-line by default).
+        self.assertRegex(
+            body,
+            r"main\)[\s\S]*?Canonical release path[\s\S]*?MODE=release",
+            "The `main` case branch must set MODE=release when no PR "
+            "is open (canonical release path).",
+        )
+
+    def test_ref_gate_mode_pr_test_on_main_with_open_pr(self):
+        """Issue #131: BUILD_REF=main with an open PR must produce
+        MODE=pr-test (the operator is testing a PR against the main
+        tip — same behavior as before the ref-gate, just expressed
+        via the new `case` statement).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The `main` case must downgrade to pr-test when an open PR
+        # exists for the dispatched ref.
+        self.assertRegex(
+            body,
+            r"main\)[\s\S]*?if \[ -n \"\$PR_NUMBER\" \]; then\s*\n\s*MODE=pr-test",
+            "The `main` case must set MODE=pr-test when an open PR "
+            "exists for BUILD_REF=main (downgrade to PR-test, not "
+            "release-on-PR-head which would deploy that PR's code "
+            "to prod).",
+        )
+
+    def test_ref_gate_mode_release_on_release_branch(self):
+        """Issue #131: BUILD_REF=release/* must produce MODE=release
+        (the fallback release-branch path used when direct push
+        to main fails — the Bump step's `gh pr create` flow
+        creates these branches).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The `release/*` case must set MODE=release.
+        self.assertRegex(
+            body,
+            r"release/\*\)[\s\S]*?MODE=release",
+            "The `release/*` case branch must set MODE=release "
+            "(fallback release-branch path for when direct push "
+            "to main fails).",
+        )
+
+    def test_ref_gate_mode_pr_test_on_feature_branch_with_pr(self):
+        """Issue #131: BUILD_REF=feature/foo (or any other non-release
+        ref) with an open PR must produce MODE=pr-test. The
+        pr-test image goes to /blitzlog/dev/agent-ami-id-docker-ubuntu
+        (no prod apply, no tag, no version bump).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The catch-all `*)` case must downgrade to pr-test when
+        # an open PR exists.
+        self.assertRegex(
+            body,
+            r"\)[\s\S]*?#?\s*Any other ref[\s\S]*?if \[ -n \"\$PR_NUMBER\" \]; then\s*\n\s*MODE=pr-test",
+            "The catch-all case branch must set MODE=pr-test when "
+            "an open PR exists on a non-release ref (the pr-test "
+            "image path).",
+        )
+
+    def test_ref_gate_fatal_on_feature_branch_without_pr(self):
+        """Issue #131: BUILD_REF=feature/foo (or any other non-release
+        ref) WITHOUT an open PR must abort the workflow with a clear
+        FATAL message. This is the regression guard for release
+        #32 (where dispatching on a feature branch without an open
+        PR silently fell into release mode and deployed to prod).
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The catch-all `*)` case must exit 1 when no PR is open.
+        # The exit must be guarded by an `if [ -n "$PR_NUMBER" ];
+        # ...; else; exit 1` pattern (the PR-empty branch).
+        self.assertRegex(
+            body,
+            r"if \[ -n \"\$PR_NUMBER\" \]; then\s*\n\s*MODE=pr-test\s*\n\s*else\s*\n\s*echo \"FATAL",
+            "The catch-all case branch must exit 1 with a FATAL "
+            "message when no open PR exists on a non-release ref "
+            "(the regression guard for issue #131).",
+        )
+        # The FATAL message must be operator-actionable: it must
+        # mention the allowed release refs (main, release/*) and
+        # the migration paths (open a PR, dispatch from main).
+        self.assertIn(
+            "Allowed release refs: 'main'",
+            body,
+            "FATAL message must enumerate the allowed release refs "
+            "(main, release/*) so the operator knows where to dispatch.",
+        )
+        self.assertIn(
+            "issue #131",
+            body,
+            "FATAL message must reference issue #131 (the audit-trail "
+            "for why this gate exists).",
+        )
+
+    def test_pr_list_uses_exact_match_not_head_filter(self):
+        """Issue #131: the `gh pr list` call must use the
+        exact-match `... | jq select(.headRefName == $r) | .number`
+        form, not the broken `--head "$ref"` filter. The `--head`
+        form has a known prefix-collision failure mode (Gemini
+        analysis, 2026-10-12): it performs a `startsWith`-style
+        match and silently returns empty for fork PRs.
+
+        Regression guard for release #32: the bad run had an open
+        PR on the dispatched ref, but `gh pr list --head` returned
+        empty, so mode silently fell into release and deployed to
+        prod. The `gh pr list --json | jq select` form below does
+        an exact-string match on `headRefName` and is the safe
+        replacement.
+
+        The pipe shape (NOT `--jq --arg r` inside `gh pr list`)
+        is pinned by `test_pr_list_pipes_to_jq_not_uses_gh_arg`.
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The exact-match jq form must be present. Match
+        # across the bash line-continuation (backslash +
+        # newline) by allowing arbitrary whitespace between
+        # `gh pr list --state open` and `--json number,headRefName`.
+        self.assertRegex(
+            body,
+            r"gh pr list --state open[\s\S]*?--json number,headRefName",
+            "Detect step must use `gh pr list --json number,headRefName` "
+            "for the exact-match form (instead of `--head` which has a "
+            "known prefix-collision failure mode).",
+        )
+        # The jq `select(.headRefName == $r)` form must be present
+        # (the exact-string match). Match across whitespace.
+        # Assert it appears AFTER the `gh pr list` pipe (i.e.
+        # `gh ... | jq ...`) — `assertNotIn` for `--head` doesn't
+        # catch the broken `--arg`-inside-`gh` form.
+        self.assertRegex(
+            body,
+            r"\|[\s\S]*?jq[\s\S]*?select\(\.headRefName == \$r\)",
+            "Detect step must filter with `jq select(.headRefName == $r)` "
+            "AFTER a `|` from `gh pr list` (the pipe-to-jq form). "
+            "The broken `--jq --arg r ...` shape (where `--arg` "
+            "stays inside `gh pr list`) would NOT match this regex "
+            "because the `|` must come before `jq`.",
+        )
+        # The broken `--head` filter must be GONE.
+        self.assertNotIn(
+            '--head "${{ env.BUILD_REF }}"',
+            body,
+            'Detect step must NOT use `gh pr list --head "${{ env.BUILD_REF }}"` '
+            "anymore — that filter has a known prefix-collision failure "
+            "mode (issue #131).",
+        )
+        # Defensive: also assert there's no `--head` form left at
+        # all in the Detect step. (Future refactors that reintroduce
+        # it will fail this test.)
+        self.assertNotRegex(
+            body,
+            r"--head\s+\"\$\{\{\s*env\.BUILD_REF\s*\}\}\"",
+            'Detect step must not use any `--head "${{ env.BUILD_REF }}"` '
+            "form (exact-string match is the only safe contract).",
+        )
+
+    def test_pr_list_pipes_to_jq_not_uses_gh_arg(self):
+        """Issue #131: the PR query must pipe `gh pr list` output to
+        `jq --arg`, NOT pass `--arg` to `gh` (which doesn't accept
+        it as a flag and errors with `unknown arguments ["r" ...]`).
+
+        Regression guard for run #38261612554 (Oct 12 14:15 UTC):
+        the original PR #132 implementation had
+        `gh pr list --json ... --jq --arg r "$BUILD_REF" EXPR`,
+        but `--arg` is a `jq` flag, not a `gh` flag. The broken
+        call produced a cobra error, `PR_NUMBER` ended up empty
+        (after the `|| true` swallow), the ref-gate's catch-all
+        `*)` case correctly emitted the FATAL — but the
+        triggering condition was the broken PR query, not the
+        actual "no open PR" detection. Fix: pipe the JSON
+        output to a real `jq --arg r` invocation.
+
+        The ref-gate contract is sound; this is purely a
+        `gh`/`jq` flag-routing bug.
+        """
+        m = re.search(
+            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
+            self.text,
+        )
+        self.assertIsNotNone(m)
+        body = m.group("body")
+        # The Detect step must use the pipe-to-jq form
+        # (`gh pr list ... | jq --arg r "$BUILD_REF" EXPR`).
+        # The pipe and the `jq --arg r` must appear in that
+        # order after the `gh pr list` call.
+        self.assertRegex(
+            body,
+            r"gh pr list[\s\S]*?\|\s*jq --arg r",
+            "Detect step must pipe `gh pr list` output to "
+            '`jq --arg r "$BUILD_REF"` (NOT pass `--arg` to `gh` '
+            "directly, which errors with 'unknown arguments' "
+            "— issue #131).",
+        )
+        # Defensive: the broken `--arg` inside `gh pr list`
+        # must be GONE. This is the exact shape that produced
+        # the cobra error in run #38261612554.
+        self.assertNotRegex(
+            body,
+            r"gh pr list[\s\S]*?--jq\s+--arg r",
+            "Detect step must NOT have `--jq --arg r ...` after "
+            "`gh pr list` — `--arg` is a jq flag, not a gh flag. "
+            "Use `gh pr list ... | jq --arg r ...` instead (issue #131).",
+        )
+
+    def test_bump_step_does_not_push_in_pr_test_mode(self):
+        """Issue #131: the Bump step's `git push origin "$BUILD_REF"`
+        must never run in pr-test mode (pr-test must not push
+        back to the dispatch ref, otherwise the Bump step's
+        `chore(release): vX.Y.Z` commit gets stranded on a side
+        branch — see release #32 where the `a7c03e6` v0.4.0 Bump
+        commit landed on `fix/issue-128-release-bump-fallback`
+        and was never reachable from main).
+
+        The step-level `if: steps.detect.outputs.mode == 'release'`
+        guard is the contract. With the ref-gate in place, the
+        only way to reach `MODE=release` is via `main` or
+        `release/*`, so the push is only ever to a known-safe ref.
+        """
+        m = re.search(
+            r"(?ms)- name: Bump version in source.*?(?=- name:|\Z)",
+            self.text,
+        )
+        self.assertIsNotNone(
+            m,
+            "release.yml must have a 'Bump version in source' step",
+        )
+        bump_step = m.group(0)
+        # The step must have `if: steps.detect.outputs.mode == 'release'`
+        # (the Bump step only runs in release mode, never in pr-test).
+        self.assertRegex(
+            bump_step,
+            r"if:\s*steps\.detect\.outputs\.mode == 'release'",
+            "Bump step must be gated on `if: steps.detect.outputs.mode == 'release'` "
+            "so it never runs in pr-test mode (which would push a "
+            "version bump commit to a feature branch — the release "
+            "#32 regression).",
+        )
+        # The step name must signal the gating (the "(release only)"
+        # suffix is a smell-test for future readers).
+        self.assertIn(
+            "(release only)",
+            bump_step,
+            "Bump step name must include '(release only)' to make "
+            "the gating visible at a glance.",
+        )
+
 
 class TestDockerImagesWorkflow(unittest.TestCase):
     @classmethod
