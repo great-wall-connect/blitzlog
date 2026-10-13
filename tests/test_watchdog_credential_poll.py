@@ -138,16 +138,21 @@ def test_poll_loop_rewrites_credential_files_when_ssm_value_changes(
     )
 
     # Start the poll loop in the background with a 1 s interval.
+    # The library writes the subshell PID to BLITZLOG_TOKEN_POLL_PID
+    # (a global). We use a global instead of `$(...)` capture
+    # because bash's `wait` for a non-direct child (the subshell is
+    # a grandchild of this script once it runs inside a function)
+    # is unreliable — see the comment in blitzlog_token_poll.sh.
     snippet = textwrap.dedent(
         f"""
         # Start the poll loop. We use a 1 s interval so the test runs
         # in seconds, not the production 5 min.
-        _PID=$(blitzlog_start_token_poll_loop \\
+        blitzlog_start_token_poll_loop \\
             "/blitzlog/prod/ephemeral/github-token-145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
-            1)
+            1
         # Give the loop 2 ticks (1 s sleep + a moment for the read) to
         # start, then signal the "new value" and wait for the loop to
         # pick it up.
@@ -155,9 +160,18 @@ def test_poll_loop_rewrites_credential_files_when_ssm_value_changes(
         touch "{aws_shim}/new_marker"
         # Wait for two more ticks to land on the new value.
         sleep 2
-        # Stop the loop.
-        kill "$_PID" 2>/dev/null
-        wait "$_PID" 2>/dev/null
+        # Stop the loop. We use `kill -0` to confirm the subshell is
+        # still alive before sending TERM (the trap should make the
+        # exit immediate, but a 100 ms grace period is generous).
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+            for _ in 1 2 3 4 5; do
+                if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.02
+            done
+        fi
         # Print the final file contents so the test can assert on them.
         echo "==GIT_CREDS=="
         cat "{git_creds}"
@@ -199,17 +213,24 @@ def test_poll_loop_does_not_rewrite_when_ssm_value_unchanged(
 
     snippet = textwrap.dedent(
         f"""
-        _PID=$(blitzlog_start_token_poll_loop \\
+        blitzlog_start_token_poll_loop \\
             "/blitzlog/prod/ephemeral/github-token-145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
-            1)
+            1
         # 3 ticks, no marker touched → the shim returns the same
         # value every time → the loop must not rewrite the files.
         sleep 3
-        kill "$_PID" 2>/dev/null
-        wait "$_PID" 2>/dev/null
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+            for _ in 1 2 3 4 5; do
+                if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.02
+            done
+        fi
         """
     )
     _run_bash(aws_shim, snippet)
@@ -253,22 +274,27 @@ def test_poll_loop_survives_ssm_error_and_keeps_polling(
 
     snippet = textwrap.dedent(
         f"""
-        _PID=$(blitzlog_start_token_poll_loop \\
+        blitzlog_start_token_poll_loop \\
             "/blitzlog/prod/ephemeral/github-token-145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
-            1)
+            1
         # 3 ticks of SSM failure. The loop should still be running.
         sleep 3
-        # If the loop died, the wait would return non-zero.
-        if kill -0 "$_PID" 2>/dev/null; then
+        # If the loop died, the check would print DEAD.
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
             echo "ALIVE"
         else
             echo "DEAD"
         fi
-        kill "$_PID" 2>/dev/null
-        wait "$_PID" 2>/dev/null
+        kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        for _ in 1 2 3 4 5; do
+            if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.02
+        done
         """
     )
     result = _run_bash(aws_shim, snippet)
@@ -286,30 +312,30 @@ def test_poll_loop_terminates_cleanly_on_sigterm(aws_shim: Path) -> None:
     """
     snippet = textwrap.dedent(
         f"""
-        _PID=$(blitzlog_start_token_poll_loop \\
+        blitzlog_start_token_poll_loop \\
             "/blitzlog/prod/ephemeral/github-token-145" \\
             "ap-east-1" \\
             "{aws_shim}/git-creds" \\
             "{aws_shim}/gh-hosts" \\
-            1)
+            1
         # Verify the loop is alive.
-        if ! kill -0 "$_PID" 2>/dev/null; then
+        if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
             echo "DIED_EARLY"
             exit 1
         fi
-        # Send SIGTERM and immediately wait. If the trap is
-        # missing, the wait blocks until the next sleep finishes.
-        kill "$_PID"
-        # Give the trap a moment to fire.
-        sleep 0.2
-        # If still alive, the trap is missing.
-        if kill -0 "$_PID" 2>/dev/null; then
-            echo "TRAP_MISSING"
-            kill -9 "$_PID" 2>/dev/null
-            exit 1
-        fi
-        wait "$_PID" 2>/dev/null
-        echo "OK"
+        # Send SIGTERM and verify the trap fires within 100 ms.
+        kill "$BLITZLOG_TOKEN_POLL_PID"
+        for _ in 1 2 3 4 5; do
+            if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                echo "OK"
+                exit 0
+            fi
+            sleep 0.02
+        done
+        # If we got here the trap is missing or being ignored.
+        echo "TRAP_MISSING"
+        kill -9 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        exit 1
         """
     )
     result = _run_bash(aws_shim, snippet)
