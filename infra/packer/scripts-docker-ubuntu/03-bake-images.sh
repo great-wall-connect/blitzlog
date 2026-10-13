@@ -78,10 +78,7 @@ sudo chown root:root /root/blitzlog.env
 
 MODEL_FILE="ggml-${STT_MODEL}.bin"
 echo "Downloading whisper model ${MODEL_FILE}"
-sudo blitzlog_s3_get "${STT_MODELS_BUCKET}" \
-    "models/${MODEL_FILE}" \
-    "/opt/whisper-stt/models/${MODEL_FILE}" \
-    "$AWS_REGION"
+sudo bash -c "source /tmp/blitzlog-uploader.sh; blitzlog_s3_get '${STT_MODELS_BUCKET}' 'models/${MODEL_FILE}' '/opt/whisper-stt/models/${MODEL_FILE}' '${AWS_REGION}'"
 
 sudo kill "$DOCKERD_PID" 2>/dev/null || true
 sudo wait "$DOCKERD_PID" 2>/dev/null || true
