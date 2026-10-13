@@ -108,6 +108,14 @@ resource "aws_lambda_function" "handler" {
   handler          = "lambda.handler.lambda_handler"
   runtime          = "python3.12"
   role             = aws_iam_role.lambda_role.arn
+  # PR #84 added the oss2 / alibabacloud_ecs20140526 /
+  # alibabacloud_kms20160120 SDKs. The factory in lambda/provider/
+  # lazy-imports the Alicloud + Azure modules behind
+  # `importlib.util.find_spec` (see PR #133 follow-up), so an AWS
+  # cold start no longer pays the import cost; 512 MB still gives
+  # ~3-4x headroom for the AWS boto3 + cryptography C extension on
+  # a warm start.
+  memory_size      = 512
   timeout          = 180
   dead_letter_config {
     target_arn = aws_sqs_queue.dlq.arn
