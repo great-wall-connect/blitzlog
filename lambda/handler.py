@@ -32,7 +32,6 @@ into a flat dict that the rest of the pipeline consumes.
 import base64
 import json
 import os
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -535,12 +534,3 @@ def _handle_refresh(event: dict) -> dict:
         )
 
     return {"statusCode": 200, "body": json.dumps({"status": "refreshed"})}
-
-
-# Imports placed at the bottom to avoid a top-level circular import:
-# `lambda/handler.py` is imported by `tests/test_handler.py` via
-# `from handler import lambda_handler`, and `provider/__init__.py`
-# imports `provider.aws` which transitively imports nothing from
-# `handler.py` — but moving these imports down keeps the
-# cold-start import graph unambiguous.
-from provider import get_secrets  # noqa: E402

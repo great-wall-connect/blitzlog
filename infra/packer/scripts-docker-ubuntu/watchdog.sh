@@ -27,6 +27,13 @@ source /etc/blitzlog.env
 # Issue #123: single source of truth for host-side S3 calls. Falls
 # through to the caller's `log()` (defined below) for ERROR output.
 source /usr/local/bin/blitzlog_uploader.sh
+# Issue #145: 5-min background poll loop that re-reads
+# /blitzlog/<env>/ephemeral/github-token-<N> and rewrites the
+# bind-mounted credential files whenever the value changes (i.e. when
+# the Lambda's refresh event has just fired). Sourced BEFORE the
+# initial token write below so the same `_bl_tokenpoll_write_*`
+# helpers are used at startup and on every subsequent refresh.
+source /usr/local/bin/blitzlog_token_poll.sh
 export HOME=/root
 
 LOG_FILE="/var/log/backend-bootstrap.log"
@@ -106,10 +113,24 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
         --output text \
         --region "$REGION" 2>/dev/null || echo "")
     if [ -n "$GITHUB_TOKEN" ]; then
+        # Issue #145: pre-create the per-instance /root/.config/gh
+        # bind-mount point so the path exists when docker starts
+        # (the bind mount's host side must exist or docker creates
+        # it as root and the container's `gh auth login` writes
+        # cannot be made world-readable). The container's
+        # `gh auth login --with-token` (entrypoint.sh:85-86) still
+        # does the initial write here — the watchdog's poll loop
+        # overwrites this file on every subsequent refresh.
+        mkdir -p "/root/gh-config/${INSTANCE_ID}"
         mkdir -p /root/.git-credentials.d
-        printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" \
-            > /root/.git-credentials.d/github
-        chmod 600 /root/.git-credentials.d/github
+        # The library helpers are the single source of truth for
+        # the credential-file shape. Using them here (and in the
+        # poll loop) means a future format change ships in one
+        # place, not two.
+        _bl_tokenpoll_write_git_creds "$GITHUB_TOKEN" \
+            /root/.git-credentials.d/github
+        _bl_tokenpoll_write_gh_hosts_yml "$GITHUB_TOKEN" \
+            "/root/gh-config/${INSTANCE_ID}/hosts.yml"
         git config --global credential.helper \
             'store --file /root/.git-credentials.d/github'
     fi
@@ -191,6 +212,27 @@ fi
 ) &
 WATCHER_PID=$!
 
+# Issue #145: 5-min token-refresh poll loop. Reads the SSM
+# /blitzlog/<env>/ephemeral/github-token-<N> parameter and rewrites
+# the bind-mounted credential files whenever the value changes
+# (i.e. when the Lambda's refresh event has just fired). The loop
+# runs for the full lifetime of the container; it has no per-run
+# state of its own. The chain of 10 scheduled refresh events
+# covers ~8.3 h — well over the longest realistic assisted run —
+# so the loop cannot run forever even if the schedule is buggy.
+# Poll interval is 300s (5 min) — same cadence as the existing
+# host-side SESSION_ARCHIVE_BUCKET and S3_LOG_PREFIX exports, so
+# operators only need to remember one number.
+if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    TOKEN_POLL_PID=$(blitzlog_start_token_poll_loop \
+        "${GITHUB_TOKEN_SSM_PARAM}" \
+        "$REGION" \
+        /root/.git-credentials.d/github \
+        "/root/gh-config/${INSTANCE_ID}/hosts.yml" \
+        "${BLITZLOG_TOKEN_POLL_INTERVAL:-300}")
+    log "Started token refresh poll loop (pid=${TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s)"
+fi
+
 # Defense in depth: clear any stale .shutdown left over from a crashed
 # previous run. watchdog.sh no longer pre-creates it, so on a fresh
 # instance .shutdown only ever appears because the agent's shutdown
@@ -202,6 +244,7 @@ sudo docker run --name blitzlog-agent \
     "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
     -v /root/.git-credentials.d:/root/.git-credentials.d \
+    -v "/root/gh-config/${INSTANCE_ID}:/root/.config/gh" \
     -v /workspace:/workspace \
     -v /var/log/blitzlog:/var/log/blitzlog \
     "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
@@ -214,6 +257,16 @@ CONTAINER_EXIT=$?
 # polling — kill it explicitly.
 kill "$WATCHER_PID" 2>/dev/null || true
 wait "$WATCHER_PID" 2>/dev/null || true
+
+# Kill the token refresh poll loop now that the container has
+# exited. The poll loop's `trap 'exit 0' TERM` makes the SIGTERM
+# immediate; the next `wait` reaps the process so the watchdog
+# doesn't carry a zombie to the EC2 instance shutdown.
+if [ -n "${TOKEN_POLL_PID:-}" ]; then
+    log "Stopping token refresh poll loop (pid=${TOKEN_POLL_PID})"
+    kill "$TOKEN_POLL_PID" 2>/dev/null || true
+    wait "$TOKEN_POLL_PID" 2>/dev/null || true
+fi
 
 log "Container exited with code $CONTAINER_EXIT"
 

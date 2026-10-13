@@ -156,6 +156,20 @@ resource "aws_iam_role_policy" "lambda_policy" {
         ]
         Resource = "arn:aws:ssm:*:*:parameter/${local.ssm_ephemeral_root}/*"
       },
+      {
+        Effect = "Allow"
+        Action = [
+          "scheduler:CreateSchedule",
+          "scheduler:DeleteSchedule",
+        ]
+        # Issue #145: the Lambda mints a fresh GitHub App token every
+        # 50 min via a chain of one-time EventBridge Scheduler events.
+        # Scoped to the per-env refresh group so the Lambda cannot
+        # create schedules in any other group (defence in depth: a
+        # compromised Lambda can only schedule token refreshes, not
+        # arbitrary other workloads).
+        Resource = "arn:aws:scheduler:*:*:schedule/${aws_scheduler_schedule_group.token_refresh.name}/*"
+      },
     ]
   })
 }

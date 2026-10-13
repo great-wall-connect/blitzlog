@@ -137,6 +137,12 @@ resource "aws_lambda_function" "handler" {
       # when POSTing to /app/installations/<id>/access_tokens, so `git` and
       # `gh` stay authed for the full agent run (see lambda/auth.py).
       GITHUB_TOKEN_LIFETIME_HOURS = tostring(var.github_token_lifetime_hours)
+      # Issue #145: ARN of the role the EventBridge Scheduler assumes
+      # to invoke this Lambda. handler.py::schedule_next_refresh reads
+      # it on every chain step and embeds it in the `CreateSchedule`
+      # `Target.RoleArn` so the new event lands back on this same
+      # function.
+      SCHEDULER_ROLE_ARN = aws_iam_role.scheduler_role.arn
     }
   }
 
