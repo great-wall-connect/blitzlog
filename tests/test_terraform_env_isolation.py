@@ -497,16 +497,28 @@ class TestEnvNamespacing(unittest.TestCase):
         `${var.environment}/*`). The `|| true` on the `aws s3 cp` line then
         swallows the resulting `AccessDenied`, and the bash log line
         `Logs uploaded to S3` lies — no log is persisted.
+
+        Issue #123 refactored the inline `aws s3 cp` calls into the
+        `blitzlog_s3_put` helper from blitzlog_uploader.sh, so the
+        S3 URL is now constructed by the helper from positional args
+        rather than appearing as a single literal in the watchdog. The
+        helper takes `(bucket, key, local_path)`, so the same
+        `S3_LOGS_BUCKET` → `S3_LOG_PREFIX` ordering shows up across a
+        line continuation rather than a single string literal. The
+        regex below allows whitespace + bash line-continuations between
+        the two names; the semantic invariant (bucket first, env-prefixed
+        key second) is unchanged.
         """
         watchdog = (
             REPO_ROOT / "infra" / "packer" / "scripts-docker-ubuntu" / "watchdog.sh"
         ).read_text()
         self.assertRegex(
             watchdog,
-            r"s3://\$\{S3_LOGS_BUCKET\}/\$\{S3_LOG_PREFIX\}/",
-            "watchdog.sh log-upload must use ${S3_LOG_PREFIX} (rendered by the "
-            "lambda as ${BLITZLOG_ENV}/${repo}/issue/${N}/) so the destination "
-            "falls inside the EC2 agent role's s3:PutObject grant "
+            r"\$\{S3_LOGS_BUCKET\}[\"'\s\\]*\$\{S3_LOG_PREFIX\}",
+            "watchdog.sh log-upload must pass ${S3_LOG_PREFIX} (rendered by "
+            "the lambda as ${BLITZLOG_ENV}/${repo}/issue/${N}/) as the key "
+            "to blitzlog_s3_put (issue #123), so the destination falls "
+            "inside the EC2 agent role's s3:PutObject grant "
             "(iam.tf:191-200, scoped to ${var.environment}/*).",
         )
 

@@ -24,6 +24,9 @@ set -euo pipefail
 # are available when we build the docker run command.
 source /root/blitzlog.env
 source /etc/blitzlog.env
+# Issue #123: single source of truth for host-side S3 calls. Falls
+# through to the caller's `log()` (defined below) for ERROR output.
+source /usr/local/bin/blitzlog_uploader.sh
 export HOME=/root
 
 LOG_FILE="/var/log/backend-bootstrap.log"
@@ -246,9 +249,9 @@ for log in /var/log/blitzlog/*.log /var/log/backend-bootstrap.log; do
     [ -f "$log" ] || continue
     log_name=$(basename "$log")
     log "Uploading $log_name to S3"
-    aws s3 cp "$log" \
-        "s3://${S3_LOGS_BUCKET}/${S3_LOG_PREFIX}/${RUN_TAG}_${log_name}" \
-        --region "$REGION" || true
+    blitzlog_s3_put "${S3_LOGS_BUCKET}" \
+        "${S3_LOG_PREFIX}/${RUN_TAG}_${log_name}" \
+        "$log" || true
 done
 
 # Upload session artifacts the container wrote to /workspace/.blitzlog/
@@ -256,18 +259,18 @@ for f in /workspace/.blitzlog/*; do
     [ -f "$f" ] || continue
     fname=$(basename "$f")
     log "Uploading $fname to S3"
-    aws s3 cp "$f" \
-        "s3://${SESSION_ARCHIVE_BUCKET:-${S3_LOGS_BUCKET}}/${SESSION_ARCHIVE_PREFIX}/${RUN_TAG}_${fname}" \
-        --region "$REGION" || true
+    blitzlog_s3_put "${SESSION_ARCHIVE_BUCKET:-${S3_LOGS_BUCKET}}" \
+        "${SESSION_ARCHIVE_PREFIX}/${RUN_TAG}_${fname}" \
+        "$f" || true
 done
 
 # Release the bot pool lock (S3 delete) — required so the same bot can
 # be picked up by the next agent run.
 if [ -n "${TELEGRAM_BOT_NAME:-}" ] && [ -n "${TELEGRAM_SENDER_LOGIN:-}" ]; then
     log "Releasing bot pool lock for ${TELEGRAM_SENDER_LOGIN}/${TELEGRAM_BOT_NAME}"
-    aws s3 rm \
-        "s3://${S3_LOGS_BUCKET}/bot-pool-locks/${TELEGRAM_SENDER_LOGIN}/${TELEGRAM_BOT_NAME}.json" \
-        --region "$REGION" 2>/dev/null || true
+    blitzlog_s3_rm "${S3_LOGS_BUCKET}" \
+        "bot-pool-locks/${TELEGRAM_SENDER_LOGIN}/${TELEGRAM_BOT_NAME}.json" \
+        2>/dev/null || true
 fi
 
 # Clean up container

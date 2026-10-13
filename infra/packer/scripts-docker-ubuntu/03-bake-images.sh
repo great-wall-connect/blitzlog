@@ -11,6 +11,12 @@
 
 set -euo pipefail
 
+# Issue #123: single source of truth for host-side S3 calls. Packer
+# uploads this file (alongside watchdog.sh) to /tmp before this
+# script runs; 02-systemd.sh later installs it under /usr/local/bin/
+# for runtime use by the watchdog and the user-data bootstrap.
+source /tmp/blitzlog-uploader.sh
+
 : "${AGENT_IMAGE_TAG:?AGENT_IMAGE_TAG must be set}"
 : "${STT_MODEL:?STT_MODEL must be set}"
 : "${STT_MODELS_BUCKET:?STT_MODELS_BUCKET must be set}"
@@ -72,8 +78,10 @@ sudo chown root:root /root/blitzlog.env
 
 MODEL_FILE="ggml-${STT_MODEL}.bin"
 echo "Downloading whisper model ${MODEL_FILE}"
-sudo aws s3 cp "s3://${STT_MODELS_BUCKET}/models/${MODEL_FILE}" \
-    "/opt/whisper-stt/models/${MODEL_FILE}" --region "$AWS_REGION"
+sudo blitzlog_s3_get "${STT_MODELS_BUCKET}" \
+    "models/${MODEL_FILE}" \
+    "/opt/whisper-stt/models/${MODEL_FILE}" \
+    "$AWS_REGION"
 
 sudo kill "$DOCKERD_PID" 2>/dev/null || true
 sudo wait "$DOCKERD_PID" 2>/dev/null || true

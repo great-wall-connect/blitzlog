@@ -58,9 +58,11 @@ S3_RESTORE_BUCKET="{s3_bucket}"
 RESUMED=false
 
 log "Checking S3 for existing session state..."
-if aws s3 ls "s3://${{S3_RESTORE_BUCKET}}/${{S3_RESTORE_PREFIX}}/metadata.json" >/dev/null 2>&1; then
+if blitzlog_s3_ls "${{S3_RESTORE_BUCKET}}" "${{S3_RESTORE_PREFIX}}/metadata.json" >/dev/null 2>&1; then
     log "Found previous session metadata, downloading..."
-    aws s3 cp "s3://${{S3_RESTORE_BUCKET}}/${{S3_RESTORE_PREFIX}}/metadata.json" /tmp/session-metadata.json --region "$REGION" 2>/dev/null || true
+    blitzlog_s3_get "${{S3_RESTORE_BUCKET}}" \
+        "${{S3_RESTORE_PREFIX}}/metadata.json" \
+        /tmp/session-metadata.json 2>/dev/null || true
 
     if [ -f /tmp/session-metadata.json ]; then
         RESTORE_BRANCH=$(python3 -c "import json; print(json.load(open('/tmp/session-metadata.json')).get('branch',''))" 2>/dev/null || echo "")
@@ -74,7 +76,9 @@ if aws s3 ls "s3://${{S3_RESTORE_BUCKET}}/${{S3_RESTORE_PREFIX}}/metadata.json" 
 
         if [ -n "$RESTORE_SESSION_ID" ]; then
             log "Downloading session $RESTORE_SESSION_ID..."
-            aws s3 cp "s3://${{S3_RESTORE_BUCKET}}/${{S3_RESTORE_PREFIX}}/sessions/${{RESTORE_SESSION_ID}}.json" /tmp/session-import.json --region "$REGION" 2>/dev/null || true
+            blitzlog_s3_get "${{S3_RESTORE_BUCKET}}" \
+                "${{S3_RESTORE_PREFIX}}/sessions/${{RESTORE_SESSION_ID}}.json" \
+                /tmp/session-import.json 2>/dev/null || true
         fi
 
         if [ -f /tmp/session-import.json ]; then
@@ -156,9 +160,9 @@ export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
 if [ ! -f "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" ]; then
-    aws s3 cp "s3://${{STT_MODELS_BUCKET}}/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
-        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin" \\
-        --region "$REGION"
+    blitzlog_s3_get "${{STT_MODELS_BUCKET}}" \
+        "models/ggml-${{STT_MODEL:-base.en}}.bin" \
+        "/opt/whisper-stt/models/ggml-${{STT_MODEL:-base.en}}.bin"
 fi
 
 log "Restoring previous session state..."
