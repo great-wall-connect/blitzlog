@@ -130,35 +130,91 @@ class TestAbstractMethodCoverage(unittest.TestCase):
                 f"AwsSecretStore must implement {name!r}",
             )
 
-    def test_alicloud_compute_still_has_unimplemented_methods(self):
-        """Phase 1 of #83: Alicloud stubs raise `NotImplementedError`.
-        The class still satisfies the ABC *signature* (it overrides
-        every method), but the bodies deliberately throw so a
-        reviewer's `BLITZLOG_PROVIDER=alicloud` cold-start fails
-        loudly with a pointer at #124 instead of silently
-        returning a half-configured compute.
+    def test_alicloud_compute_overrides_every_abstract_method(self):
+        """After #84 (Phase 2) `AlicloudCompute` is a full
+        implementation of `ComputeProvider`; the abstract-method
+        contract applies identically to the AWS + Alicloud
+        sides. The deep wire-format coverage lives in
+        `tests/test_provider_alicloud.py`.
         """
         abstracts = _abstract_method_names(ComputeProvider)
         for name in abstracts:
             self.assertTrue(
-                hasattr(AlicloudCompute, name),
-                f"AlicloudCompute must declare {name!r} (even if it raises NotImplementedError)",
+                hasattr(AlicloudCompute, name)
+                and not getattr(
+                    getattr(AlicloudCompute, name), "__isabstractmethod__", False
+                ),
+                f"AlicloudCompute must implement {name!r}",
             )
 
-    def test_alicloud_object_store_still_has_unimplemented_methods(self):
+    def test_alicloud_object_store_overrides_every_abstract_method(self):
         abstracts = _abstract_method_names(ObjectStore)
         for name in abstracts:
             self.assertTrue(
-                hasattr(AlicloudObjectStore, name),
-                f"AlicloudObjectStore must declare {name!r}",
+                hasattr(AlicloudObjectStore, name)
+                and not getattr(
+                    getattr(AlicloudObjectStore, name),
+                    "__isabstractmethod__",
+                    False,
+                ),
+                f"AlicloudObjectStore must implement {name!r}",
             )
 
-    def test_alicloud_secret_store_still_has_unimplemented_methods(self):
+    def test_alicloud_secret_store_overrides_every_abstract_method(self):
         abstracts = _abstract_method_names(SecretStore)
         for name in abstracts:
             self.assertTrue(
-                hasattr(AlicloudSecretStore, name),
-                f"AlicloudSecretStore must declare {name!r}",
+                hasattr(AlicloudSecretStore, name)
+                and not getattr(
+                    getattr(AlicloudSecretStore, name),
+                    "__isabstractmethod__",
+                    False,
+                ),
+                f"AlicloudSecretStore must implement {name!r}",
+            )
+
+    def test_azure_compute_still_has_unimplemented_methods(self):
+        """Phase 2 / #84: Azure stubs raise `NotImplementedError`.
+        The class still satisfies the ABC *signature* (it
+        overrides every method), but the bodies deliberately
+        throw so a reviewer's `BLITZLOG_PROVIDER=azure`
+        cold-start fails loudly with a pointer at the Phase 3
+        follow-up rather than silently returning a
+        half-implemented compute.
+        """
+        from provider.azure import (
+            AzureCompute as _AzureCompute,
+        )
+
+        abstracts = _abstract_method_names(ComputeProvider)
+        for name in abstracts:
+            self.assertTrue(
+                hasattr(_AzureCompute, name),
+                f"AzureCompute must declare {name!r} (even if it raises NotImplementedError)",
+            )
+
+    def test_azure_object_store_still_has_unimplemented_methods(self):
+        from provider.azure import (
+            AzureObjectStore as _AzureObjectStore,
+        )
+
+        abstracts = _abstract_method_names(ObjectStore)
+        for name in abstracts:
+            self.assertTrue(
+                hasattr(_AzureObjectStore, name),
+                f"AzureObjectStore must declare {name!r}",
+            )
+
+    def test_azure_secret_store_still_has_unimplemented_methods(self):
+        from provider.azure import (
+            AzureSecretStore as _AzureSecretStore,
+        )
+
+        abstracts = _abstract_method_names(SecretStore)
+        for name in abstracts:
+            self.assertTrue(
+                hasattr(_AzureSecretStore, name),
+                f"AzureSecretStore must declare {name!r}",
             )
 
 

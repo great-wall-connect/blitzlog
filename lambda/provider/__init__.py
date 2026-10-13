@@ -35,6 +35,11 @@ from provider.alicloud import (
     AlicloudSecretStore,
 )
 from provider.aws import AwsCompute, AwsObjectStore, AwsSecretStore
+from provider.azure import (
+    AzureCompute,
+    AzureObjectStore,
+    AzureSecretStore,
+)
 from provider.base import (
     ComputeProvider,
     LaunchSpec,
@@ -46,12 +51,24 @@ from provider.base import (
 
 # Mapping of provider name → (compute class, secrets class, object-store class).
 # Adding a new cloud = add a new entry here and ship a new module
-# alongside `aws.py` / `alicloud.py`.
+# alongside `aws.py` / `alicloud.py` / `azure.py`.
+#
+# Status after #84 (Phase 2):
+#   * `aws`      — full bodies (issue #83).
+#   * `alicloud` — full bodies (issue #84). KMS + OSS + ECS
+#                  preemptible all land bodies; the
+#                  `BLITZLOG_PROVIDER=alicloud` cold start
+#                  works end-to-end.
+#   * `azure`    — stub. Every method raises
+#                  `NotImplementedError`; Phase 3 ships the
+#                  real implementations against Key Vault +
+#                  Blob Storage + Azure VM.
 _PROVIDERS: dict[
     str, tuple[type[ComputeProvider], type[SecretStore], type[ObjectStore]]
 ] = {
     "aws": (AwsCompute, AwsSecretStore, AwsObjectStore),
     "alicloud": (AlicloudCompute, AlicloudSecretStore, AlicloudObjectStore),
+    "azure": (AzureCompute, AzureSecretStore, AzureObjectStore),
 }
 
 _compute: ComputeProvider | None = None
