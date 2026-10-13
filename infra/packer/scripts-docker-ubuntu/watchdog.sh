@@ -224,13 +224,20 @@ WATCHER_PID=$!
 # host-side SESSION_ARCHIVE_BUCKET and S3_LOG_PREFIX exports, so
 # operators only need to remember one number.
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
-    TOKEN_POLL_PID=$(blitzlog_start_token_poll_loop \
+    # `blitzlog_start_token_poll_loop` writes the subshell's PID to
+    # the global `BLITZLOG_TOKEN_POLL_PID`. We use a global instead
+    # of `$(...)` capture because bash's `wait` for a non-direct
+    # child (the subshell is a grandchild of the watchdog once it
+    # runs inside a function called via command substitution) is
+    # unreliable; killing by PID sidesteps the issue. See the
+    # comment in blitzlog_token_poll.sh for the rationale.
+    blitzlog_start_token_poll_loop \
         "${GITHUB_TOKEN_SSM_PARAM}" \
         "$REGION" \
         /root/.git-credentials.d/github \
         "/root/gh-config/${INSTANCE_ID}/hosts.yml" \
-        "${BLITZLOG_TOKEN_POLL_INTERVAL:-300}")
-    log "Started token refresh poll loop (pid=${TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s)"
+        "${BLITZLOG_TOKEN_POLL_INTERVAL:-300}"
+    log "Started token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s)"
 fi
 
 # Defense in depth: clear any stale .shutdown left over from a crashed
@@ -260,12 +267,30 @@ wait "$WATCHER_PID" 2>/dev/null || true
 
 # Kill the token refresh poll loop now that the container has
 # exited. The poll loop's `trap 'exit 0' TERM` makes the SIGTERM
-# immediate; the next `wait` reaps the process so the watchdog
-# doesn't carry a zombie to the EC2 instance shutdown.
-if [ -n "${TOKEN_POLL_PID:-}" ]; then
-    log "Stopping token refresh poll loop (pid=${TOKEN_POLL_PID})"
-    kill "$TOKEN_POLL_PID" 2>/dev/null || true
-    wait "$TOKEN_POLL_PID" 2>/dev/null || true
+# immediate. We don't `wait` — bash's `wait` for a non-direct
+# child is unreliable when the subshell was spawned from a function
+# (see blitzlog_token_poll.sh's comment on why we use a global PID
+# instead of `$(...)` capture). A 100 ms grace period lets the trap
+# fire and the subshell exit cleanly; if it's still alive after
+# that, we send SIGKILL so it doesn't become a zombie carried to
+# the EC2 instance shutdown.
+if [ -n "${BLITZLOG_TOKEN_POLL_PID:-}" ]; then
+    log "Stopping token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID})"
+    kill "${BLITZLOG_TOKEN_POLL_PID}" 2>/dev/null || true
+    # 100 ms grace period. 5 ticks of 20 ms each is enough for the
+    # `trap 'exit 0' TERM` to fire even on a busy host; if the
+    # process is still alive after that, SIGTERM is being ignored
+    # and we escalate.
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 "${BLITZLOG_TOKEN_POLL_PID}" 2>/dev/null; then
+            break
+        fi
+        sleep 0.02
+    done
+    if kill -0 "${BLITZLOG_TOKEN_POLL_PID}" 2>/dev/null; then
+        log "Token refresh poll loop did not exit on SIGTERM; sending SIGKILL"
+        kill -9 "${BLITZLOG_TOKEN_POLL_PID}" 2>/dev/null || true
+    fi
 fi
 
 log "Container exited with code $CONTAINER_EXIT"

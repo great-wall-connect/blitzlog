@@ -116,11 +116,32 @@ _bl_tokenpoll_rewrite_if_changed() {
 # blitzlog_start_token_poll_loop <param_name> <region> <git_creds_path> <gh_hosts_yml_path> [poll_interval_seconds]
 #   Spawn the background poll loop. Returns immediately; the loop
 #   runs in a subshell with `trap 'exit 0' TERM` so the watchdog can
-#   kill it cleanly. stdout (the child PID) is printed on the caller's
-#   stdout so the watchdog can capture it.
+#   kill it cleanly. The subshell's PID is written to the global
+#   `BLITZLOG_TOKEN_POLL_PID` so the caller can `kill` and `wait` it
+#   from its own process tree.
+#
+#   **Why a global instead of `printf`?**
+#   `$!` is the PID of the most-recent backgrounded process in the
+#   *current* shell. The caller wants to `wait` for the subshell
+#   from the outer script, but `wait` from a shell for a non-direct
+#   child is unreliable when the subshell was spawned from a
+#   function called via `$(...)` — bash's `wait` only reaps direct
+#   children, so the backgrounded subshell becomes a "grandchild"
+#   that the outer shell cannot reap. Storing the PID in a global
+#   variable the outer shell can see, and `kill`ing that PID
+#   directly, sidesteps the `wait` problem: the subshell's
+#   `trap 'exit 0' TERM` fires, the subshell exits, and the outer
+#   shell's `wait` is no longer needed. (If the caller does want to
+#   reap the subshell, it can do so via `kill -0 $PID` until
+#   non-zero, then `wait` for ANY background process — but the
+#   watchdog's typical flow is "kill and proceed".)
 blitzlog_start_token_poll_loop() {
     local param_name="$1" region="$2" git_creds="$3" gh_hosts="$4"
     local poll_interval="${5:-300}"
+
+    # The global must be declared with `declare -g` so the assignment
+    # propagates from the function's local scope to the caller's.
+    declare -g BLITZLOG_TOKEN_POLL_PID
 
     (
         trap 'exit 0' TERM
@@ -132,5 +153,5 @@ blitzlog_start_token_poll_loop() {
             last="$(_bl_tokenpoll_rewrite_if_changed "$current" "$last" "$git_creds" "$gh_hosts")"
         done
     ) &
-    printf '%s' "$!"
+    BLITZLOG_TOKEN_POLL_PID=$!
 }
