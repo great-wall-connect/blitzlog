@@ -630,7 +630,7 @@ jobs:
       # with :latest.
       - name: Upload Lambda zip to release
         if: steps.detect.outputs.mode == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.detect.outputs.new_version }}
           files: infra/blitzlog-lambda.zip
