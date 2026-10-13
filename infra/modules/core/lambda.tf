@@ -115,8 +115,8 @@ resource "aws_lambda_function" "handler" {
   # cold start no longer pays the import cost; 512 MB still gives
   # ~3-4x headroom for the AWS boto3 + cryptography C extension on
   # a warm start.
-  memory_size      = 512
-  timeout          = 180
+  memory_size = 512
+  timeout     = 180
   dead_letter_config {
     target_arn = aws_sqs_queue.dlq.arn
   }
