@@ -1,0 +1,52 @@
+# Scrimmaster stack — operator-managed ZeroClaw advisor host.
+#
+# Run from this directory:
+#
+#   terraform init -backend-config=scrummaster-backend.hcl
+#   terraform plan
+#   terraform apply
+#
+# Resources provisioned: one t4g.nano on-demand instance
+# (`blitzlog-scrummaster`) in the existing dev VPC, security group
+# (`blitzlog-scrummaster-sg`) with egress 443/TCP only and ingress
+# tcp/22 from var.ssh_allowed_cidrs, IAM role + instance profile
+# (`blitzlog-scrummaster-role` / `blitzlog-scrummaster-profile`) with
+# read-only SSM access under /blitzlog/scrummaster/*. The user-data
+# script installs the ZeroClaw binary and lays down a placeholder
+# /etc/zeroclaw/config.toml that fails closed.
+#
+# No SSM parameters are written by this stack. Provider config
+# (#137), Telegram channels (#138), and GitHub App credentials
+# (#139) layer on top; each adds its own params under
+# /blitzlog/scrummaster/* without modifying this stack.
+#
+# destroy_api_termination is `true` on the instance, so a stray
+# `terraform destroy` errors with "ApiTermination is disabled".
+# To intentionally destroy, run `terraform destroy -force` after
+# editing the attribute off the instance, or call
+# `aws ec2 modify-instance-attribute --no-disable-api-termination`
+# in the console.
+#
+# Required variables (no defaults — Terraform apply will fail without these):
+# ------------------------------------------------------------------------------
+aws_region    = "ap-east-1"                         # any AWS region with t4g.* spot inventory
+vpc_id        = "vpc-0123456789abcdef0"             # reuse the prod or dev VPC
+subnet_id     = "subnet-0123456789abcdef0"          # public subnet inside vpc_id
+
+# Optional variables (uncomment to override defaults):
+# ------------------------------------------------------------------------------
+# ssh_allowed_cidrs   = ["1.2.3.4/32"]              # CIDRs allowed SSH ingress; empty = no SSH (SSM only)
+# ssh_key_name        = "your-ec2-keypair"          # optional SSH keypair (else SSM Session Manager only)
+# instance_type       = "t4g.nano"                  # change for capacity testing; t4g.nano is the cost pin
+# ami_id              = "ami-0123456789abcdef0"     # override to pin a hardened / patched AMI; empty = latest Canonical Ubuntu 26.04 arm64
+# root_volume_size_gb = 20                          # raise for heavy SQLite memory; minimum 8 GiB
+# zeroclaw_release_tag = "latest"                   # pin a real tag (e.g. v0.1.3) for reproducibility
+
+# State file: S3 key is "scrummaster/blitzlog.tfstate" in the bucket
+# named in scrummaster-backend.hcl. Independent of dev / prod state;
+# concurrent applies across stacks do not contend on a lock.
+#
+# No DynamoDB lock table — the project standard (see README §State
+# locking) is to serialize applies per stack via CI concurrency
+# groups. Local concurrent applies race; coordinate at the operator
+# level.

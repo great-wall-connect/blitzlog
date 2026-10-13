@@ -31,6 +31,10 @@ Examples:
 - `fix: handle null pointer in cache lookup`
 - `docs: update API documentation`
 
+## Scrummaster infrastructure
+
+`infra/scrummaster/*` is operator-hosted infrastructure (the always-on ZeroClaw advisor stack from epic #134) and is **not** part of the blitzlog agent runtime. blitzlog-agent runs — autonomous or assisted, on this repo or any consumer repo — must not modify `infra/scrummaster/*`; that stack is provisioned and maintained by the operator out-of-band. The same autonomy carve-out that protects `infra/prod/`, `infra/dev/`, `infra/user-pool/`, `infra/bootstrap/`, and `infra/modules/core/` from agent drift applies here.
+
 ## Trigger Labels
 
 The labels `autonomous` and `assisted` cause the blitzlog webhook Lambda to launch an EC2 agent for the labeled issue. **Agents must never apply these labels** — neither when opening new issues, nor when editing existing ones. Use any other appropriate label (`bug`, `enhancement`, `dependencies`, etc.).
