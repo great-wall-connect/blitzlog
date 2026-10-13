@@ -502,9 +502,7 @@ def _handle_refresh(event: dict) -> dict:
             "body": json.dumps({"error": f"ssm put failed: {e}"}),
         }
 
-    logger.info(
-        "Refresh: wrote token to %s (iteration=%d)", ephemeral_param, iteration
-    )
+    logger.info("Refresh: wrote token to %s (iteration=%d)", ephemeral_param, iteration)
 
     if iteration < TOKEN_REFRESH_MAX_ITERATIONS - 1:
         try:
@@ -527,8 +525,7 @@ def _handle_refresh(event: dict) -> dict:
             )
     else:
         logger.info(
-            "Refresh: chain ended at iteration %d "
-            "(TOKEN_REFRESH_MAX_ITERATIONS=%d)",
+            "Refresh: chain ended at iteration %d " "(TOKEN_REFRESH_MAX_ITERATIONS=%d)",
             iteration,
             TOKEN_REFRESH_MAX_ITERATIONS,
         )

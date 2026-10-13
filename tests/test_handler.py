@@ -368,7 +368,6 @@ class TestRefreshBranch(unittest.TestCase):
         # Reset the module-level boto3 client cache so each test gets
         # a fresh mock. Without this, the cache leaks across tests and
         # the patches below are no-ops.
-        from handler import _account_id_cache, _scheduler_client, _sts_client
 
         handler = sys.modules["handler"]
         handler._scheduler_client = None
@@ -378,7 +377,6 @@ class TestRefreshBranch(unittest.TestCase):
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._env_snapshot)
-        from handler import _account_id_cache, _scheduler_client, _sts_client
 
         handler = sys.modules["handler"]
         handler._scheduler_client = None
@@ -423,9 +421,13 @@ class TestRefreshBranch(unittest.TestCase):
         # positional, type/overwrite keyword-only.
         mock_secrets.return_value.put.assert_called_once()
         args, kwargs = mock_secrets.return_value.put.call_args
-        self.assertEqual(len(args), 2, f"put() must take exactly 2 positional args: {args!r}")
+        self.assertEqual(
+            len(args), 2, f"put() must take exactly 2 positional args: {args!r}"
+        )
         name, value = args
-        self.assertIn("145", name, f"parameter name must carry the issue number: {name!r}")
+        self.assertIn(
+            "145", name, f"parameter name must carry the issue number: {name!r}"
+        )
         self.assertEqual(value, "ghp_NEW")
         # `type` is the SSM parameter type; must be SecureString so the
         # token is KMS-encrypted at rest.
@@ -540,12 +542,14 @@ class TestRefreshBranch(unittest.TestCase):
         route refresh payloads through the signature path."""
         from handler import lambda_handler
 
-        with patch("handler.verify_github_signature") as mock_verify:
+        with (
+            patch("handler.verify_github_signature") as mock_verify,
+            patch("handler.get_github_app_token", return_value="t"),
+            patch("handler.get_secrets") as mock_secrets,
+        ):
             event = self._make_event()
-            with patch("handler.get_github_app_token", return_value="t"):
-                with patch("handler.get_secrets") as mock_secrets:
-                    mock_secrets.return_value.put = MagicMock()
-                    lambda_handler(event, None)
+            mock_secrets.return_value.put = MagicMock()
+            lambda_handler(event, None)
         mock_verify.assert_not_called()
 
     def test_refresh_branch_does_not_affect_webhook_path(self):
@@ -586,7 +590,6 @@ class TestScheduleNextRefresh(unittest.TestCase):
         os.environ["AWS_REGION"] = "ap-east-1"
         # Reset module-level boto3 client cache so each test gets a
         # fresh mock.
-        from handler import _account_id_cache, _scheduler_client, _sts_client
 
         handler = sys.modules["handler"]
         handler._scheduler_client = None
@@ -596,7 +599,6 @@ class TestScheduleNextRefresh(unittest.TestCase):
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._env_snapshot)
-        from handler import _account_id_cache, _scheduler_client, _sts_client
 
         handler = sys.modules["handler"]
         handler._scheduler_client = None
@@ -678,9 +680,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
 
         os.environ.pop("AWS_LAMBDA_FUNCTION_NAME", None)
         with self.assertRaises(RuntimeError):
-            schedule_next_refresh(
-                issue=145, instance="i-abc", iteration=0, repo="r"
-            )
+            schedule_next_refresh(issue=145, instance="i-abc", iteration=0, repo="r")
 
     def test_schedule_next_refresh_raises_without_scheduler_role_arn(self):
         """When `SCHEDULER_ROLE_ARN` is unset, the function must raise
@@ -689,11 +689,8 @@ class TestScheduleNextRefresh(unittest.TestCase):
         from handler import schedule_next_refresh
 
         os.environ.pop("SCHEDULER_ROLE_ARN", None)
-        with patch("handler.boto3.client"):
-            with self.assertRaises(RuntimeError):
-                schedule_next_refresh(
-                    issue=145, instance="i-abc", iteration=0, repo="r"
-                )
+        with patch("handler.boto3.client"), self.assertRaises(RuntimeError):
+            schedule_next_refresh(issue=145, instance="i-abc", iteration=0, repo="r")
 
 
 class TestRefreshWireIntegration(unittest.TestCase):
@@ -711,7 +708,14 @@ class TestRefreshWireIntegration(unittest.TestCase):
     @patch("handler.get_ssm_param", return_value="secret")
     @patch("handler.get_local_llm_config", return_value=None)
     def test_webhook_schedules_first_refresh_after_launch(
-        self, mock_local_llm, mock_ssm, mock_sig, mock_mint, mock_launch, mock_lock, mock_schedule
+        self,
+        mock_local_llm,
+        mock_ssm,
+        mock_sig,
+        mock_mint,
+        mock_launch,
+        mock_lock,
+        mock_schedule,
     ):
         from handler import lambda_handler
 
@@ -742,7 +746,10 @@ class TestRefreshWireIntegration(unittest.TestCase):
             repo="octocat/Hello-World",
         )
 
-    @patch("handler.schedule_next_refresh", side_effect=RuntimeError("no SCHEDULER_ROLE_ARN"))
+    @patch(
+        "handler.schedule_next_refresh",
+        side_effect=RuntimeError("no SCHEDULER_ROLE_ARN"),
+    )
     @patch("handler.launch_ec2_spot_instance", return_value="i-abc")
     @patch("handler.get_github_app_token", return_value="ghp_test")
     @patch("handler.verify_github_signature", return_value=True)
