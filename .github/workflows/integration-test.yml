@@ -72,9 +72,12 @@ jobs:
           # base64url → base64 padding.
           PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
           PADDED="$PAYLOAD$(printf '=%.0s' $(seq 1 $PAD))"
-          echo "==== OIDC sub claim ===="
+          echo "==== All OIDC claims ===="
           printf '%s' "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null \
-              | jq '{sub, aud, iss}'
+              | jq 'keys_unsorted'
+          echo "==== Selected claims ===="
+          printf '%s' "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null \
+              | jq '{sub, aud, iss, job_workflow_ref, repository, repository_owner, workflow}'
           echo "========================="
 
       - name: Install mise
