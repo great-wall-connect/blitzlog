@@ -1,0 +1,91 @@
+name: integration-test
+
+# Level 2 of the watchdog token-refresh 3-level testing
+# convention. Runs the
+# `tests/test_watchdog_credential_poll_e2e.py::test_watchdog_poll_loop_rewrites_against_real_ssm`
+# test against the real AWS SSM service, on a nightly schedule
+# (so a regression that only surfaces against real AWS is caught
+# within 24 h, not at the next release) and on demand via
+# `gh workflow run integration-test.yml`.
+#
+# Trust policy for the OIDC role assumed here is INTENTIONALLY
+# narrow (see infra/bootstrap/integration-test-role.tf): the
+# `sub` claim must match
+# `repo:great-wall-connect/blitzlog:workflow:integration-test.yml:ref:refs/heads/*`
+# so the deploy / packer / release workflows cannot assume this
+# role even by accident. Permissions are scoped to the test
+# SSM prefix
+# (`/blitzlog/<env>/ephemeral/github-token-integration-test-*`)
+# so the test cannot touch any real prod params.
+#
+# Cost: ~$0.0003 per run (3 SSM puts + a handful of gets;
+# SecureString storage < 1 s; cleanup deletes the param).
+# Time: ~10 s per run.
+#
+# On nightly failure, the run surfaces in the GitHub Actions UI
+# under this workflow. To run on demand:
+#   gh workflow run integration-test.yml
+on:
+  schedule:
+    # 03:00 UTC nightly. cron is in UTC; the project's preferred
+    # "low traffic" window is overnight ap-east-1 (= 19:00-23:00
+    # UTC). 03:00 UTC = 11:00 ap-east-1, which is a quieter
+    # business hour — chosen so a real-SSM failure that is
+    # operator-actionable (e.g. integration-test role not
+    # applied) is visible on the same day.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required for OIDC into the blitzlog-integration-test-role.
+  # The OIDC token is issued by GitHub's
+  # `token.actions.githubusercontent.com` provider; the matching
+  # `aws_iam_openid_connect_provider.github` lives in
+  # infra/bootstrap/github-oidc-provider.tf.
+  id-token: write
+
+jobs:
+  ssm-round-trip:
+    name: Watchdog poll loop (real SSM)
+    runs-on: ubuntu-latest
+    # 5 min covers the worst case: 3 SSM puts + 3 SSM
+    # deletes + ~6 SSM gets (2 ticks per phase × 3 phases) +
+    # the bash subprocess startup + the SIGTERM teardown. The
+    # test itself runs in ~10 s; the budget covers a slow SSM
+    # read on a degraded network.
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install mise
+        uses: jdx/mise-action@v4
+
+      - name: Install Python toolchain
+        run: mise install
+
+      - name: Install Python dependencies
+        run: python -m pip install -q -r requirements.txt -r requirements-dev.in
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          # OIDC into the role provisioned by
+          # infra/bootstrap/integration-test-role.tf. Trust
+          # policy narrows the `sub` claim to
+          # `repo:great-wall-connect/blitzlog:workflow:integration-test.yml:ref:refs/heads/*`
+          # so only this workflow can assume it.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-integration-test-role
+          aws-region: ap-east-1
+
+      - name: Run Level 2 integration test
+        env:
+          # Opt in to @pytest.mark.integration. The conftest
+          # auto-skip hook checks this env var and only runs
+          # the integration test when it's set. The default
+          # `pytest` run on this workflow (or anywhere `BLITZLOG_RUN_INTEGRATION=1`
+          # is not set) skips the integration test.
+          BLITZLOG_RUN_INTEGRATION: "1"
+          AWS_REGION: ap-east-1
+        run: python -m pytest -m integration -v tests/test_watchdog_credential_poll_e2e.py
