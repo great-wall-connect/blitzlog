@@ -19,6 +19,7 @@ jobs:
       - name: Run container retention policy
         uses: snok/container-retention-policy@v3.1.0
         with:
+          account: great-wall-connect
           image-names: blitzlog-agent
           keep-n-most-recent: 10
           cut-off: 30d

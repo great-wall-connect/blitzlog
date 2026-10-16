@@ -11,6 +11,10 @@ What this guards against:
 - The schedule trigger being removed (so retention stops running).
 - The image-name changing off ``blitzlog-agent`` (so retention would
   prune a different image or no-op silently).
+- ``account`` being dropped from the ``with:`` block (so the snok
+  action exits with ``invalid value '' for '--account <ACCOUNT>'``
+  before pruning anything — the failure mode hit on the 2026-10-16
+  retention run, see issue #151).
 - ``keep-n-most-recent`` or ``cut-off`` being deleted (so retention
   either keeps nothing or everything).
 - ``token`` regressing to a non-existent secret like ``PAT_TOKEN``
@@ -129,6 +133,32 @@ class TestRetentionWorkflow(unittest.TestCase):
             self.with_block,
             r"(?m)^\s+image-names:\s+blitzlog-agent\s*$",
             "retention.yml must prune the blitzlog-agent image",
+        )
+
+    def test_account_set(self):
+        """retention.yml MUST set the snok action's ``account`` input.
+
+        snok/container-retention-policy@3.x refuses to start with an
+        empty ``account`` value
+        (``error: invalid value '' for '--account <ACCOUNT>'``). The
+        package lives under the ``great-wall-connect`` org on GHCR
+        (same owner that docker-images.yml and release.yml push to), so
+        the input must be the org name — not ``user`` and not blank.
+        Regression guard for issue #151.
+        """
+        m = re.search(
+            r"(?m)^\s+account:\s*(\S*)\s*$",
+            self.with_block,
+        )
+        self.assertIsNotNone(
+            m,
+            "retention.yml must set account: in the with: block",
+        )
+        self.assertEqual(
+            m.group(1),
+            "great-wall-connect",
+            "retention.yml account must be 'great-wall-connect' "
+            "(the GHCR org that owns the blitzlog-agent package)",
         )
 
     def test_keep_n_most_recent_set(self):
