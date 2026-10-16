@@ -32,14 +32,26 @@ resource "aws_iam_role" "integration_test" {
     Statement = [
       {
         # GitHub Actions OIDC, narrowed to the integration-test
-        # workflow only. The `sub` condition is the GitHub OIDC
-        # token's "subject" claim, which GitHub sets to
-        # `repo:OWNER/REPO:workflow:FILENAME:ref:REF`. The
-        # `:workflow:integration-test.yml:` segment is what makes
-        # this narrow: a token issued for a *different* workflow
-        # (e.g. `release.yml`, `terraform-apply-dev.yml`,
-        # `packer-build.yml`) will not match, and `AssumeRole` is
-        # denied.
+        # workflow file only. The `job_workflow_ref` claim is the
+        # GitHub OIDC token's workflow-specific identifier; for a
+        # token issued by `integration-test.yml` it is
+        # `great-wall-connect/blitzlog/.github/workflows/integration-test.yml@refs/heads/<branch>`.
+        # The deploy / packer / release / terraform-apply-dev /
+        # retention workflows all have a DIFFERENT
+        # `job_workflow_ref` (e.g.
+        # `great-wall-connect/blitzlog/.github/workflows/release.yml@refs/heads/main`)
+        # and their tokens are denied by this condition.
+        #
+        # Why `job_workflow_ref` and not `sub`? GitHub's `sub`
+        # claim for `workflow_dispatch` and `schedule` events is
+        # the same push-event format
+        # (`repo:OWNER@INTID/REPO@INTID:ref:refs/heads/BRANCH`) —
+        # it does NOT include the workflow filename. So a `sub`
+        # condition cannot narrow to a specific workflow. The
+        # `job_workflow_ref` claim was added by GitHub specifically
+        # for this kind of workflow-narrow OIDC trust policy. See
+        # https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect
+        # for the full claim catalogue.
         Effect = "Allow"
         Principal = {
           Federated = aws_iam_openid_connect_provider.github.arn
@@ -50,7 +62,7 @@ resource "aws_iam_role" "integration_test" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:great-wall-connect/blitzlog:workflow:integration-test.yml:ref:refs/heads/*"
+            "token.actions.githubusercontent.com:job_workflow_ref" = "great-wall-connect/blitzlog/.github/workflows/integration-test.yml@refs/heads/*"
           }
         }
       },
