@@ -13,10 +13,9 @@ walk the [tools] and [tasks] tables; no AWS credentials required.
 """
 
 import re
+import tomllib
 import unittest
 from pathlib import Path
-
-import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MISE_TOML = REPO_ROOT / "mise.toml"

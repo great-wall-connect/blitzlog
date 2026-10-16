@@ -889,12 +889,13 @@ class TestShimHttpHandler(unittest.TestCase):
         self.assertIsNotNone(received_file_match)
         from datetime import datetime
 
-        # Replacers normalize the "Z" suffix back to "+00:00" for
-        # datetime.fromisoformat's parser.
-        first = datetime.fromisoformat(first_ts_match.group(1).replace("Z", "+00:00"))
-        received = datetime.fromisoformat(
-            received_file_match.group(1).replace("Z", "+00:00")
-        )
+        # datetime.fromisoformat accepts the ISO-8601 "Z" suffix
+        # natively as of Python 3.11 (PEP 695); the repo pins
+        # python = "3.12" in mise.toml, so the legacy
+        # `.replace("Z", "+00:00")` workaround that this comment
+        # block used to document is no longer needed.
+        first = datetime.fromisoformat(first_ts_match.group(1))
+        received = datetime.fromisoformat(received_file_match.group(1))
         gap_s = abs((received - first).total_seconds())
         self.assertLess(
             gap_s,

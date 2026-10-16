@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 from botocore.config import Config
@@ -219,7 +219,7 @@ class AwsCompute(ComputeProvider):
 
     def spot_prices(self, instance_types: list[str]) -> list[SpotQuote]:
         ec2 = _boto3_client("ec2")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             resp = ec2.describe_spot_price_history(
                 InstanceTypes=instance_types,

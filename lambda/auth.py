@@ -32,7 +32,7 @@ import base64
 import hashlib
 import hmac
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import requests
@@ -88,7 +88,7 @@ def get_github_app_token(repo: str) -> str:
     private_key = base64.b64decode(private_key_b64).decode()
     installation_id = get_ssm_param("github-app/installation-id", with_decryption=False)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     app_jwt = jwt.encode(
         {
             "iat": now,

@@ -622,7 +622,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
             sts_client if service == "sts" else scheduler_client
         )
 
-        before = _dt.datetime.now(_dt.timezone.utc)
+        before = _dt.datetime.now(_dt.UTC)
         schedule_next_refresh(
             issue=145,
             instance="i-abc",
@@ -630,7 +630,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
             repo="octocat/Hello-World",
             delay_seconds=3000,
         )
-        after = _dt.datetime.now(_dt.timezone.utc)
+        after = _dt.datetime.now(_dt.UTC)
 
         scheduler_client.create_schedule.assert_called_once()
         kwargs = scheduler_client.create_schedule.call_args.kwargs
@@ -648,7 +648,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
         # Pull the timestamp out and assert it's ~50 min from now.
         ts_str = kwargs["ScheduleExpression"].removeprefix("at(").removesuffix(")")
         fire_at = _dt.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S").replace(
-            tzinfo=_dt.timezone.utc
+            tzinfo=_dt.UTC
         )
         expected_min = before + _dt.timedelta(seconds=3000) - _dt.timedelta(seconds=2)
         expected_max = after + _dt.timedelta(seconds=3000) + _dt.timedelta(seconds=2)

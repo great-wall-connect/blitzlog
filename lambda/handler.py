@@ -32,7 +32,7 @@ into a flat dict that the rest of the pipeline consumes.
 import base64
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import boto3
 from _env import SSM_PATH, logger
@@ -407,7 +407,7 @@ def schedule_next_refresh(
     account_id = _get_account_id()
     target_arn = f"arn:aws:lambda:{region}:{account_id}:function:{function_name}"
 
-    fire_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+    fire_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
     schedule_name = _refresh_schedule_name(issue, iteration)
     schedule_group = _refresh_schedule_group_name()
 
