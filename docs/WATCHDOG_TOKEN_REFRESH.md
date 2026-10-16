@@ -2,9 +2,78 @@
 
 This document is the **debugger's field guide** for the issue #145
 token-refresh chain. The runtime test path is
-`tests/test_watchdog_credential_poll_e2e.py` (8 tests, < 2 s); the
-manual path is the dev-spot-instance smoke test described at the end
-of this file.
+`tests/test_watchdog_credential_poll_e2e.py` (Levels 1 + 2, ~10 s
+on a workstation); the manual full-mechanism path is the dev-spot
+smoke test wrapped in `scripts/test-dev-spot.sh` (Level 3, ~10 min,
+~$0.01).
+
+## Testing levels
+
+| Level | What it tests | Where | How to run | Cost | Time |
+|---|---|---|---|---|---|
+| **1** | Bash library, watchdog wiring, file format | `tests/test_watchdog_credential_poll_e2e.py` (Level 1 sections) | `pytest tests/test_watchdog_credential_poll_e2e.py` | $0 | < 2 s |
+| **2** | Real `aws ssm` round-trip on a workstation | `tests/test_watchdog_credential_poll_e2e.py` (Level 2 section) | `mise run test-integration` | ~$0.0003/run | ~10 s |
+| **3** | Full mechanism including the in-container `git push` / `gh` against the bind-mounted credentials | `scripts/test-dev-spot.sh` + this doc | `mise run test-dev-spot` | ~$0.01/run | ~10 min |
+
+The three levels are **additive** — each catches a different bug
+class. None of them subsumes the others.
+
+### Level 1 — unit with shim
+
+The 8 tests in the "Level 1" sections of the pytest file:
+
+- 3 static-analysis tests on `watchdog.sh` text (the call signatures
+  the watchdog passes to the poll library, the bind-mount source
+  vs. write path).
+- 2 file-format tests against the real `git credential fill` /
+  PyYAML parsers (the same parsers the container uses).
+- 3 subprocess tests with a fake `aws` shim in `PATH` (the diff-
+  rewrite loop, the no-op-on-stable behaviour, the SIGTERM trap).
+
+These run on every PR via the `Lint + test (Python)` CI job. They
+catch wiring typos, format drift, and shim-level control flow but
+NOT real AWS round-trips — the shim returns canned strings without
+ever talking to SSM.
+
+### Level 2 — real-AWS round-trip on a workstation
+
+The 1 test in the "Level 2" section of the pytest file:
+
+- `test_watchdog_poll_loop_rewrites_against_real_ssm` —
+  `@pytest.mark.integration`. Real `aws ssm put-parameter` writes
+  drive the round-trip; the library's `_bl_tokenpoll_read_ssm`
+  runs the real `aws` CLI binary against the real SSM service. The
+  test spawns a long-lived bash subprocess that runs the poll loop
+  with a 1 s interval, then drives 3 SSM value changes (A → B → C)
+  and asserts the bind-mounted files are rewritten each time.
+
+Skipped by default; opt in with `BLITZLOG_RUN_INTEGRATION=1` (or
+`--run-integration`). The scheduled `.github/workflows/integration-test.yml`
+job runs it nightly against the dev account via OIDC.
+
+Catches what Level 1 cannot: a `--with-decryption` flag drift on
+SecureString parameters, a region-default disagreement, a real
+network timeout on `ssm:GetParameter`, a bash-vs-Python encoding
+mismatch on the SSM value.
+
+### Level 3 — full mechanism on a dev spot instance
+
+`scripts/test-dev-spot.sh` (also documented below as a manual
+procedure). Launches a single t4g.medium spot from the already-baked
+dev AMI, runs the watchdog by hand with a 30 s poll interval, drives
+10 refresh iterations via real `aws lambda invoke --payload
+'{"action":"refresh",...}'` calls, observes the host-side
+`/root/.git-credentials.d/github` and
+`/root/gh-config/<instance>/hosts.yml` get rewritten within
+`BLITZLOG_TOKEN_POLL_INTERVAL` seconds of each refresh, and
+verifies the chain ends naturally at iteration 9 (no iter-10
+schedule is created).
+
+Catches what Levels 1 and 2 cannot: the in-container `git push` and
+`gh` calls against a real GitHub remote reading the bind-mounted
+credentials, the real `--with-decryption` SSM read, the real
+`docker run` lifecycle, and the real `set -e` abort path in the
+watchdog.
 
 ## What the mechanism is
 
@@ -63,68 +132,43 @@ remaining events fire and no-op against the missing SSM parameter
 | `infra/packer/scripts-docker-ubuntu/watchdog.sh` | The host-side lifecycle manager. Sources the poll library, starts the loop, SIGTERMs it on container exit. |
 | `infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter` + diff-checked in-place rewrite of the two bind-mounted credential files. |
 | `tests/test_watchdog_credential_poll.py` | 6 library-in-isolation tests. |
-| `tests/test_watchdog_credential_poll_e2e.py` | 8 e2e tests covering the watchdog's wiring + the container-side file format. |
+| `tests/test_watchdog_credential_poll_e2e.py` | 9 tests spanning Level 1 (8) + Level 2 (1). |
+| `tests/conftest.py` | Registers the `integration` marker + auto-skip hook. |
+| `scripts/test-dev-spot.sh` | Level 3 wrapper around the manual procedure below. |
+| `.github/workflows/integration-test.yml` | Nightly schedule for Level 2. |
+| `infra/bootstrap/integration-test-role.tf` | Narrow-OIDC IAM role for the nightly integration job. |
 
-## What the runtime tests cover
+## Nightly CI
 
-`tests/test_watchdog_credential_poll_e2e.py` runs in < 2 s on a
-workstation, no EC2, no AWS spend. Eight tests, four parts:
+`.github/workflows/integration-test.yml` runs Level 2 every night
+at 03:00 UTC. It uses OIDC to assume
+`blitzlog-integration-test-role` (narrow trust: only this
+workflow can assume it) with `ssm:GetParameter` / `PutParameter` /
+`DeleteParameter` scoped to
+`/blitzlog/<env>/ephemeral/github-token-integration-test-*`. A
+failed nightly run surfaces in the GitHub Actions UI under the
+`integration-test` workflow.
 
-1. **Static wiring** (3 tests) — parse `watchdog.sh` as text and
-   assert the call signatures:
-   - The initial credential writes use the
-     `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml`
-     helpers, with `git config --global credential.helper 'store
-     --file /root/.git-credentials.d/github'` right after.
-   - The `blitzlog_start_token_poll_loop` call passes the
-     bind-mounted paths and the `BLITZLOG_TOKEN_POLL_INTERVAL`
-     override.
-   - The bind mount `-v "/root/gh-config/${INSTANCE_ID}:/root/.config/gh"`
-     maps the host write path onto the container's read path.
+To trigger an ad-hoc run, use `gh workflow run integration-test.yml`
+from the repo root.
 
-2. **File format** (2 tests) — source the library, run
-   `_bl_tokenpoll_write_*`, then parse the output with the real
-   readers the container uses:
-   - `git credential fill` against the git-credential file
-     (HOME-isolated so no system cache interferes).
-   - PyYAML against the `gh` hosts.yml (the same YAML parser
-     `gh` uses upstream).
+## Manual Level 3 procedure
 
-3. **End-to-end through the watchdog's call signature** (2 tests) —
-   start the poll loop with the same args the watchdog uses, drive
-   an SSM-value change, assert the files rewrite (and that a
-   stable SSM value leaves them untouched).
-
-4. **SIGTERM cleanup** (1 test) — verbatim reproduction of
-   `watchdog.sh:277-294`'s `kill $PID` + 100 ms grace + SIGKILL
-   escalation. Asserts the loop is reaped within the grace window.
-
-These four parts together cover every wiring decision the
-watchdog makes about the poll library. A typo in the path
-arguments, a wrong bind-mount source, a hand-rolled `printf`
-replacing the library call, or a format drift on either side is
-caught at PR-review time without standing up an instance.
-
-## Manual smoke test (dev spot instance)
-
-Use this when you've changed something in the chain that the
-runtime tests can't see (e.g. the Lambda's `action == "refresh"`
-branch, a real `aws ssm get-parameter` against real AWS, a real
-`git push` against a real remote). Skips Packer entirely — uses
-the already-baked dev AMI.
+`scripts/test-dev-spot.sh` automates this. The manual version
+below is for operators who want to debug a specific iteration or
+inspect the host state mid-run.
 
 ### Cost and time
 
 - 1 × t4g.medium spot in ap-east-1 for ~10 min ≈ $0.01.
-- 5 refresh iterations × 30 s = 2.5 min observation; the full
-  10-iteration chain is ~5 min.
+- 10 refresh iterations × 35 s = ~6 min observation.
 - Total wall clock: ~10 min.
 
 ### Step 0 — pick a throwaway issue number
 
-Pick an issue number that is NOT in use as a blitzlog issue.
-The token's SSM param is namespaced by issue, so a throwaway
-number keeps the test isolated:
+Pick an issue number that is NOT in use as a blitzlog issue. The
+token's SSM param is namespaced by issue, so a throwaway number
+keeps the test isolated:
 
 ```bash
 ISSUE=999999
@@ -186,14 +230,14 @@ Pick a real image that's already pushed (any tag from a recent
 release will do — the watchdog only `docker load`s it):
 
 ```bash
-IMAGE_TAG=$(aws ssm get-parameter \
-    --name /blitzlog/dev/agent-image-tag \
-    --region ap-east-1 \
-    --query Parameter.Value --output text 2>/dev/null || echo "v0.5.0")
+IMAGE_TAG=$(aws ec2 describe-images \
+    --image-ids "$AMI_ID" \
+    --query 'Images[0].Tags[?Key==`AgentTag`].Value' \
+    --output text --region ap-east-1)
 ```
 
 Write the env files. Note `BLITZLOG_TOKEN_POLL_INTERVAL=30` is
-the override the user chose for this debug session.
+the override for the debug session.
 
 ```bash
 ssh -i ~/.ssh/blitzlog-dev.pem ubuntu@"$PUBLIC_IP" <<EOF
@@ -221,39 +265,23 @@ EOF
 ### Step 5 — seed SSM with a known initial token
 
 ```bash
-INITIAL_TOKEN=$(aws lambda invoke \
-    --function-name blitzlog-dev-get-token \
-    --payload '{}' \
-    --cli-binary-format raw-in-base64-out \
-    /tmp/initial.json \
-    --region ap-east-1 \
-    --query 'Payload' --output text 2>/dev/null \
-    | jq -r '.token // empty')
-# Or use any long-lived installation token from a GitHub App
-# you've already minted. The test only needs the loop to read a
-# value, not a real one.
+INITIAL_TOKEN="ghp_initial_debug_token_aaaa"
 aws ssm put-parameter \
     --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
     --type SecureString \
-    --value "${INITIAL_TOKEN:-ghp_initial_debug_token_aaaa}" \
+    --value "${INITIAL_TOKEN}" \
     --overwrite \
     --region ap-east-1
 ```
 
-### Step 6 — run the watchdog in the foreground
+### Step 6 — run the watchdog in the background
 
 In one terminal:
 
 ```bash
 ssh -i ~/.ssh/blitzlog-dev.pem ubuntu@"$PUBLIC_IP"
-sudo -E /usr/local/bin/watchdog.sh
+sudo nohup /usr/local/bin/watchdog.sh > /tmp/watchdog.out 2>&1 &
 ```
-
-The watchdog will:
-1. `sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz` — succeeds (the AMI bakes the image in).
-2. Read SSM, write `/root/.git-credentials.d/github` and `/root/gh-config/<instance>/hosts.yml`.
-3. Start the poll loop (you'll see `Started token refresh poll loop (pid=…, interval=30s)`).
-4. `sudo docker run --name blitzlog-agent …` — the container starts.
 
 In another terminal, watch the host log:
 
@@ -262,10 +290,18 @@ ssh -i ~/.ssh/blitzlog-dev.pem ubuntu@"$PUBLIC_IP" \
     'tail -f /var/log/backend-bootstrap.log'
 ```
 
+You should see within ~30 s:
+
+- `Started token refresh poll loop (pid=…, interval=30s)` (the
+  loop came up).
+- A first `Token change detected; rewriting credential files`
+  after the loop reads the seeded SSM value (the loop's first
+  tick always writes, even when the value matches `last`).
+
 ### Step 7 — drive a refresh
 
 In a third terminal, invoke the Lambda directly with
-`action == "refresh"` (the user's chosen driver):
+`action == "refresh"`:
 
 ```bash
 for ITER in 0 1 2 3 4 5 6 7 8 9; do
@@ -284,7 +320,7 @@ for ITER in 0 1 2 3 4 5 6 7 8 9; do
         --query 'StatusCode' --output text
     cat /tmp/refresh-${ITER}.json
     echo
-    sleep 30
+    sleep 35
 done
 ```
 
@@ -305,8 +341,7 @@ ssh -i ~/.ssh/blitzlog-dev.pem ubuntu@"$INSTANCE_ID" \
 You should see:
 - `Started token refresh poll loop (pid=…, interval=30s)` once.
 - `Token change detected; rewriting credential files` once per
-  successful refresh (after the 50-min-apart chain has been
-  re-issued at 30s intervals for the debug session).
+  successful refresh.
 - `Scheduled refresh event: name=refresh-issue-${ISSUE}-iter-…`
   per refresh invocation.
 
@@ -333,8 +368,6 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region ap-east-1
 aws ssm delete-parameter \
     --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
     --region ap-east-1
-# (Optional) clean up any leftover schedules in case iteration 9
-# was interrupted before the chain could end.
 for ITER in 0 1 2 3 4 5 6 7 8 9 10; do
     aws scheduler delete-schedule \
         --name "refresh-issue-${ISSUE}-iter-${ITER}" \
@@ -347,9 +380,10 @@ done
 
 | Symptom | Likely cause |
 |---|---|
-| `Token change detected` doesn't fire within 30 s | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
+| `Token change detected` doesn't fire within `BLITZLOG_TOKEN_POLL_INTERVAL` | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
 | File mtime updates but content is wrong | The library's printf format changed; check `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml` against `git credential fill` / `yaml.safe_load`. |
 | `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare `watchdog.sh:124` (mkdir) vs `watchdog.sh:133` (write) vs `watchdog.sh:254` (bind mount). |
 | Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/github-token-${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
 | `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
+| Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/bootstrap/`). |

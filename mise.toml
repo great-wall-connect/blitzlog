@@ -15,6 +15,14 @@ ln -sf "$(command -v python3)" /usr/local/bin/python
 description = "Run Python unit tests"
 run = "pip install -q -r requirements.txt && python -m pytest tests/ -v"
 
+[tasks.test-integration]
+description = "Level 2: real-AWS integration tests for the watchdog token-refresh mechanism. Requires AWS credentials with ssm:GetParameter, ssm:PutParameter, ssm:DeleteParameter on /blitzlog/<env>/ephemeral/github-token-integration-test-*. Sets BLITZLOG_RUN_INTEGRATION=1 to opt in to the @pytest.mark.integration test in tests/test_watchdog_credential_poll_e2e.py."
+run = "BLITZLOG_RUN_INTEGRATION=1 python -m pytest -m integration -v tests/test_watchdog_credential_poll_e2e.py"
+
+[tasks.test-dev-spot]
+description = "Level 3: launch a dev t4g.medium spot and drive the watchdog token-refresh mechanism end-to-end (full container-side git push / gh against the real bind mount). Requires AMI_ID, SUBNET_ID, SG_ID, KEYPAIR env vars; see scripts/test-dev-spot.sh and docs/WATCHDOG_TOKEN_REFRESH.md for the full procedure."
+run = "./scripts/test-dev-spot.sh"
+
 [tasks.lint]
 description = "Lint Python code (ruff + black)"
 run = "python -m pip install -q -r requirements-dev.txt && ruff check . && black --check ."

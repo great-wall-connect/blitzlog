@@ -1,9 +1,25 @@
-"""End-to-end tests for the watchdog's wiring of the token-refresh
-poll loop (issue #145).
+"""Tests for the watchdog's wiring of the token-refresh poll loop
+(issue #145). Part of the **3-level testing convention** for the
+mechanism (full taxonomy in ``docs/WATCHDOG_TOKEN_REFRESH.md``):
 
-These tests pin the contract between
-``infra/packer/scripts-docker-ubuntu/watchdog.sh`` and
-``infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh``.
+* **Level 1 — unit with shim.** This file's first 8 tests. Static
+  analysis of ``watchdog.sh`` text, format tests against the real
+  ``git credential fill`` / PyYAML parsers, and subprocess tests
+  with a fake ``aws`` shim. No real AWS. Runs in < 2 s on every PR.
+
+* **Level 2 — real-AWS round-trip on a workstation.** This file's
+  last test (``@pytest.mark.integration``). The library's
+  ``_bl_tokenpoll_read_ssm`` runs the real ``aws`` binary against
+  the real SSM service. Skipped by default; opt in with
+  ``BLITZLOG_RUN_INTEGRATION=1`` or ``--run-integration`` (see
+  ``conftest.py``). Runs in ~10 s, costs ~$0.0003 per run. A
+  scheduled GitHub Actions job runs Level 2 nightly against the
+  dev account (see ``.github/workflows/integration-test.yml``).
+
+* **Level 3 — full mechanism on a dev spot instance.** Not in this
+  file. Manual procedure + ``scripts/test-dev-spot.sh`` wrapper;
+  exercises the container-side ``git push`` / ``gh`` calls against
+  a real t4g.medium spot. ~10 min, ~$0.01 per run.
 
 The existing ``test_watchdog_credential_poll.py`` covers the poll
 library in isolation (the diff-rewrite loop, the SIGTERM trap, the
@@ -35,8 +51,7 @@ no-op-on-stable behaviour). This file covers the way the watchdog
      agent's ``git push`` / ``gh`` calls without breaking the SSM
      read; the existing tests don't catch it.
 
-The tests use a hybrid approach to match the existing
-``test_watchdog_credential_poll.py`` style:
+The Level 1 tests use a hybrid approach:
 
   * **Static analysis** (read ``watchdog.sh`` as text + regex) pins
     the path arguments and the bind-mount mapping. Drift on
@@ -54,11 +69,18 @@ The tests use a hybrid approach to match the existing
     (same args, same paths) — so a future refactor of the watchdog's
     call site is caught if it breaks the contract.
 
-The tests do NOT execute the full ``watchdog.sh`` end-to-end — that
-needs IMDS, dockerd, and a real GitHub App installation token. Those
-are covered by the dev-spot-instance smoke test documented in
-``docs/architecture/watchdog-token-refresh.md`` (Phase A of the
-issue #145 validation plan).
+The Level 2 test uses real ``aws ssm put-parameter`` /
+``aws ssm get-parameter`` (with ``--with-decryption``) calls
+against a UUID-suffixed test param. The library is sourced in the
+same bash subprocess, so the round-trip is real end-to-end: real
+``aws`` CLI → real SSM service → real SSM read in the library's
+poll loop → real in-place file rewrite.
+
+The Level 1 tests do NOT execute the full ``watchdog.sh`` end-to-end
+— that needs IMDS, dockerd, and a real GitHub App installation
+token. Those are covered by Level 3 (the dev-spot smoke test
+documented in ``docs/WATCHDOG_TOKEN_REFRESH.md`` and wrapped in
+``scripts/test-dev-spot.sh``).
 """
 
 from __future__ import annotations
@@ -66,8 +88,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import textwrap
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -167,7 +192,7 @@ def aws_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 # =====================================================================
-# Part 1 — Static analysis of watchdog.sh
+# Level 1 (1/4) — Static analysis of watchdog.sh
 # =====================================================================
 #
 # These tests read watchdog.sh as text and assert the path arguments
@@ -302,8 +327,8 @@ def test_watchdog_bind_mount_gh_config_source_matches_write_path() -> None:
 
 
 # =====================================================================
-# Part 2 — Subprocess: the file format survives `git credential fill`
-#          and YAML parsing.
+# Level 1 (2/4) — Subprocess: the file format survives `git credential
+#                fill` and YAML parsing.
 # =====================================================================
 #
 # The library's _bl_tokenpoll_write_git_creds and
@@ -426,9 +451,9 @@ def test_initial_gh_hosts_yml_is_parseable_yaml_with_oauth_token(
 
 
 # =====================================================================
-# Part 3 — Subprocess: the poll loop started with the watchdog's
-#          call signature rewrites (and does NOT rewrite) the
-#          bind-mounted files as expected.
+# Level 1 (3/4) — Subprocess: the poll loop started with the
+#                watchdog's call signature rewrites (and does NOT
+#                rewrite) the bind-mounted files as expected.
 # =====================================================================
 #
 # These are the same scenarios as test_watchdog_credential_poll.py
@@ -437,6 +462,16 @@ def test_initial_gh_hosts_yml_is_parseable_yaml_with_oauth_token(
 # contract (e.g. drops the poll interval env var, swaps the path
 # arguments) is caught here even though the library in isolation
 # still passes its own tests.
+#
+# These tests use a **fake `aws` shim** in PATH (see the
+# ``aws_shim`` fixture above). The shim is the Level 1 mock — it
+# returns canned SSM values without contacting AWS. The bash
+# subprocess the test spawns uses the shim's real ``aws`` binary
+# at ``PATH=$tmp_path/aws:$PATH``, so the library's
+# ``_bl_tokenpoll_read_ssm`` is exercised end-to-end *within the
+# test* (CLI argv shape, ``--with-decryption``, ``--query
+# Parameter.Value --output text``, ``2>/dev/null || echo ""``) but
+# never against the real SSM service. That round-trip is Level 2.
 
 
 def test_watchdog_signature_poll_loop_rewrites_files_on_ssm_change(
@@ -565,8 +600,9 @@ def test_watchdog_signature_poll_loop_does_not_rewrite_on_stable_ssm(
 
 
 # =====================================================================
-# Part 4 — Subprocess: the SIGTERM cleanup block from watchdog.sh
-#          reaps the loop within the documented grace window.
+# Level 1 (4/4) — Subprocess: the SIGTERM cleanup block from
+#                watchdog.sh reaps the loop within the documented
+#                grace window.
 # =====================================================================
 
 
@@ -633,3 +669,292 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
         f"stdout={r.stdout!r} stderr={r.stderr!r}"
     )
     assert "STILL_ALIVE" not in r.stdout
+
+
+# =====================================================================
+# Level 2 — Real-AWS round-trip on a workstation.
+# =====================================================================
+#
+# This test exercises the watchdog's poll library against the *real*
+# AWS SSM service. The library's `_bl_tokenpoll_read_ssm` runs the
+# real `aws` CLI binary in the bash subprocess's PATH (no shim) and
+# the test drives the round-trip by writing fresh values via the
+# real `aws ssm put-parameter`. A bug class that Level 1 cannot
+# catch — e.g. an SSM-side encryption/decryption mismatch, a
+# region-default disagreement, a network-level timeout, an
+# `--with-decryption` misconfiguration on SecureString parameters
+# — surfaces here.
+#
+# Skipped by default; opt in with `BLITZLOG_RUN_INTEGRATION=1` or
+# `--run-integration` (see `conftest.py`). The scheduled
+# `.github/workflows/integration-test.yml` runs this on a cron
+# against the dev account.
+#
+# Cost: ~$0.0003 per run (3 puts + a handful of gets; SecureString
+# storage < 1 s; cleanup deletes the param). Time: ~10 s with a
+# 1 s test poll interval.
+#
+# AWS permissions: `ssm:GetParameter`, `ssm:PutParameter`,
+# `ssm:DeleteParameter` on
+# `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/github-token-integration-test-*`.
+# The new `blitzlog-integration-test-role` in
+# `infra/bootstrap/integration-test-role.tf` grants exactly this.
+#
+# Each test run uses a unique param name (`<uuid8>`) so concurrent
+# runs (or a re-run after a crashed previous run that left a
+# param behind) never collide.
+
+
+def _aws_region() -> str:
+    """Resolve the AWS region for the test. The test reads
+    ``AWS_REGION`` (or ``AWS_DEFAULT_REGION``) from the env, falling
+    back to the project's default ``ap-east-1`` so a fresh
+    workstation run does not need any extra configuration.
+    """
+    return (
+        os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "ap-east-1"
+    )
+
+
+def _aws_cli() -> list[str]:
+    """Return the absolute path to the real ``aws`` CLI, or
+    ``["aws"]`` if the test runner already has it on PATH.
+
+    The Level 2 test deliberately uses the *real* ``aws`` binary
+    (no shim). If ``aws`` is not on PATH, the test fails loud here
+    rather than deep inside the bash subprocess where the error
+    message is harder to attribute.
+    """
+    aws = shutil.which("aws")
+    if not aws:
+        pytest.fail(
+            "`aws` CLI is not on PATH; the Level 2 test requires "
+            "the real AWS CLI to drive the SSM round-trip"
+        )
+    return [aws]
+
+
+def _ssm_put(name: str, value: str, region: str) -> None:
+    """Real ``aws ssm put-parameter`` call (no shim)."""
+    result = subprocess.run(
+        _aws_cli()
+        + [
+            "ssm",
+            "put-parameter",
+            "--name",
+            name,
+            "--type",
+            "SecureString",
+            "--value",
+            value,
+            "--overwrite",
+            "--region",
+            region,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"aws ssm put-parameter failed for {name}: "
+            f"rc={result.returncode} stderr={result.stderr!r}"
+        )
+
+
+def _ssm_delete(name: str, region: str) -> None:
+    """Real ``aws ssm delete-parameter`` call (no shim). Idempotent
+    — the test always cleans up even if the put failed.
+    """
+    subprocess.run(
+        _aws_cli()
+        + [
+            "ssm",
+            "delete-parameter",
+            "--name",
+            name,
+            "--region",
+            region,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.integration
+def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
+    """Level 2: the watchdog's poll loop rewrites the bind-mounted
+    credential files when the SSM value changes, *against the real
+    SSM service*.
+
+    The test spawns a long-lived bash subprocess that starts the
+    poll loop with a 1 s interval and then ``wait``s for the loop
+    PID. The Python test process drives the round-trip: real
+    ``aws ssm put-parameter`` to change the value, then ``time.sleep``
+    for the loop to tick and rewrite, then read the file. On
+    teardown the bash subprocess is SIGTERMed, the loop's TERM trap
+    fires, ``wait`` returns, the bash subprocess exits cleanly, and
+    the SSM param is deleted.
+
+    Bug class this catches (Level 1 cannot):
+
+      * ``--with-decryption`` flag drift on SecureString parameters.
+      * Region-default disagreement between the test runner and
+        the library's resolver.
+      * A network-level timeout on ``ssm:GetParameter`` (real
+        network, not a shim's ``echo "value"``).
+      * A bash-vs-Python encoding mismatch on the SSM value
+        (e.g. trailing newlines, null bytes) that the shim
+        cannot reproduce.
+
+    Cost: ~$0.0003 per run. Time: ~10 s.
+    """
+    region = _aws_region()
+    uuid8 = uuid.uuid4().hex[:8]
+    param_name = f"/blitzlog/dev/ephemeral/github-token-integration-test-{uuid8}"
+    value_a = "ghp_real_ssm_round_trip_aaaa"
+    value_b = "ghp_real_ssm_round_trip_bbbb"
+    value_c = "ghp_real_ssm_round_trip_cccc"
+
+    git_creds = tmp_path / "git-creds"
+    gh_hosts = tmp_path / "gh-hosts.yml"
+    git_creds.parent.mkdir(parents=True, exist_ok=True)
+
+    # Seed the files with a sentinel so the test can distinguish
+    # "the loop rewrote the file" from "the file was unchanged
+    # from the seed". The library's first tick always writes
+    # (a fresh restart where the files may not exist), so this
+    # seed does not affect the diff-rewrite logic.
+    git_creds.write_text("seed\n")
+    gh_hosts.write_text("seed\n")
+
+    # The bash snippet that runs the loop for the whole test. The
+    # `wait $BLITZLOG_TOKEN_POLL_PID` blocks until the loop dies;
+    # the SIGTERM trap on the bash subprocess cascades to the
+    # loop's `trap 'exit 0' TERM`, the wait returns, the bash
+    # subprocess exits with 0.
+    bash_snippet = textwrap.dedent(f"""
+        set -u
+        source {POLL_LIB}
+        blitzlog_start_token_poll_loop \\
+            "{param_name}" \\
+            "{region}" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            1
+        # On SIGTERM (Python's terminate()): kill the loop, let
+        # the trap fire, let `wait` return. This mirrors the
+        # watchdog's `watchdog.sh:277-294` SIGTERM block.
+        trap 'kill "${{BLITZLOG_TOKEN_POLL_PID}}" 2>/dev/null || true' TERM
+        wait "${{BLITZLOG_TOKEN_POLL_PID}}"
+        """)
+
+    bash_proc = subprocess.Popen(
+        ["bash", "-c", bash_snippet],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    put_done = False
+    try:
+        # Seed SSM with value A so the loop's first observation has
+        # something to read. Doing this BEFORE the loop starts would
+        # race the first tick; the loop starts and then we wait 2 s
+        # (the loop's 1 s interval + a margin) before the first
+        # put-then-read cycle. The first tick reads whatever is in
+        # SSM at that point (the seed value A) and writes it.
+        _ssm_put(param_name, value_a, region)
+        put_done = True
+
+        # Phase A: the loop should have observed value A by now
+        # (or on the next 1 s tick). Wait 2 s to be safe — the
+        # first tick is the slowest because the loop's `sleep 1`
+        # starts the moment `blitzlog_start_token_poll_loop` is
+        # called, but the SSM read takes ~50 ms.
+        time.sleep(2)
+        assert value_a in git_creds.read_text(), (
+            f"phase A: git-creds does not contain {value_a!r}; "
+            f"file content: {git_creds.read_text()!r}"
+        )
+        assert value_a in gh_hosts.read_text(), (
+            f"phase A: gh-hosts.yml does not contain {value_a!r}; "
+            f"file content: {gh_hosts.read_text()!r}"
+        )
+        assert "seed" not in git_creds.read_text(), (
+            "phase A: git-creds still has the seed; the poll loop "
+            "did not rewrite the file from the real SSM read"
+        )
+
+        # Phase B: overwrite SSM with value B. The loop's next
+        # tick (≤ 1 s away) reads the new value, sees the diff,
+        # rewrites both files.
+        _ssm_put(param_name, value_b, region)
+        time.sleep(2)
+        assert value_b in git_creds.read_text(), (
+            f"phase B: git-creds does not contain {value_b!r}; "
+            f"file content: {git_creds.read_text()!r}"
+        )
+        assert value_a not in git_creds.read_text(), (
+            f"phase B: git-creds still contains the old value "
+            f"{value_a!r}; the diff-rewrite path did not fire"
+        )
+        assert value_b in gh_hosts.read_text()
+        assert value_a not in gh_hosts.read_text()
+
+        # Phase C: one more overwrite to confirm the loop survives
+        # multiple refreshes (not just a single one).
+        _ssm_put(param_name, value_c, region)
+        time.sleep(2)
+        assert value_c in git_creds.read_text(), (
+            f"phase C: git-creds does not contain {value_c!r}; "
+            f"file content: {git_creds.read_text()!r}"
+        )
+        assert value_b not in git_creds.read_text()
+        assert value_c in gh_hosts.read_text()
+        assert value_b not in gh_hosts.read_text()
+    finally:
+        # Tear down the bash subprocess. terminate() sends SIGTERM
+        # which cascades to the loop's TERM trap. The wait in the
+        # bash snippet then returns and the bash subprocess exits
+        # with 0. The 5 s timeout covers a worst-case SSM read
+        # latency (the loop could be mid-sleep when SIGTERM fires).
+        bash_proc.terminate()
+        try:
+            bash_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            bash_proc.kill()
+            bash_proc.wait(timeout=5)
+        # Surface the bash subprocess's stderr if it exited non-zero
+        # in a way that is NOT the expected SIGTERM. Popen returns
+        # the negative signal number for a process killed by a
+        # signal; 143 = 128 + 15 = SIGTERM (the expected clean exit
+        # from our `terminate()` call). -15 is the same value as
+        # 143 in some subprocess.Popen versions, so we accept both.
+        accepted_clean_exits = {
+            -15,
+            -signal.SIGTERM,
+            signal.SIGTERM + 128,
+        }
+        if (
+            bash_proc.returncode not in accepted_clean_exits
+            and bash_proc.returncode != 0
+        ):
+            stderr_output = (
+                bash_proc.stderr.read().decode("utf-8", errors="replace")
+                if bash_proc.stderr
+                else ""
+            )
+            raise AssertionError(
+                f"bash subprocess exited with rc={bash_proc.returncode}; "
+                f"stderr: {stderr_output!r}"
+            )
+        # Always delete the test param, even on assertion failure.
+        # The `put_done` guard means we only attempt a delete if at
+        # least one put succeeded (so a network error before the
+        # first put doesn't surface as a confusing
+        # "ParameterNotFound" on delete).
+        if put_done:
+            _ssm_delete(param_name, region)
