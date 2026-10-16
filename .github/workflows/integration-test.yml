@@ -59,6 +59,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Debug OIDC sub claim (transient)
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+              | jq -r '.value')
+          # Decode JWT payload (segment 2 of 3, base64url).
+          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2)
+          # base64url → base64 padding.
+          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          PADDED="$PAYLOAD$(printf '=%.0s' $(seq 1 $PAD))"
+          echo "==== OIDC sub claim ===="
+          printf '%s' "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null \
+              | jq '{sub, aud, iss}'
+          echo "========================="
+
       - name: Install mise
         uses: jdx/mise-action@v4
 
@@ -78,24 +96,6 @@ jobs:
           # so only this workflow can assume it.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-integration-test-role
           aws-region: ap-east-1
-
-      - name: Debug OIDC sub claim (transient)
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
-        run: |
-          set -euo pipefail
-          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
-              | jq -r '.value')
-          # Decode JWT payload (segment 2 of 3, base64url).
-          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2)
-          # base64url → base64 padding.
-          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
-          PADDED="$PAYLOAD$(printf '=%.0s' $(seq 1 $PAD))"
-          echo "==== OIDC sub claim ===="
-          printf '%s' "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null \
-              | jq '{sub, aud, iss}'
-          echo "========================="
 
       - name: Run Level 2 integration test
         env:
