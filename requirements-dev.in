@@ -6,3 +6,4 @@ ruff
 black
 pip-tools
 python-multipart
+pyyaml
