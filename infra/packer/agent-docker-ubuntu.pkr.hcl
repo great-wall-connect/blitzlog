@@ -137,13 +137,6 @@ build {
 
   provisioner "shell" {
     script = "${path.root}/scripts-docker-ubuntu/02-systemd.sh"
-    # Issue #123: re-run the systemd install when the S3 abstraction
-    # changes, so the /usr/local/bin/ copy stays in sync with the
-    # source. Without this trigger, Packer would only re-run 02-systemd.sh
-    # when 02-systemd.sh itself changes (or on a fresh build).
-    triggers = [
-      filemd5("${path.root}/scripts-docker-ubuntu/blitzlog_uploader.sh"),
-    ]
   }
 
   # 4. Publish AMI id to SSM. Two-step post-processor:

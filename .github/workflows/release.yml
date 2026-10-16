@@ -379,7 +379,7 @@ jobs:
 
       - name: Configure AWS credentials (OIDC) for Packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # OIDC into the role that infra/bootstrap/packer-role.tf
           # provisions. Trust policy already covers any branch of
@@ -630,7 +630,7 @@ jobs:
       # with :latest.
       - name: Upload Lambda zip to release
         if: steps.detect.outputs.mode == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.detect.outputs.new_version }}
           files: infra/blitzlog-lambda.zip
@@ -772,7 +772,7 @@ jobs:
           rm -rf infra/modules/core/.build-venv
 
       - name: Configure AWS credentials (OIDC) for terraform
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # OIDC into the role provisioned by infra/bootstrap/
           # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)

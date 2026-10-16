@@ -126,7 +126,7 @@ jobs:
           terraform_version: 1.9.8
 
       - name: Configure AWS credentials (OIDC) for terraform
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # OIDC into the role provisioned by infra/bootstrap/
           # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)

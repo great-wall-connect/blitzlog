@@ -1,6 +1,16 @@
 # Lambda runtime dependencies (compiled to requirements.txt by pip-compile).
 # Edit this file to add or upgrade runtime packages.
+#
+# Alicloud SDKs are pulled in for Phase 2 (#84): the provider factory
+# dispatches `BLITZLOG_PROVIDER=alicloud` through `provider.alicloud.*`,
+# which talks to KMS / OSS / ECS. The OSS package is published as the
+# short `oss2` (the legacy `alibabacloud_oss2` namespace does not exist
+# on PyPI; `oss2` re-exports under both). KMS / ECS use Alibaba's
+# per-product SDK naming.
 boto3
 PyJWT
 cryptography
 requests
+alibabacloud_kms20160120
+alibabacloud_ecs20140526
+oss2
