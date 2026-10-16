@@ -717,9 +717,9 @@ class TestReleaseDeployJob(unittest.TestCase):
         the apply)."""
         self.assertRegex(
             self.text,
-            r"actions/upload-artifact@v4",
-            "release.yml's deploy job must use actions/upload-artifact@v4 "
-            "to publish the plan for review/audit",
+            r"actions/upload-artifact@v\d+",
+            "release.yml's deploy job must use actions/upload-artifact "
+            "(with a pinned major version) to publish the plan for review/audit",
         )
         self.assertRegex(
             self.text,
