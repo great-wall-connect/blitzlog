@@ -107,8 +107,18 @@ _bl_tokenpoll_rewrite_if_changed() {
         _bl_tokenpoll_log "Token change detected; rewriting credential files"
         _bl_tokenpoll_write_git_creds "$current" "$git_creds"
         _bl_tokenpoll_write_gh_hosts_yml "$current" "$gh_hosts"
+        printf '%s' "$current"
+    else
+        # Either no change, OR the SSM read returned an empty string
+        # (transient SSM hiccup, IAM role churn, etc.). In the empty-read
+        # case, return the last known good value so the caller's
+        # `last` doesn't reset to "". Without this, a single empty read
+        # would log "Token change detected; rewriting credential files"
+        # on the *next* non-empty read, even though the value is the
+        # same — a false positive visible in the bootstrap log on every
+        # empty read. The bind mount is untouched in both branches.
+        printf '%s' "$last"
     fi
-    printf '%s' "$current"
 }
 
 # --- public API --------------------------------------------------------
