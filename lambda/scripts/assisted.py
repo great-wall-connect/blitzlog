@@ -226,7 +226,7 @@ STT_LANGUAGE="${{STT_LANGUAGE}}"
 OPENCODE_SERVER_USERNAME="agent"
 OPENCODE_RESUMED="${{OPENCODE_RESUMED:-}}"
 OPENCODE_RESUMED_TITLE="${{OPENCODE_RESUMED_TITLE:-}}"
-GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}"
+GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
 ENVEOF
 
 # The unit is already enabled (Packer 02-systemd.sh). Just start it; the

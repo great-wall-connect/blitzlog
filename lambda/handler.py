@@ -35,7 +35,7 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import boto3
-from _env import SSM_PATH, logger
+from _env import ephemeral_token_ssm_param, logger
 from _version import get_version
 from auth import (
     get_github_app_token,
@@ -347,7 +347,7 @@ def lambda_handler(event, context):
 #   1. Mints a fresh token via the existing get_github_app_token path
 #      (re-uses the battle-tested code; no risk of drift).
 #   2. Overwrites the SecureString at
-#      /blitzlog/<env>/ephemeral/github-token-<N> with overwrite=True.
+#      /blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue> with overwrite=True.
 #   3. If iteration < 9, schedules the next event 50 min out.
 #
 # The chain is the entire refresh story. No central registry, no
@@ -487,7 +487,7 @@ def _handle_refresh(event: dict) -> dict:
             "body": json.dumps({"error": f"mint failed: {e}"}),
         }
 
-    ephemeral_param = f"{SSM_PATH}/ephemeral/github-token-{issue}"
+    ephemeral_param = ephemeral_token_ssm_param(repo, issue)
     try:
         get_secrets().put(
             ephemeral_param,

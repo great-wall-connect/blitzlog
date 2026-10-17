@@ -210,7 +210,7 @@ REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/la
 export AWS_DEFAULT_REGION=$REGION
 export BLITZLOG_ENV={_blitzlog_env()}
 
-_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "{ssm_root}/ephemeral/github-token-{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
+_CC_GITHUB_TOKEN=$(aws ssm get-parameter --name "{ssm_root}/ephemeral/gh/$REPO/{issue_number}" --with-decryption --query Parameter.Value --output text --region "$REGION")
 export _CC_GITHUB_TOKEN{api_key_block}
 
 STT_API_URL=$(aws ssm get-parameter --name "{ssm_root}/stt/api-url" --query Parameter.Value --output text --region "$REGION")

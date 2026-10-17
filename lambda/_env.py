@@ -102,6 +102,28 @@ BLITZLOG_ENV = _blitzlog_env()
 BLITZLOG_PROVIDER = _blitzlog_provider()
 SSM_PATH = _ssm_root()
 
+
+def ephemeral_token_ssm_param(repo: str, issue: int) -> str:
+    """Per-(env, owner, repo, issue) SSM path for the GitHub App
+    installation token the watchdog reads.
+
+    Was historically ``{SSM_PATH}/ephemeral/github-token-{issue}``,
+    which collided between two issues numbered the same in different
+    repos (e.g. blitzlog-example#2 and blitzlog-foo#2 would both write
+    to ``/blitzlog/dev/ephemeral/github-token-2``). The new
+    hierarchical namespace scopes by (owner, repo, issue) so
+    concurrent dev sessions in different repos don't trample each
+    other's tokens.
+
+    ``repo`` is the full name (``great-wall-connect/blitzlog-example``).
+    Returns ``{SSM_PATH}/ephemeral/gh/{owner}/{repo}/{issue}``.
+    """
+    owner, _, name = repo.partition("/")
+    if not name:
+        raise ValueError(f"repo must be in 'owner/name' form; got {repo!r}")
+    return f"{SSM_PATH}/ephemeral/gh/{owner}/{name}/{issue}"
+
+
 # Alicloud configuration (Phase 2 / #84). The four env vars
 # below are read on demand by `provider/alicloud.py` via the
 # `_aliyun_region()` / `_aliyun_access_key_id()` /
