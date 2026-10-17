@@ -145,7 +145,7 @@ at 03:00 UTC. It uses OIDC to assume
 `blitzlog-integration-test-role` (narrow trust: only this
 workflow can assume it) with `ssm:GetParameter` / `PutParameter` /
 `DeleteParameter` scoped to
-`/blitzlog/<env>/ephemeral/github-token-integration-test-*`. A
+`/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*`. A
 failed nightly run surfaces in the GitHub Actions UI under the
 `integration-test` workflow.
 
@@ -255,7 +255,7 @@ S3_LOGS_BUCKET=gwc-blitzlog-agent-logs
 SESSION_ARCHIVE_BUCKET=gwc-blitzlog-agent-logs
 SESSION_ARCHIVE_PREFIX=dev/sessions
 S3_LOG_PREFIX=dev/logs
-GITHUB_TOKEN_SSM_PARAM=/blitzlog/dev/ephemeral/github-token-${ISSUE}
+GITHUB_TOKEN_SSM_PARAM=/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}
 BLITZLOG_TOKEN_POLL_INTERVAL=30
 AWS_REGION=ap-east-1
 ENVEOF
@@ -267,7 +267,7 @@ EOF
 ```bash
 INITIAL_TOKEN="ghp_initial_debug_token_aaaa"
 aws ssm put-parameter \
-    --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
+    --name "/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}" \
     --type SecureString \
     --value "${INITIAL_TOKEN}" \
     --overwrite \
@@ -366,7 +366,7 @@ iteration 9.
 ```bash
 aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region ap-east-1
 aws ssm delete-parameter \
-    --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
+    --name "/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}" \
     --region ap-east-1
 for ITER in 0 1 2 3 4 5 6 7 8 9 10; do
     aws scheduler delete-schedule \
@@ -383,7 +383,7 @@ done
 | `Token change detected` doesn't fire within `BLITZLOG_TOKEN_POLL_INTERVAL` | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
 | File mtime updates but content is wrong | The library's printf format changed; check `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml` against `git credential fill` / `yaml.safe_load`. |
 | `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare `watchdog.sh:124` (mkdir) vs `watchdog.sh:133` (write) vs `watchdog.sh:254` (bind mount). |
-| Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/github-token-${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
+| Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
 | `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
 | Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/bootstrap/`). |
