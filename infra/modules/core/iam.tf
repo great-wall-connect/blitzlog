@@ -170,6 +170,36 @@ resource "aws_iam_role_policy" "lambda_policy" {
         # arbitrary other workloads).
         Resource = "arn:aws:scheduler:*:*:schedule/${aws_scheduler_schedule_group.token_refresh.name}/*"
       },
+      {
+        # Issue #145: EventBridge Scheduler requires iam:PassRole on
+        # the role passed as `RoleArn` to every CreateSchedule call.
+        # Without this Sid, the very first CreateSchedule at launch
+        # errors with AccessDeniedException
+        # (`User: .../blitzlog-<env>-lambda-role is not authorized to
+        # perform: iam:PassRole on resource:
+        # arn:aws:iam::...:role/blitzlog-<env>-scheduler-role`),
+        # the chain dies at iteration 0, and the bind mount's token
+        # never refreshes after the launch-time mint — exactly the
+        # regression observed on the dev instance (Ver=48, no
+        # further mints in 65+ min, see PR #154 commit "fix(lambda):
+        # schedule_next_refresh — diagnose and fix chain
+        # self-perpetuation").
+        #
+        # Condition on the scheduler service principal so a compromised
+        # Lambda can't pass the scheduler role to some other service
+        # (mirrors the Lambda + EC2 PassRole Sids above).
+        Sid    = "SchedulerRolePassRole"
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole",
+        ]
+        Resource = aws_iam_role.scheduler_role.arn
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "scheduler.amazonaws.com"
+          }
+        }
+      },
     ]
   })
 }
