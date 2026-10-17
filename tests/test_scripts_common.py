@@ -20,7 +20,7 @@ from _env import BLITZLOG_ENV
 class TestSSMSecretsScript(unittest.TestCase):
     def test_fetches_github_token_from_ephemeral_param(self):
         script = _read_secrets_from_ssm_script(42)
-        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/ephemeral/github-token-42", script)
+        self.assertIn(f"/blitzlog/{BLITZLOG_ENV}/ephemeral/gh/$REPO/42", script)
         self.assertIn("export _CC_GITHUB_TOKEN", script)
         self.assertIn("export OPENCODE_API_KEY", script)
         self.assertIn(f"export BLITZLOG_ENV={BLITZLOG_ENV}", script)
@@ -28,9 +28,9 @@ class TestSSMSecretsScript(unittest.TestCase):
     def test_different_issue_numbers(self):
         script13 = _read_secrets_from_ssm_script(13)
         script99 = _read_secrets_from_ssm_script(99)
-        self.assertIn("github-token-13", script13)
-        self.assertIn("github-token-99", script99)
-        self.assertNotIn("github-token-99", script13)
+        self.assertIn("ephemeral/gh/$REPO/13", script13)
+        self.assertIn("ephemeral/gh/$REPO/99", script99)
+        self.assertNotIn("ephemeral/gh/$REPO/99", script13)
 
     def test_fetches_stt_params(self):
         script = _read_secrets_from_ssm_script(42)
@@ -57,7 +57,7 @@ class TestSSMSecretsScript(unittest.TestCase):
 
         with patch.dict(os.environ, {"BLITZLOG_ENV": "dev"}):
             script = _read_secrets_from_ssm_script(42)
-        self.assertIn("/blitzlog/dev/ephemeral/github-token-42", script)
+        self.assertIn("/blitzlog/dev/ephemeral/gh/$REPO/42", script)
         self.assertIn("/blitzlog/dev/opencode/api-key", script)
         self.assertIn("export BLITZLOG_ENV=dev", script)
 

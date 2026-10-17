@@ -463,6 +463,62 @@ class TestDeployRole(unittest.TestCase):
             "(account-level action; per-parameter-path doesn't match)",
         )
 
+    def test_scheduler_schedule_group_management_present(self):
+        """The deploy policy MUST grant the EventBridge Scheduler
+        actions Terraform needs to manage the per-env token-refresh
+        schedule group created by infra/modules/core/scheduler.tf:69.
+
+        Without this Sid, the per-env apply errors mid-plan with
+        ``AccessDeniedException: ... scheduler:GetScheduleGroup on
+        resource: arn:aws:scheduler:...:schedule-group/blitzlog-dev-token-refresh``
+        (regression from PR #146 / issue #145 — the schedule group
+        was added but the deploy role was not updated to grant the
+        IAM actions Terraform needs to manage it)."""
+        body = _policy_body_for_role("deploy", self.text)
+        self.assertRegex(
+            body,
+            r'Sid\s*=\s*"SchedulerScheduleGroupManagement"',
+            "deploy policy must include a SchedulerScheduleGroupManagement Sid "
+            "for the per-env token-refresh schedule group (issue #145 / PR #146)",
+        )
+        # Scope the check to the Sid's body, like the other
+        # account-level read Sids above.
+        idx = re.search(r'Sid\s*=\s*"SchedulerScheduleGroupManagement"', body)
+        self.assertIsNotNone(idx)
+        idx = idx.start()
+        open_idx = body.rfind("{", 0, idx)
+        m = re.search(r"^      \}", body[open_idx:], re.MULTILINE)
+        self.assertIsNotNone(m)
+        sid_body = body[open_idx : open_idx + m.end()]
+        for required in (
+            "scheduler:GetScheduleGroup",
+            "scheduler:CreateScheduleGroup",
+            "scheduler:UpdateScheduleGroup",
+            "scheduler:DeleteScheduleGroup",
+            "scheduler:ListTagsForResource",
+        ):
+            self.assertIn(
+                f'"{required}"',
+                sid_body,
+                f"SchedulerScheduleGroupManagement Sid must grant {required} "
+                f"(needed to manage the per-env token-refresh schedule group)",
+            )
+        # Resource must be scoped to the per-env schedule group,
+        # not wildcard (matches the pattern of other narrowly-scoped
+        # Sids like SQSManagement, SNSManagement).
+        self.assertIn(
+            "schedule-group/blitzlog-*-token-refresh",
+            sid_body,
+            "SchedulerScheduleGroupManagement Sid must be scoped to "
+            "schedule-group/blitzlog-*-token-refresh (per-env; not wildcard)",
+        )
+        self.assertNotIn(
+            'Resource = "*"',
+            sid_body,
+            'SchedulerScheduleGroupManagement Sid must NOT use Resource = "*" '
+            "(scoped to the per-env schedule group; widening is a privilege creep)",
+        )
+
     def test_cloudwatch_logs_account_level_reads_present(self):
         """The deploy policy MUST include an account-level
         ``logs:DescribeLogGroups`` / ``logs:ListTagsForResource``
@@ -717,9 +773,9 @@ class TestReleaseDeployJob(unittest.TestCase):
         the apply)."""
         self.assertRegex(
             self.text,
-            r"actions/upload-artifact@v4",
-            "release.yml's deploy job must use actions/upload-artifact@v4 "
-            "to publish the plan for review/audit",
+            r"actions/upload-artifact@v\d+",
+            "release.yml's deploy job must use actions/upload-artifact "
+            "(with a pinned major version) to publish the plan for review/audit",
         )
         self.assertRegex(
             self.text,

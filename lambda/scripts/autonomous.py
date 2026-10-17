@@ -153,7 +153,8 @@ TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 OPENCODE_SERVER_USERNAME="agent"
-GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/github-token-${{ISSUE_NUMBER}}"
+GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
+GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
 ENVEOF
 
 # Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog

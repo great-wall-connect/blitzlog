@@ -4,7 +4,7 @@
 Issue #145 background: GitHub App installation tokens are capped to
 1 h regardless of the requested lifetime. The Lambda mints a fresh
 token every 50 min and writes it to
-``/blitzlog/<env>/ephemeral/github-token-<N>``. The watchdog on the
+``/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>``. The watchdog on the
 EC2 instance must pick up the new value and rewrite the bind-mounted
 credential files (``/root/.git-credentials.d/github`` and
 ``/root/.config/gh/hosts.yml``) so the next ``git push`` and
@@ -151,7 +151,7 @@ def test_poll_loop_rewrites_credential_files_when_ssm_value_changes(
         # Start the poll loop. We use a 50 ms interval so the test runs
         # in seconds, not the production 5 min.
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -223,7 +223,7 @@ def test_poll_loop_does_not_rewrite_when_ssm_value_unchanged(
 
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -286,7 +286,7 @@ def test_poll_loop_survives_ssm_error_and_keeps_polling(
 
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -322,7 +322,7 @@ def test_poll_loop_terminates_cleanly_on_sigterm(aws_shim: Path) -> None:
     """
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{aws_shim}/git-creds" \\
             "{aws_shim}/gh-hosts" \\

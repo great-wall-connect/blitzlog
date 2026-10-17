@@ -21,7 +21,7 @@ import base64
 import os
 import uuid
 
-from _env import BLITZLOG_ENV, SSM_PATH, logger
+from _env import BLITZLOG_ENV, ephemeral_token_ssm_param, logger
 from botocore.exceptions import ClientError
 from provider import (
     LaunchSpec,
@@ -224,7 +224,7 @@ def launch_ec2_spot_instance(
       5. Builds a `LaunchSpec` and asks the compute provider to
          launch it (with spot + on-demand fallback).
     """
-    ephemeral_param = f"{SSM_PATH}/ephemeral/github-token-{issue_number}"
+    ephemeral_param = ephemeral_token_ssm_param(repo, issue_number)
     get_secrets().put(
         ephemeral_param,
         github_token,

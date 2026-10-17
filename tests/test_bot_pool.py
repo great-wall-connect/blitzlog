@@ -3,7 +3,7 @@
 import json
 import os
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import provider
@@ -108,7 +108,7 @@ class TestAcquireBotToken(unittest.TestCase):
             ]
         )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         lock_body = json.dumps(
             {
                 "instance_id": "i-other",
@@ -142,7 +142,7 @@ class TestAcquireBotToken(unittest.TestCase):
             ]
         )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         lock_body = json.dumps(
             {
                 "instance_id": "i-other",
@@ -170,7 +170,7 @@ class TestAcquireBotToken(unittest.TestCase):
             ]
         )
 
-        stale_time = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        stale_time = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         lock_body = json.dumps(
             {
                 "instance_id": "i-crashed",
@@ -201,7 +201,7 @@ class TestAcquireBotToken(unittest.TestCase):
             ]
         )
 
-        recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        recent_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         lock_body = json.dumps(
             {
                 "instance_id": "i-active",

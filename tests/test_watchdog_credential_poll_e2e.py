@@ -502,7 +502,7 @@ def test_watchdog_signature_poll_loop_rewrites_files_on_ssm_change(
     snippet = textwrap.dedent(f"""
         # Same signature as watchdog.sh:234-239.
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -571,7 +571,7 @@ def test_watchdog_signature_poll_loop_does_not_rewrite_on_stable_ssm(
 
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -634,7 +634,7 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
     # want to catch.
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -696,7 +696,7 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
 #
 # AWS permissions: `ssm:GetParameter`, `ssm:PutParameter`,
 # `ssm:DeleteParameter` on
-# `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/github-token-integration-test-*`.
+# `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-*`.
 # The new `blitzlog-integration-test-role` in
 # `infra/bootstrap/integration-test-role.tf` grants exactly this.
 #
@@ -814,7 +814,9 @@ def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
     """
     region = _aws_region()
     uuid8 = uuid.uuid4().hex[:8]
-    param_name = f"/blitzlog/dev/ephemeral/github-token-integration-test-{uuid8}"
+    param_name = (
+        f"/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-{uuid8}"
+    )
     value_a = "ghp_real_ssm_round_trip_aaaa"
     value_b = "ghp_real_ssm_round_trip_bbbb"
     value_c = "ghp_real_ssm_round_trip_cccc"
@@ -958,3 +960,91 @@ def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
         # "ParameterNotFound" on delete).
         if put_done:
             _ssm_delete(param_name, region)
+
+
+# =====================================================================
+# Level 1 (5/5) — Static analysis: instance teardown deletes the
+#                SSM token + per-issue schedule group, and does so
+#                before terminate-instances.
+# =====================================================================
+
+
+def test_watchdog_teardown_deletes_ssm_token() -> None:
+    """The watchdog's post-container cleanup block must delete the
+    per-issue SSM token. Without this, tokens accumulate in SSM
+    indefinitely (one per instance that ever ran) — see issue
+    #145 + the cleanup gap surfaced by PR #154.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    assert "aws ssm delete-parameter" in src, (
+        "watchdog.sh does not delete the per-issue SSM token at "
+        "instance teardown. Tokens will accumulate in SSM "
+        "indefinitely."
+    )
+    # The delete must be conditional on the env var so an older
+    # AMI that didn't have the env var (or a test that doesn't
+    # source /etc/blitzlog.env) doesn't blow up.
+    assert "GITHUB_TOKEN_SSM_PARAM" in src, (
+        "watchdog.sh's SSM delete must be guarded by the "
+        "GITHUB_TOKEN_SSM_PARAM env var (set by the Lambda's "
+        "user-data)."
+    )
+
+
+def test_watchdog_teardown_deletes_per_issue_schedule_group() -> None:
+    """The watchdog's post-container cleanup must call
+    `aws scheduler delete-schedule-group` on the per-issue group
+    (set by the Lambda's `GITHUB_TOKEN_SCHED_GROUP` env var).
+
+    Why a group delete and not a per-iteration delete loop:
+    - One AWS API call vs. up to 11.
+    - No off-by-one risk (the chain's iter-9 endpoint is the
+      last scheduled hop, but the loop boundary was a known
+      footgun in scripts/test-dev-spot.sh).
+    - Per-issue scope means one instance's cleanup cannot nuke
+      another instance's chain (the previous per-env group
+      design had this cross-instance interference).
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    assert "aws scheduler delete-schedule-group" in src, (
+        "watchdog.sh must delete the per-issue schedule group at "
+        "instance teardown (single cascade-delete vs. iterating "
+        "iter-0..9). Per-issue scope prevents one instance's "
+        "cleanup from nuking another instance's chain."
+    )
+    # Must use the env var the Lambda passes in, not a hard-coded
+    # group name.
+    assert "GITHUB_TOKEN_SCHED_GROUP" in src, (
+        "watchdog.sh's schedule-group delete must use the "
+        "GITHUB_TOKEN_SCHED_GROUP env var (passed by the Lambda's "
+        "user-data heredoc), not a hard-coded group name."
+    )
+
+
+def test_watchdog_teardown_aws_state_runs_before_terminate_instances() -> None:
+    """Order matters: the SSM delete + schedule-group delete MUST
+    appear before `aws ec2 terminate-instances` in the watchdog
+    source. Once terminate-instances is called, the instance is
+    shutting down and subsequent AWS calls from this script may
+    fail. The dev-spot test's cleanup function (scripts/test-dev-spot.sh)
+    doesn't have this constraint because it runs outside the
+    instance; the watchdog does.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    ssm_pos = src.find("aws ssm delete-parameter")
+    sched_pos = src.find("aws scheduler delete-schedule-group")
+    term_pos = src.find("aws ec2 terminate-instances")
+    assert ssm_pos > 0, "aws ssm delete-parameter not present in watchdog.sh"
+    assert (
+        sched_pos > 0
+    ), "aws scheduler delete-schedule-group not present in watchdog.sh"
+    assert term_pos > 0, "aws ec2 terminate-instances not present in watchdog.sh"
+    assert ssm_pos < term_pos, (
+        f"SSM delete (pos {ssm_pos}) must run BEFORE "
+        f"terminate-instances (pos {term_pos}); once terminate runs "
+        "the instance is shutting down and the SSM call may fail."
+    )
+    assert sched_pos < term_pos, (
+        f"schedule-group delete (pos {sched_pos}) must run BEFORE "
+        f"terminate-instances (pos {term_pos}); same reason."
+    )

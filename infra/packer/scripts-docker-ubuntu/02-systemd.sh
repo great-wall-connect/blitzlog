@@ -42,6 +42,12 @@ sudo chmod 0755 /usr/local/bin/watchdog.sh
 sudo cp /tmp/blitzlog-uploader.sh /usr/local/bin/blitzlog_uploader.sh
 sudo chmod 0755 /usr/local/bin/blitzlog_uploader.sh
 
+# Install the host-side token-refresh poll loop (issue #145). Sourced
+# by watchdog.sh at boot to keep the bind-mounted GitHub credential
+# files in sync with the Lambda's 50-min refresh chain.
+sudo cp /tmp/blitzlog-token-poll.sh /usr/local/bin/blitzlog_token_poll.sh
+sudo chmod 0755 /usr/local/bin/blitzlog_token_poll.sh
+
 # systemd unit that runs the watchdog on instance start. The watchdog
 # runs the blitzlog-agent container, waits for it to exit, then does
 # all AWS cleanup (S3 upload + EC2 terminate + bot-lock release).

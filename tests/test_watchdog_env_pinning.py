@@ -56,7 +56,7 @@ ASSISTED_PY = os.path.join(REPO_ROOT, "lambda/scripts/assisted.py")
 # block in watchdog.sh.
 WATCHDOG_SELF_SET = frozenset(
     {
-        "GITHUB_TOKEN",  # from /blitzlog/$BLITZLOG_ENV/ephemeral/github-token-$ISSUE_NUMBER
+        "GITHUB_TOKEN",  # from /blitzlog/$BLITZLOG_ENV/ephemeral/gh/$REPO/$ISSUE_NUMBER
         "OPENCODE_SERVER_PASSWORD",  # generated at watchdog.sh:106 by `openssl rand -hex 16`
     }
 )

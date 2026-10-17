@@ -24,6 +24,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ClientError
+
 
 class TestLambdaHandlerBotPool(unittest.TestCase):
     @patch("handler._update_lock_instance_id")
@@ -343,7 +345,7 @@ class TestRefreshBranch(unittest.TestCase):
     mints a fresh GitHub App token via the existing
     `get_github_app_token()` helper (re-uses the battle-tested mint
     path; no risk of drift) and overwrites the SecureString at
-    `/blitzlog/<env>/ephemeral/github-token-<N>`. The chain self-
+    `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`. The chain self-
     perpetuates up to `TOKEN_REFRESH_MAX_ITERATIONS` (10) hops.
 
     These tests mock the boto3 client singletons inside `handler.py`
@@ -367,7 +369,14 @@ class TestRefreshBranch(unittest.TestCase):
         os.environ["AWS_REGION"] = "ap-east-1"
         # Reset the module-level boto3 client cache so each test gets
         # a fresh mock. Without this, the cache leaks across tests and
-        # the patches below are no-ops.
+        # the patches below are no-ops. Force the import first so
+        # the cache reset works for tests that don't use @patch
+        # decorators (the decorator triggers the import; raw
+        # `with patch(...)` does not). We assign to a dummy to keep
+        # the import in scope; the actual `handler` reference below
+        # resolves it via `sys.modules` so the linter doesn't see an
+        # "unused import" on the bare form.
+        import handler as _h_unused  # noqa: F401
 
         handler = sys.modules["handler"]
         handler._scheduler_client = None
@@ -483,6 +492,108 @@ class TestRefreshBranch(unittest.TestCase):
         mock_mint.assert_called_once()
         mock_secrets.return_value.put.assert_called_once()  # token still written
         mock_schedule.assert_not_called()  # chain ends
+
+    def test_refresh_schedule_group_name_is_per_issue(self):
+        """The schedule group name must be per-(env, repo, issue) so the
+        watchdog's per-instance cleanup (delete-schedule-group) only
+        affects this instance's chain. Two different issues must
+        produce two different group names even within the same env.
+        """
+        import os
+
+        from handler import _refresh_schedule_group_name
+
+        os.environ["BLITZLOG_ENV"] = "dev"
+        a = _refresh_schedule_group_name("octocat/Hello-World", 145)
+        b = _refresh_schedule_group_name("octocat/Hello-World", 146)
+        c = _refresh_schedule_group_name("octocat/Other-Repo", 145)
+
+        # Format: blitzlog-<env>-token-refresh-<16 hex>
+
+        for name in (a, b, c):
+            self.assertRegex(
+                name,
+                r"^blitzlog-dev-token-refresh-[0-9a-f]{16}$",
+                f"group name must match the per-issue pattern: {name!r}",
+            )
+        # Different issues / repos / envs must produce different hashes.
+        self.assertNotEqual(a, b, "different issue numbers must hash differently")
+        self.assertNotEqual(a, c, "different repos must hash differently")
+        self.assertNotEqual(b, c)
+
+    def test_schedule_next_refresh_creates_group_on_first_call(self):
+        """On the first CreateSchedule for a given (env, repo, issue),
+        the per-issue group doesn't exist yet. schedule_next_refresh
+        must catch the ResourceNotFoundException, call
+        CreateScheduleGroup, then retry CreateSchedule.
+
+        We assert the call sequence: CreateSchedule → (ResourceNotFound)
+        → CreateScheduleGroup → CreateSchedule.
+        """
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        # First CreateSchedule: ResourceNotFoundException (group
+        # missing). Second CreateSchedule: success.
+        not_found = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "no group"}},
+            "CreateSchedule",
+        )
+        client.create_schedule.side_effect = [not_found, None]
+
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+
+        # CreateSchedule called twice (initial + retry after group create)
+        self.assertEqual(client.create_schedule.call_count, 2)
+        # CreateScheduleGroup called once
+        client.create_schedule_group.assert_called_once()
+        # Both CreateSchedule calls used the same GroupName (the
+        # per-issue hashed name)
+        first_call_group = client.create_schedule.call_args_list[0].kwargs["GroupName"]
+        second_call_group = client.create_schedule.call_args_list[1].kwargs["GroupName"]
+        create_group_call_name = client.create_schedule_group.call_args.kwargs["Name"]
+        self.assertEqual(first_call_group, second_call_group)
+        self.assertEqual(first_call_group, create_group_call_name)
+
+    def test_schedule_next_refresh_propagates_non_notfound_errors(self):
+        """Only ResourceNotFoundException should trigger the
+        group-create retry. Other ClientErrors (AccessDenied, etc.)
+        must propagate so the chain's failure logging in
+        _handle_refresh fires."""
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        client.create_schedule.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "nope"}},
+            "CreateSchedule",
+        )
+
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+            self.assertRaises(ClientError) as cm,
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+        self.assertEqual(
+            cm.exception.response["Error"]["Code"],
+            "AccessDeniedException",
+        )
+        # Critical: the group-create retry must NOT have run.
+        client.create_schedule_group.assert_not_called()
 
     def test_refresh_branch_rejects_missing_repo(self):
         """A refresh payload without a `repo` must 400 — the mint
@@ -622,7 +733,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
             sts_client if service == "sts" else scheduler_client
         )
 
-        before = _dt.datetime.now(_dt.timezone.utc)
+        before = _dt.datetime.now(_dt.UTC)
         schedule_next_refresh(
             issue=145,
             instance="i-abc",
@@ -630,7 +741,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
             repo="octocat/Hello-World",
             delay_seconds=3000,
         )
-        after = _dt.datetime.now(_dt.timezone.utc)
+        after = _dt.datetime.now(_dt.UTC)
 
         scheduler_client.create_schedule.assert_called_once()
         kwargs = scheduler_client.create_schedule.call_args.kwargs
@@ -648,7 +759,7 @@ class TestScheduleNextRefresh(unittest.TestCase):
         # Pull the timestamp out and assert it's ~50 min from now.
         ts_str = kwargs["ScheduleExpression"].removeprefix("at(").removesuffix(")")
         fire_at = _dt.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S").replace(
-            tzinfo=_dt.timezone.utc
+            tzinfo=_dt.UTC
         )
         expected_min = before + _dt.timedelta(seconds=3000) - _dt.timedelta(seconds=2)
         expected_max = after + _dt.timedelta(seconds=3000) + _dt.timedelta(seconds=2)

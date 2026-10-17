@@ -354,6 +354,25 @@ fi
 # Clean up container
 sudo docker rm -f blitzlog-agent || true
 
+# Clean up instance-owned AWS state BEFORE terminating this instance.
+# Once terminate-instances runs, the instance is shutting down and
+# subsequent AWS calls from this script may fail. Both cleanups are
+# idempotent (the SSM delete is per-issue; the schedule group delete
+# cascade-deletes every refresh-event schedule for this instance).
+log "Tearing down instance-owned AWS state"
+if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    log "Deleting SSM token at ${GITHUB_TOKEN_SSM_PARAM}"
+    aws ssm delete-parameter \
+        --name "${GITHUB_TOKEN_SSM_PARAM}" \
+        --region "$REGION" 2>/dev/null || true
+fi
+if [ -n "${GITHUB_TOKEN_SCHED_GROUP:-}" ]; then
+    log "Deleting schedule group ${GITHUB_TOKEN_SCHED_GROUP} (cascade-deletes all chain events)"
+    aws scheduler delete-schedule-group \
+        --name "${GITHUB_TOKEN_SCHED_GROUP}" \
+        --region "$REGION" 2>/dev/null || true
+fi
+
 # Terminate the EC2 instance
 log "Terminating instance ${INSTANCE_ID}"
 aws ec2 terminate-instances \

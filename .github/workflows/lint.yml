@@ -38,6 +38,14 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -q -r requirements.txt
 
+      # Pin ruff to the version the codebase is currently compliant
+      # with. requirements-dev.txt pins the version dependabot bumps
+      # to, but the codebase may be ahead of the pin (e.g. when this
+      # PR is preparing for an incoming dependabot ruff bump). The
+      # dev-dependency pin catches up when the bump lands.
+      - name: Install pinned ruff
+        run: python -m pip install -q -U 'ruff==0.17.0'
+
       - name: Ruff
         run: python -m ruff check .
 

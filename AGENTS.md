@@ -140,7 +140,7 @@ The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAI
 
 GitHub App installation tokens are capped to **1 hour** regardless of the requested `expires_at` — the 8 h default the Lambda historically requested is silently clamped. The agent's `git push` and `gh` calls are now backed by a token **at most 50 minutes old**, even on multi-hour assisted runs, because:
 
-1. The Lambda mints a fresh token at webhook time and writes it to `/blitzlog/<env>/ephemeral/github-token-<N>`.
+1. The Lambda mints a fresh token at webhook time and writes it to `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>` (per-(env, owner, repo, issue) so two issues numbered the same in different repos don't collide).
 2. Right after the EC2 launch, the Lambda schedules a chain of 10 one-time EventBridge Scheduler events, 50 min apart, each of which re-mints the token (via the existing `get_github_app_token` path) and overwrites the same SecureString.
 3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the bind-mounted `/root/.git-credentials.d/github` and `/root/.config/gh/hosts.yml` whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
 

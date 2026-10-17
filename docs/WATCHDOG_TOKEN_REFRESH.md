@@ -7,6 +7,59 @@ on a workstation); the manual full-mechanism path is the dev-spot
 smoke test wrapped in `scripts/test-dev-spot.sh` (Level 3, ~10 min,
 ~$0.01).
 
+> **Companion visual:** [`docs/architecture/auth-overview.html`](architecture/auth-overview.html)
+> (renders to `auth-overview.png`) shows the four-layer lifecycle
+> (launch-time mint, EC2 boot, chain self-perpetuation, 5-min poll)
+> at a glance. Read this doc when you need to debug; read the
+> diagram when you need to orient.
+
+## Self-perpetuation status (current)
+
+**Healthy** as of PR #154. The chain mints every 50 min as designed;
+the first auto-mint lands at `instance_launch + 50 min`, and the
+bind-mount picks it up within the next 5-min poll. A 60-min
+dev-instance monitor will see:
+
+- `Ver=1` for the first ~50 min
+- `Ver=2` with a fresh `iat` at the +50-min mark
+- `match=True` between SSM and bind mount on every iteration
+- The poll-loop log fires "Token change detected" exactly once
+  (on the genuine rotation), not on every 5-min tick
+
+The `iam:PassRole` regression that killed the chain at iteration 0
+on the dev instance is fixed in PR #154 commit `b8152e2` and
+pinned by `tests/test_lambda_iam.py`.
+
+### Instance teardown: one-call group delete
+
+The watchdog's post-container cleanup block cascade-deletes every
+chain event for the instance in a single AWS API call. The flow:
+
+1. `aws ssm delete-parameter` on the per-issue token
+   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
+2. `aws scheduler delete-schedule-group` on the per-issue group
+   (`blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`) —
+   cascade-deletes all 10 chain events for this instance
+3. `aws ec2 terminate-instances`
+
+The per-issue group name is hashed from
+`(owner, repo, issue)` (16 hex chars of SHA-256) so two concurrent
+instances in the same env never share a group. One instance's
+cleanup cannot nuke another instance's chain. The per-issue scope
+also matches the per-issue SSM namespace shape.
+
+The order matters: steps 1 and 2 run **before** step 3. Once
+`terminate-instances` is called, the instance is shutting down and
+subsequent AWS calls from this script may fail. (The dev-spot
+test's cleanup function at `scripts/test-dev-spot.sh` doesn't have
+this constraint because it runs **outside** the instance; the
+watchdog runs **inside** it.)
+
+Pinned by `tests/test_watchdog_credential_poll_e2e.py`:
+`test_watchdog_teardown_deletes_ssm_token`,
+`test_watchdog_teardown_deletes_per_issue_schedule_group`,
+`test_watchdog_teardown_aws_state_runs_before_terminate_instances`.
+
 ## Testing levels
 
 | Level | What it tests | Where | How to run | Cost | Time |
@@ -145,7 +198,7 @@ at 03:00 UTC. It uses OIDC to assume
 `blitzlog-integration-test-role` (narrow trust: only this
 workflow can assume it) with `ssm:GetParameter` / `PutParameter` /
 `DeleteParameter` scoped to
-`/blitzlog/<env>/ephemeral/github-token-integration-test-*`. A
+`/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*`. A
 failed nightly run surfaces in the GitHub Actions UI under the
 `integration-test` workflow.
 
@@ -255,7 +308,7 @@ S3_LOGS_BUCKET=gwc-blitzlog-agent-logs
 SESSION_ARCHIVE_BUCKET=gwc-blitzlog-agent-logs
 SESSION_ARCHIVE_PREFIX=dev/sessions
 S3_LOG_PREFIX=dev/logs
-GITHUB_TOKEN_SSM_PARAM=/blitzlog/dev/ephemeral/github-token-${ISSUE}
+GITHUB_TOKEN_SSM_PARAM=/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}
 BLITZLOG_TOKEN_POLL_INTERVAL=30
 AWS_REGION=ap-east-1
 ENVEOF
@@ -267,7 +320,7 @@ EOF
 ```bash
 INITIAL_TOKEN="ghp_initial_debug_token_aaaa"
 aws ssm put-parameter \
-    --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
+    --name "/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}" \
     --type SecureString \
     --value "${INITIAL_TOKEN}" \
     --overwrite \
@@ -366,7 +419,7 @@ iteration 9.
 ```bash
 aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region ap-east-1
 aws ssm delete-parameter \
-    --name "/blitzlog/dev/ephemeral/github-token-${ISSUE}" \
+    --name "/blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE}" \
     --region ap-east-1
 for ITER in 0 1 2 3 4 5 6 7 8 9 10; do
     aws scheduler delete-schedule \
@@ -383,7 +436,7 @@ done
 | `Token change detected` doesn't fire within `BLITZLOG_TOKEN_POLL_INTERVAL` | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
 | File mtime updates but content is wrong | The library's printf format changed; check `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml` against `git credential fill` / `yaml.safe_load`. |
 | `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare `watchdog.sh:124` (mkdir) vs `watchdog.sh:133` (write) vs `watchdog.sh:254` (bind mount). |
-| Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/github-token-${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
+| Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
 | `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
 | Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/bootstrap/`). |

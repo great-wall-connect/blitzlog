@@ -3,7 +3,7 @@
 import base64
 import os
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from auth import (
@@ -18,7 +18,7 @@ def _expires_at_to_utc(value: str) -> datetime:
     datetime. Centralised so the lifetime tests don't repeat the
     format dance (and the assumption that GitHub echoes the format
     back untouched — see #114)."""
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 class TestGetGithubAppToken(unittest.TestCase):
@@ -37,9 +37,9 @@ class TestGetGithubAppToken(unittest.TestCase):
         mock_post.return_value.json.return_value = {"token": "ghp_abc123"}
         mock_post.return_value.raise_for_status = MagicMock()
 
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         result = get_github_app_token("owner/repo")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         self.assertEqual(result, "ghp_abc123")
         mock_jwt_encode.assert_called_once()
@@ -75,9 +75,9 @@ class TestGetGithubAppToken(unittest.TestCase):
         mock_post.return_value.json.return_value = {"token": "t"}
         mock_post.return_value.raise_for_status = MagicMock()
 
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         get_github_app_token("org/very-specific-repo")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         body = mock_post.call_args.kwargs["json"]
         self.assertEqual(len(body["repositories"]), 1)
@@ -119,9 +119,9 @@ class TestGetGithubAppToken(unittest.TestCase):
         mock_post.return_value.raise_for_status = MagicMock()
 
         with patch.dict(os.environ, {"GITHUB_TOKEN_LIFETIME_HOURS": "2"}):
-            before = datetime.now(timezone.utc)
+            before = datetime.now(UTC)
             get_github_app_token("owner/repo")
-            after = datetime.now(timezone.utc)
+            after = datetime.now(UTC)
 
         body = mock_post.call_args.kwargs["json"]
         expires_at = _expires_at_to_utc(body["expires_at"])

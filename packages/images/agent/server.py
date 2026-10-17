@@ -16,7 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 
@@ -60,11 +60,7 @@ def _resolve_ffmpeg_bin():
 
 
 def _log(event):
-    ts = (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    ts = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     sys.stderr.write(f"{ts} {event}\n")
     sys.stderr.flush()
 

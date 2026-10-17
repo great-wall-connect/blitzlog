@@ -27,7 +27,7 @@ import ipaddress
 import json
 import os
 import socket
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from _env import BOT_POOL_SSM_PATH, logger
@@ -218,9 +218,7 @@ def _get_lock(sender_login: str, bot_name: str, bucket: str) -> dict | None:
         raise
     data = json.loads(body.decode())
     acquired_at = datetime.fromisoformat(data["acquired_at"])
-    if datetime.now(timezone.utc) - acquired_at > timedelta(
-        hours=BOT_POOL_LOCK_TTL_HOURS
-    ):
+    if datetime.now(UTC) - acquired_at > timedelta(hours=BOT_POOL_LOCK_TTL_HOURS):
         logger.info(
             "Stale lock for %s (acquired %s), treating as free",
             bot_name,
@@ -255,7 +253,7 @@ def acquire_bot_token(
                 "instance_id": instance_id,
                 "issue_number": issue_number,
                 "repo": repo,
-                "acquired_at": datetime.now(timezone.utc).isoformat(),
+                "acquired_at": datetime.now(UTC).isoformat(),
             }
         )
         try:
@@ -291,7 +289,7 @@ def _update_lock_instance_id(
             "instance_id": instance_id,
             "issue_number": issue_number,
             "repo": repo,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
+            "acquired_at": datetime.now(UTC).isoformat(),
         }
     )
     try:

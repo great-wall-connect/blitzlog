@@ -108,6 +108,17 @@ build {
     destination = "/tmp/blitzlog-uploader.sh"
   }
 
+  # 1b. Upload the host-side token-refresh poll loop (issue #145).
+  # Sourced by watchdog.sh at boot to keep the bind-mounted GitHub
+  # credential files in sync with the Lambda's 50-min refresh chain.
+  # Same upload-then-cp dance as blitzlog_uploader.sh above (Packer
+  # doesn't upload sibling files of a `shell` provisioner). The final
+  # copy to /usr/local/bin/ is done by 02-systemd.sh.
+  provisioner "file" {
+    source      = "${path.root}/scripts-docker-ubuntu/blitzlog_token_poll.sh"
+    destination = "/tmp/blitzlog-token-poll.sh"
+  }
+
   # 2. Bake the blitzlog-agent container image
   provisioner "shell" {
     environment_vars = [

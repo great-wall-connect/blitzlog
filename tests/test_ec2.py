@@ -255,7 +255,8 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_ssm.put_parameter.assert_called_once()
         call_args = mock_ssm.put_parameter.call_args
         self.assertEqual(
-            call_args[1]["Name"], "/blitzlog/prod/ephemeral/github-token-42"
+            call_args[1]["Name"],
+            "/blitzlog/prod/ephemeral/gh/org/repo/42",
         )
         self.assertEqual(call_args[1]["Value"], "ghp_testtoken")
         self.assertEqual(call_args[1]["Type"], "SecureString")
