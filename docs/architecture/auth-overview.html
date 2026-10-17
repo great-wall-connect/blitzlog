@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Blitzlog auth lifecycle</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --ink: #0f172a;
+    --ink-soft: #475569;
+    --muted: #94a3b8;
+    --brand: #1e3a8a;
+    --brand-soft: #dbeafe;
+    --orange: #d97706;
+    --orange-soft: #fef3c7;
+    --teal: #0f766e;
+    --teal-soft: #ccfbf1;
+    --violet: #7c3aed;
+    --violet-soft: #ede9fe;
+    --slate: #334155;
+    --slate-soft: #e2e8f0;
+    --line: #cbd5e1;
+    --card: #ffffff;
+    --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.06);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .canvas {
+    width: 1800px;
+    min-height: 1200px;
+    padding: 48px 56px 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 24px;
+    background:
+      radial-gradient(1200px 600px at 50% -100px, rgba(30, 58, 138, 0.06), transparent 70%),
+      var(--bg);
+  }
+
+  .header { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding-bottom: 8px; }
+  .eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--brand); }
+  .title { font-size: 42px; font-weight: 800; line-height: 1.05; margin: 0; color: var(--ink); letter-spacing: -0.02em; }
+  .subtitle { font-size: 17px; color: var(--ink-soft); line-height: 1.45; max-width: 1300px; margin: 0; }
+
+  .section { display: flex; flex-direction: column; gap: 12px; }
+  .section-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted);
+    padding-left: 14px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-label .badge {
+    background: var(--brand-soft); color: var(--brand);
+    border-radius: 6px; padding: 2px 8px; font-size: 10px; letter-spacing: 0.1em;
+    margin-left: 4px;
+  }
+  .section-divider { border: none; border-top: 1px dashed rgba(148, 163, 184, 0.4); margin: 0; }
+
+  .row { display: flex; flex-direction: row; gap: 16px; align-items: stretch; }
+  .row > * { flex: 1 1 0; min-width: 0; }
+
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+    border: 1px solid rgba(15, 23, 42, 0.05);
+    line-height: 1.4;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .card .label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card .label .icon { width: 22px; height: 22px; object-fit: contain; display: block; }
+  .card h3 { font-size: 18px; font-weight: 700; margin: 0; color: var(--ink); }
+  .card p { font-size: 13px; color: var(--ink-soft); margin: 0; }
+  .card ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-soft); line-height: 1.55; }
+  .card ul li { margin-bottom: 3px; }
+  .card code { background: rgba(15, 23, 42, 0.06); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+  .card.tone-blue   { border-left: 4px solid var(--brand); }
+  .card.tone-orange { border-left: 4px solid var(--orange); }
+  .card.tone-teal   { border-left: 4px solid var(--teal); }
+  .card.tone-violet { border-left: 4px solid var(--violet); }
+  .card.tone-slate  { border-left: 4px solid var(--slate); }
+
+  /* Layer cards get a tone based on which lifecycle layer they belong to */
+  .layer-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .layer-num {
+    display: inline-block;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--brand); color: white;
+    font-size: 13px; font-weight: 700;
+    text-align: center; line-height: 26px;
+    margin-right: 10px;
+    vertical-align: middle;
+  }
+  .layer-num.tone-orange { background: var(--orange); }
+  .layer-num.tone-teal   { background: var(--teal); }
+  .layer-num.tone-violet { background: var(--violet); }
+
+  /* Self-loop visual for Layer 3 */
+  .self-loop {
+    align-self: center;
+    display: flex; flex-direction: column; align-items: center;
+    color: var(--ink-soft);
+    font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+    margin: 4px 0;
+  }
+  .self-loop svg { display: block; }
+  .self-loop .label { margin-top: -4px; }
+
+  /* Arrow between cards in a row */
+  .arrow-inline { align-self: center; display: flex; align-items: center; justify-content: center; color: var(--ink-soft); flex: 0 0 auto; width: 28px; }
+  .arrow-inline svg { display: block; }
+
+  /* Footnote */
+  .footnote {
+    background: rgba(15, 23, 42, 0.04);
+    border-radius: 10px;
+    padding: 18px 24px;
+    font-size: 13px; color: var(--ink-soft); line-height: 1.55;
+  }
+  .footnote h3 { font-size: 14px; font-weight: 700; color: var(--ink); margin: 0 0 8px; }
+  .footnote code { background: rgba(15, 23, 42, 0.08); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .footnote .cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 8px; }
+  .footnote .col-head { font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+
+  .footer { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); letter-spacing: 0.04em; margin-top: 8px; }
+  .footer code { background: rgba(15, 23, 42, 0.05); padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <header class="header">
+    <div class="eyebrow">Blitzlog · Auth lifecycle</div>
+    <h1 class="title">GitHub App installation token, from launch to self-perpetuating chain</h1>
+    <p class="subtitle">
+      Four lifecycle layers. The launch-time mint is a one-shot;
+      the chain self-perpetuates every 50&nbsp;min via EventBridge Scheduler;
+      the host's poll loop runs every 5&nbsp;min to keep the bind-mounted
+      credentials in sync. <strong>Container restarts are not required.</strong>
+    </p>
+  </header>
+
+  <hr class="section-divider">
+
+  <!-- LAYER 1: launch-time mint -->
+  <section class="section">
+    <div class="section-label">
+      <span class="layer-num">1</span>
+      <span>Launch-time mint</span>
+      <span class="badge">one-shot · runs once at webhook time</span>
+    </div>
+    <div class="row">
+      <article class="card tone-blue">
+        <div class="label" style="color: var(--brand);">
+          <img class="icon" src="./gh.png" alt="">
+          GitHub
+        </div>
+        <h3>Issue labeled</h3>
+        <p>User adds a trigger label to an issue. The webhook fires
+        the Lambda with the issue payload (repo, issue number, sender).</p>
+      </article>
+
+      <div class="arrow-inline" aria-label="webhook">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-blue">
+        <div class="label" style="color: var(--brand);">
+          <img class="icon" src="./Lambda.png" alt="">
+          AWS Lambda
+        </div>
+        <h3>handler.py</h3>
+        <p>Verifies the webhook HMAC, then in <code>launch_ec2_spot_instance</code>:</p>
+        <ul>
+          <li><code>get_github_app_token(repo)</code> mints a fresh installation token</li>
+          <li><code>ssm.put_parameter</code> writes it to <code>/blitzlog/&lt;env&gt;/ephemeral/gh/&lt;owner&gt;/&lt;repo&gt;/&lt;issue&gt;</code></li>
+          <li><code>schedule_next_refresh(iteration=0)</code> queues the first chain event</li>
+        </ul>
+      </article>
+
+      <div class="arrow-inline" aria-label="ssm put">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-blue">
+        <div class="label" style="color: var(--brand);">
+          <img class="icon" src="./SSM.png" alt="">
+          SSM Parameter Store
+        </div>
+        <h3>SSM parameter</h3>
+        <p>Path: <code>/blitzlog/&lt;env&gt;/ephemeral/gh/&lt;owner&gt;/&lt;repo&gt;/&lt;issue&gt;</code></p>
+        <p>Type: <code>SecureString</code>. Lifetime: 1&nbsp;h (GitHub
+        caps installation tokens at 1&nbsp;h regardless of requested <code>expires_at</code>).</p>
+        <p>Version: starts at 1, increments on every chain mint.</p>
+      </article>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- LAYER 2: EC2 boot, single read -->
+  <section class="section">
+    <div class="section-label">
+      <span class="layer-num">2</span>
+      <span>EC2 boot · single read</span>
+      <span class="badge">runs once per instance lifetime</span>
+    </div>
+    <div class="row">
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./EC2.png" alt="">
+          EC2 host · user-data
+        </div>
+        <h3>User-data heredoc</h3>
+        <p>The Lambda's <code>script_header()</code> rendered a shell
+        heredoc that the EC2 user-data downloads from S3. It
+        exports <code>GITHUB_TOKEN_SSM_PARAM</code> (the SSM
+        path) so the watchdog can read it.</p>
+      </article>
+
+      <div class="arrow-inline" aria-label="read">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./EC2.png" alt="">
+          EC2 host · watchdog.sh
+        </div>
+        <h3>Single read + write</h3>
+        <p>At line 109, <code>watchdog.sh</code> reads SSM once:</p>
+        <ul>
+          <li><code>aws ssm get-parameter --with-decryption</code></li>
+          <li>Writes the token to <code>/root/.git-credentials.d/github</code> (git) and <code>/root/gh-config/&lt;instance&gt;/hosts.yml</code> (gh CLI)</li>
+          <li>Forks the poll loop (Layer 4) into a subshell</li>
+        </ul>
+      </article>
+
+      <div class="arrow-inline" aria-label="bind">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./docker.png" alt="">
+          Container
+        </div>
+        <h3>Bind-mounted credentials</h3>
+        <p>Both files are bind-mounted into the container:</p>
+        <ul>
+          <li><code>-v /root/.git-credentials.d:/root/.git-credentials.d</code></li>
+          <li><code>-v /root/gh-config/&lt;instance&gt;:/root/.config/gh</code></li>
+        </ul>
+        <p>git and gh read these on every invocation. No restart needed.</p>
+      </article>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- LAYER 3: chain self-perpetuation -->
+  <section class="section">
+    <div class="section-label">
+      <span class="layer-num tone-orange">3</span>
+      <span>Chain self-perpetuation</span>
+      <span class="badge">50-min cycle · up to 10 hops</span>
+    </div>
+    <div class="row">
+      <article class="card tone-orange">
+        <div class="label" style="color: var(--orange);">
+          <img class="icon" src="./AWS.svg" alt="">
+          EventBridge Scheduler
+        </div>
+        <h3>Fires one-time</h3>
+        <p>Each chain event is <code>refresh-issue-N-iter-K</code>
+        (K = 0…9), <code>FlexibleTimeWindow.mode = "OFF"</code> (fire
+        exactly once, no slack), scheduled <code>at(&lt;ISO 8601&gt;)</code>
+        in the per-env group <code>blitzlog-&lt;env&gt;-token-refresh</code>.</p>
+      </article>
+
+      <div class="arrow-inline" aria-label="invoke">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-orange">
+        <div class="label" style="color: var(--orange);">
+          <img class="icon" src="./Lambda.png" alt="">
+          AWS Lambda · _handle_refresh
+        </div>
+        <h3>Mint + write + reschedule</h3>
+        <p>Same path as the launch-mint, in 3 lines:</p>
+        <ul>
+          <li><code>get_github_app_token(repo)</code></li>
+          <li><code>ssm.put_parameter(... overwrite=True)</code> (Version++)</li>
+          <li><code>schedule_next_refresh(iteration=K+1)</code> if K &lt; 9</li>
+        </ul>
+        <p>If the EC2 instance is already gone, the schedule still
+        fires; the SSM put succeeds; the next hop is queued.
+        No-op against a missing <code>INSTANCE_ID</code>.</p>
+      </article>
+
+      <div class="arrow-inline" aria-label="back to scheduler">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-orange">
+        <div class="label" style="color: var(--orange);">
+          <img class="icon" src="./SSM.png" alt="">
+          SSM (Version+1)
+        </div>
+        <h3>New token, same path</h3>
+        <p>Same SSM parameter, <code>Version</code> incremented.
+        New <code>iat</code> = fire-time, new <code>exp</code> = +1&nbsp;h.
+        The next <code>schedule_next_refresh</code> queues the
+        following 50-min event, so the chain keeps itself alive
+        for up to ~8.3&nbsp;h per instance (10 hops).</p>
+      </article>
+    </div>
+
+    <div class="self-loop" aria-label="self-perpetuating">
+      <svg width="64" height="40" viewBox="0 0 64 40">
+        <path d="M8,8 C 8,32 56,32 56,8 M50,2 L56,8 L50,14" stroke="#d97706" stroke-width="2" fill="none"/>
+      </svg>
+      <div class="label">self-perpetuating</div>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- LAYER 4: continuous poll loop -->
+  <section class="section">
+    <div class="section-label">
+      <span class="layer-num tone-teal">4</span>
+      <span>Continuous refresh</span>
+      <span class="badge">5-min poll · runs for the full instance lifetime</span>
+    </div>
+    <div class="row">
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./EC2.png" alt="">
+          EC2 host · blitzlog_token_poll.sh
+        </div>
+        <h3>Poll loop</h3>
+        <p>Forked by the watchdog at line 234. While the watchdog
+        runs, this subshell wakes every 5&nbsp;min, reads the
+        SSM parameter, and compares to its in-memory
+        <code>last</code>:</p>
+        <ul>
+          <li><strong>Same</strong> → no-op, no log</li>
+          <li><strong>Different</strong> → overwrites bind mount + logs "Token change detected"</li>
+          <li><strong>Empty read</strong> → preserves <code>last</code>, no log (false-positive guard)</li>
+        </ul>
+      </article>
+
+      <div class="arrow-inline" aria-label="read">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./SSM.png" alt="">
+          SSM
+        </div>
+        <h3>Same path, new value</h3>
+        <p>The poll loop reads the <em>same</em> SSM parameter the
+        chain writes to. If Version has advanced since the last
+        read, the bind mount is rewritten in place.</p>
+      </article>
+
+      <div class="arrow-inline" aria-label="rewrite">
+        <svg width="28" height="14" viewBox="0 0 28 14"><path d="M0,7 L24,7 M18,1 L24,7 L18,13" stroke="#475569" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <article class="card tone-teal">
+        <div class="label" style="color: var(--teal);">
+          <img class="icon" src="./docker.png" alt="">
+          Container
+        </div>
+        <h3>In-place rewrite, no restart</h3>
+        <p>The bind-mounted files are atomically replaced. The
+        next <code>git push</code> / <code>gh</code> call inside
+        the container re-reads the file via the credential
+        helper and uses the new token. No in-container code
+        change, no signal, no restart.</p>
+      </article>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- IAM footnote -->
+  <div class="footnote">
+    <h3>IAM footnote — three grants keep the chain alive</h3>
+    <p>Each layer of this diagram is gated on an IAM grant; if any of them is missing, the chain
+    dies and the bind mount holds the launch-mint token until the instance shuts down. The PR
+    #146 / #154 history is largely about the IAM grants that were missing at launch and how
+    they were added.</p>
+    <div class="cols">
+      <div>
+        <div class="col-head">Deploy role <code>blitzlog-deploy-role</code></div>
+        <ul>
+          <li><code>scheduler:GetScheduleGroup</code> + <code>:CreateScheduleGroup</code> + <code>:UpdateScheduleGroup</code> + <code>:DeleteScheduleGroup</code></li>
+          <li><code>scheduler:ListScheduleGroups</code></li>
+          <li><code>scheduler:ListTagsForResource</code> + <code>:TagResource</code> + <code>:UntagResource</code></li>
+          <li>Resource: <code>schedule-group/blitzlog-*-token-refresh</code></li>
+          <li>Where: <code>infra/bootstrap/deploy-role.tf</code> · Sid <code>SchedulerScheduleGroupManagement</code> (PR #154 commit a8115ff)</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-head">Lambda role <code>blitzlog-&lt;env&gt;-lambda-role</code></div>
+        <ul>
+          <li><code>scheduler:CreateSchedule</code> + <code>:DeleteSchedule</code></li>
+          <li><code>ssm:PutParameter</code> on the ephemeral namespace</li>
+          <li>Resource: <code>schedule/&lt;group&gt;/*</code></li>
+          <li>Where: <code>infra/modules/core/iam.tf</code> · pre-existing from PR #146</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-head">Lambda role · <code>iam:PassRole</code> for the scheduler role</div>
+        <ul>
+          <li><code>iam:PassRole</code> on <code>blitzlog-&lt;env&gt;-scheduler-role</code></li>
+          <li>Condition: <code>iam:PassedToService = scheduler.amazonaws.com</code></li>
+          <li>Where: <code>infra/modules/core/iam.tf</code> · Sid <code>SchedulerRolePassRole</code> (PR #154 commit b8152e2)</li>
+          <li>Without this grant, the very first <code>schedule_next_refresh</code> call errors with <code>AccessDeniedException: iam:PassRole</code> and the chain dies at iteration 0. This was the regression the dev instance surfaced.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span><code>github.com/great-wall-connect/blitzlog</code> · <code>docs/architecture/auth-overview.html</code></span>
+    <span>see also: <code>docs/WATCHDOG_TOKEN_REFRESH.md</code> for the deep-dive text guide</span>
+  </div>
+
+</div>
+</body>
+</html>

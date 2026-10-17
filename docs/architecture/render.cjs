@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// Render docs/architecture/system-overview.html → system-overview.png via
+// Render a docs/architecture/<name>.html file to <name>.png via
 // headless Chromium. The bundled puppeteer module ships with mermaid-cli.
 //
-// Usage: node docs/architecture/render.cjs
+// Usage:
+//   node docs/architecture/render.cjs                       # system-overview (default)
+//   node docs/architecture/render.cjs auth-overview          # any other diagram
 
 const path = require('path');
 const puppeteer = require('/home/dsarosi/.npm-global/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/puppeteer');
 
-const INPUT  = path.join(__dirname, 'system-overview.html');
-const OUTPUT = path.join(__dirname, 'system-overview.png');
+const NAME = process.argv[2] || 'system-overview';
+const INPUT  = path.join(__dirname, `${NAME}.html`);
+const OUTPUT = path.join(__dirname, `${NAME}.png`);
 
 (async () => {
   const browser = await puppeteer.launch({

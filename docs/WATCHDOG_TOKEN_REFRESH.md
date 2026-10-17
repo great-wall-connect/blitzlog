@@ -7,6 +7,29 @@ on a workstation); the manual full-mechanism path is the dev-spot
 smoke test wrapped in `scripts/test-dev-spot.sh` (Level 3, ~10 min,
 ~$0.01).
 
+> **Companion visual:** [`docs/architecture/auth-overview.html`](architecture/auth-overview.html)
+> (renders to `auth-overview.png`) shows the four-layer lifecycle
+> (launch-time mint, EC2 boot, chain self-perpetuation, 5-min poll)
+> at a glance. Read this doc when you need to debug; read the
+> diagram when you need to orient.
+
+## Self-perpetuation status (current)
+
+**Healthy** as of PR #154. The chain mints every 50 min as designed;
+the first auto-mint lands at `instance_launch + 50 min`, and the
+bind-mount picks it up within the next 5-min poll. A 60-min
+dev-instance monitor will see:
+
+- `Ver=1` for the first ~50 min
+- `Ver=2` with a fresh `iat` at the +50-min mark
+- `match=True` between SSM and bind mount on every iteration
+- The poll-loop log fires "Token change detected" exactly once
+  (on the genuine rotation), not on every 5-min tick
+
+The `iam:PassRole` regression that killed the chain at iteration 0
+on the dev instance is fixed in PR #154 commit `b8152e2` and
+pinned by `tests/test_lambda_iam.py`.
+
 ## Testing levels
 
 | Level | What it tests | Where | How to run | Cost | Time |
