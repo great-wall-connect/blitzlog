@@ -192,14 +192,14 @@ class TestLambdaIamRole(unittest.TestCase):
             "lambda_policy must grant scheduler:DeleteSchedule "
             "(chain cleans up old schedules)",
         )
-        # The corresponding Resource must scope to the per-env
-        # refresh group's schedule pattern (defence in depth: the
+        # The corresponding Resource must scope to the per-issue
+        # refresh groups' schedule pattern (defence in depth: the
         # Lambda cannot create schedules in any other group).
         self.assertIn(
-            "schedule/${aws_scheduler_schedule_group.token_refresh.name}/*",
+            "schedule/blitzlog-*-token-refresh-*/*",
             body,
             "scheduler:CreateSchedule/DeleteSchedule Resource must "
-            "be scoped to the per-env refresh group's schedule pattern.",
+            "be scoped to the per-issue refresh groups' schedule pattern.",
         )
         # And must NOT be wildcarded.
         self.assertNotRegex(

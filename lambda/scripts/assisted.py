@@ -227,6 +227,7 @@ OPENCODE_SERVER_USERNAME="agent"
 OPENCODE_RESUMED="${{OPENCODE_RESUMED:-}}"
 OPENCODE_RESUMED_TITLE="${{OPENCODE_RESUMED_TITLE:-}}"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
+GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
 ENVEOF
 
 # The unit is already enabled (Packer 02-systemd.sh). Just start it; the

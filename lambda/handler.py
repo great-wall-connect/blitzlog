@@ -30,6 +30,7 @@ into a flat dict that the rest of the pipeline consumes.
 """
 
 import base64
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -357,11 +358,26 @@ def lambda_handler(event, context):
 # ListParameters + one missing-param 400, both ~50 ms and ~$0.0000023).
 
 
-def _refresh_schedule_group_name() -> str:
-    """Schedule group name for refresh events. Per-env so prod and dev
-    chains never collide. Mirrors the `blitzlog-<env>` naming pattern
-    used elsewhere in the module (resource names, SSM paths)."""
-    return f"blitzlog-{os.environ.get('BLITZLOG_ENV', 'prod')}-token-refresh"
+def _refresh_schedule_group_name(repo: str, issue: int) -> str:
+    r"""Per-(env, owner, repo, issue) schedule group name.
+
+    Each running instance gets its own group; deleting the group at
+    instance teardown cascade-deletes all chain events for that
+    instance, so the watchdog's cleanup is one AWS API call (vs.
+    iterating through iterations 0..9). Per-issue scope also means
+    one instance's cleanup cannot nuke another instance's chain.
+
+    Group names are capped at 64 chars and must match
+    `[.\-_A-Za-z0-9]+`, so we can't just append the full
+    `owner/repo/issue`. We hash the three-tuple with SHA-256 and
+    take 16 hex chars (64 bits of collision space — well beyond
+    what a single account+region will ever see). Mirrors the
+    per-issue SSM namespace shape:
+        /blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>
+    """
+    env = os.environ.get("BLITZLOG_ENV", "prod")
+    digest = hashlib.sha256(f"{repo}|{issue}".encode()).hexdigest()[:16]
+    return f"blitzlog-{env}-token-refresh-{digest}"
 
 
 def _refresh_schedule_name(issue: int, iteration: int) -> str:
@@ -409,7 +425,7 @@ def schedule_next_refresh(
 
     fire_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
     schedule_name = _refresh_schedule_name(issue, iteration)
-    schedule_group = _refresh_schedule_group_name()
+    schedule_group = _refresh_schedule_group_name(repo, issue)
 
     input_payload = json.dumps(
         {
@@ -428,19 +444,51 @@ def schedule_next_refresh(
         fire_at.isoformat(),
         iteration,
     )
-    _get_scheduler_client().create_schedule(
-        Name=schedule_name,
-        GroupName=schedule_group,
-        ScheduleExpression=f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
-        ScheduleExpressionTimezone="UTC",
-        FlexibleTimeWindow={"Mode": "OFF"},
-        Target={
-            "Arn": target_arn,
-            "RoleArn": scheduler_role_arn,
-            "Input": input_payload,
-        },
-        State="ENABLED",
-    )
+    # Idempotent group-create: on the first schedule for a given
+    # (env, repo, issue), the per-issue group doesn't exist yet, so
+    # CreateSchedule returns ResourceNotFoundException. We catch that
+    # specific error, CreateScheduleGroup, and retry CreateSchedule
+    # once. The retry is safe because the only thing that could
+    # have raced us in between is another Lambda invocation for the
+    # same issue, which would have created the same group + schedule
+    # under a different iteration (unique by name) and would now
+    # succeed too.
+    client = _get_scheduler_client()
+    try:
+        client.create_schedule(
+            Name=schedule_name,
+            GroupName=schedule_group,
+            ScheduleExpression=f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
+            ScheduleExpressionTimezone="UTC",
+            FlexibleTimeWindow={"Mode": "OFF"},
+            Target={
+                "Arn": target_arn,
+                "RoleArn": scheduler_role_arn,
+                "Input": input_payload,
+            },
+            State="ENABLED",
+        )
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+            raise
+        logger.info(
+            "Schedule group %s not found; creating then retrying CreateSchedule",
+            schedule_group,
+        )
+        client.create_schedule_group(Name=schedule_group)
+        client.create_schedule(
+            Name=schedule_name,
+            GroupName=schedule_group,
+            ScheduleExpression=f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
+            ScheduleExpressionTimezone="UTC",
+            FlexibleTimeWindow={"Mode": "OFF"},
+            Target={
+                "Arn": target_arn,
+                "RoleArn": scheduler_role_arn,
+                "Input": input_payload,
+            },
+            State="ENABLED",
+        )
 
 
 def _handle_refresh(event: dict) -> dict:

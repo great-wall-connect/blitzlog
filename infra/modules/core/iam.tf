@@ -161,14 +161,23 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Action = [
           "scheduler:CreateSchedule",
           "scheduler:DeleteSchedule",
+          "scheduler:CreateScheduleGroup",
         ]
         # Issue #145: the Lambda mints a fresh GitHub App token every
         # 50 min via a chain of one-time EventBridge Scheduler events.
-        # Scoped to the per-env refresh group so the Lambda cannot
-        # create schedules in any other group (defence in depth: a
-        # compromised Lambda can only schedule token refreshes, not
-        # arbitrary other workloads).
-        Resource = "arn:aws:scheduler:*:*:schedule/${aws_scheduler_schedule_group.token_refresh.name}/*"
+        # Scoped to the per-env, per-issue refresh groups
+        # (`blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`)
+        # so the Lambda cannot create schedules in any other group
+        # (defence in depth: a compromised Lambda can only schedule
+        # token refreshes, not arbitrary other workloads). The
+        # CreateScheduleGroup action covers the per-issue group
+        # creation on first schedule (the Lambda's
+        # try/except ResourceNotFoundException → CreateScheduleGroup
+        # → retry path).
+        Resource = [
+          "arn:aws:scheduler:*:*:schedule-group/blitzlog-*-token-refresh-*",
+          "arn:aws:scheduler:*:*:schedule/blitzlog-*-token-refresh-*/*",
+        ]
       },
       {
         # Issue #145: EventBridge Scheduler requires iam:PassRole on
@@ -226,6 +235,24 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      {
+        # Issue #145: the watchdog's instance-teardown cleanup
+        # deletes the per-issue SSM token + per-issue schedule
+        # group. Both must run BEFORE ec2:TerminateInstances (the
+        # instance is shutting down after that point). The
+        # resources are scoped to the per-issue namespace so a
+        # compromised EC2 role can only delete its own chain state,
+        # not another instance's.
+        Effect = "Allow"
+        Action = [
+          "ssm:DeleteParameter",
+          "scheduler:DeleteScheduleGroup",
+        ]
+        Resource = [
+          "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/ephemeral/gh/*",
+          "arn:aws:scheduler:*:*:schedule-group/blitzlog-*-token-refresh-*",
+        ]
+      },
       {
         Effect = "Allow"
         Action = [

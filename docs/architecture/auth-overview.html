@@ -291,7 +291,10 @@
         <p>Each chain event is <code>refresh-issue-N-iter-K</code>
         (K = 0…9), <code>FlexibleTimeWindow.mode = "OFF"</code> (fire
         exactly once, no slack), scheduled <code>at(&lt;ISO 8601&gt;)</code>
-        in the per-env group <code>blitzlog-&lt;env&gt;-token-refresh</code>.</p>
+        in a per-issue group
+        <code>blitzlog-&lt;env&gt;-token-refresh-&lt;16 hex&gt;</code>
+        (the suffix is sha256(owner, repo, issue) so one instance's
+        chain can never be cleaned up by another instance's teardown).</p>
       </article>
 
       <div class="arrow-inline" aria-label="invoke">
@@ -329,7 +332,12 @@
         New <code>iat</code> = fire-time, new <code>exp</code> = +1&nbsp;h.
         The next <code>schedule_next_refresh</code> queues the
         following 50-min event, so the chain keeps itself alive
-        for up to ~8.3&nbsp;h per instance (10 hops).</p>
+        for up to ~8.3&nbsp;h per instance (10 hops).
+        On the first schedule for a given issue,
+        <code>create_schedule</code> raises
+        <code>ResourceNotFoundException</code> (the per-issue group
+        doesn't exist yet); the Lambda catches that, calls
+        <code>create_schedule_group</code>, and retries.</p>
       </article>
     </div>
 

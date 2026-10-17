@@ -30,6 +30,36 @@ The `iam:PassRole` regression that killed the chain at iteration 0
 on the dev instance is fixed in PR #154 commit `b8152e2` and
 pinned by `tests/test_lambda_iam.py`.
 
+### Instance teardown: one-call group delete
+
+The watchdog's post-container cleanup block cascade-deletes every
+chain event for the instance in a single AWS API call. The flow:
+
+1. `aws ssm delete-parameter` on the per-issue token
+   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
+2. `aws scheduler delete-schedule-group` on the per-issue group
+   (`blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`) —
+   cascade-deletes all 10 chain events for this instance
+3. `aws ec2 terminate-instances`
+
+The per-issue group name is hashed from
+`(owner, repo, issue)` (16 hex chars of SHA-256) so two concurrent
+instances in the same env never share a group. One instance's
+cleanup cannot nuke another instance's chain. The per-issue scope
+also matches the per-issue SSM namespace shape.
+
+The order matters: steps 1 and 2 run **before** step 3. Once
+`terminate-instances` is called, the instance is shutting down and
+subsequent AWS calls from this script may fail. (The dev-spot
+test's cleanup function at `scripts/test-dev-spot.sh` doesn't have
+this constraint because it runs **outside** the instance; the
+watchdog runs **inside** it.)
+
+Pinned by `tests/test_watchdog_credential_poll_e2e.py`:
+`test_watchdog_teardown_deletes_ssm_token`,
+`test_watchdog_teardown_deletes_per_issue_schedule_group`,
+`test_watchdog_teardown_aws_state_runs_before_terminate_instances`.
+
 ## Testing levels
 
 | Level | What it tests | Where | How to run | Cost | Time |
