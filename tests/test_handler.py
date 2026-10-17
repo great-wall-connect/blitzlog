@@ -343,7 +343,7 @@ class TestRefreshBranch(unittest.TestCase):
     mints a fresh GitHub App token via the existing
     `get_github_app_token()` helper (re-uses the battle-tested mint
     path; no risk of drift) and overwrites the SecureString at
-    `/blitzlog/<env>/ephemeral/github-token-<N>`. The chain self-
+    `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`. The chain self-
     perpetuates up to `TOKEN_REFRESH_MAX_ITERATIONS` (10) hops.
 
     These tests mock the boto3 client singletons inside `handler.py`

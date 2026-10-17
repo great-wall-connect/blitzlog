@@ -502,7 +502,7 @@ def test_watchdog_signature_poll_loop_rewrites_files_on_ssm_change(
     snippet = textwrap.dedent(f"""
         # Same signature as watchdog.sh:234-239.
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -571,7 +571,7 @@ def test_watchdog_signature_poll_loop_does_not_rewrite_on_stable_ssm(
 
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -634,7 +634,7 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
     # want to catch.
     snippet = textwrap.dedent(f"""
         blitzlog_start_token_poll_loop \\
-            "/blitzlog/prod/ephemeral/github-token-145" \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
             "ap-east-1" \\
             "{git_creds}" \\
             "{gh_hosts}" \\
@@ -696,7 +696,7 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
 #
 # AWS permissions: `ssm:GetParameter`, `ssm:PutParameter`,
 # `ssm:DeleteParameter` on
-# `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/github-token-integration-test-*`.
+# `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-*`.
 # The new `blitzlog-integration-test-role` in
 # `infra/bootstrap/integration-test-role.tf` grants exactly this.
 #
@@ -814,7 +814,9 @@ def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
     """
     region = _aws_region()
     uuid8 = uuid.uuid4().hex[:8]
-    param_name = f"/blitzlog/dev/ephemeral/github-token-integration-test-{uuid8}"
+    param_name = (
+        f"/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-{uuid8}"
+    )
     value_a = "ghp_real_ssm_round_trip_aaaa"
     value_b = "ghp_real_ssm_round_trip_bbbb"
     value_c = "ghp_real_ssm_round_trip_cccc"

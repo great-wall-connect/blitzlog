@@ -69,7 +69,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "Run tests marked @pytest.mark.integration. Requires "
             "AWS credentials with ssm:GetParameter, ssm:PutParameter, "
             "ssm:DeleteParameter on the test prefix "
-            "(/blitzlog/<env>/ephemeral/github-token-integration-test-*). "
+            "(/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*). "
             "Equivalent to setting BLITZLOG_RUN_INTEGRATION=1."
         ),
     )
