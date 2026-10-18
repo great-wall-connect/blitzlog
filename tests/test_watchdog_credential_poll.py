@@ -1,5 +1,5 @@
 """Behavioural tests for the 5-min token-refresh poll loop in
-``infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh``.
+``infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh``.
 
 Issue #145 background: GitHub App installation tokens are capped to
 1 h regardless of the requested lifetime. The Lambda mints a fresh
@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIB = REPO_ROOT / "infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
+LIB = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
 
 
 # --- the fake aws shim -------------------------------------------------

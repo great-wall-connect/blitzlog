@@ -51,9 +51,14 @@ Two modes:
 | Component | Description |
 |---|---|
 | `lambda/handler.py` | Python Lambda: webhook verification, GitHub App auth, EC2 spot launch |
-| `infra/modules/core/` | Reusable Terraform module containing all blitzlog resources, parameterized by `var.environment` (prod / dev) |
-| `infra/prod/` | Thin Terraform wrapper that deploys the core module with `environment = "prod"` |
-| `infra/dev/` | Thin Terraform wrapper that deploys the core module with `environment = "dev"` |
+| `infra/aws/modules/core/` | Reusable Terraform module containing all AWS-shaped blitzlog resources, parameterized by `var.environment` (prod / dev) |
+| `infra/aws/prod/` | Thin Terraform wrapper that deploys the AWS core module with `environment = "prod"` |
+| `infra/aws/dev/` | Thin Terraform wrapper that deploys the AWS core module with `environment = "dev"` |
+| `infra/aws/bootstrap/` | One-time AWS bootstrap stack: shared S3 buckets (agent logs + STT models), OIDC IAM roles for Packer + deploy + integration-test workflows, per-env SSM parameters |
+| `infra/aws/packer/` | Packer AMI build (AWS-only); bakes the blitzlog-agent container into an arm64 Ubuntu AMI |
+| `infra/alicloud/modules/core/` | Reusable Terraform module containing all Alicloud-shaped blitzlog resources (Function Compute + ECS + RAM + API Gateway + OSS + MNS + KMS). Issue #126. |
+| `infra/alicloud/{dev,prod}/` | Thin Terraform wrappers that deploy the Alicloud core module with `environment = "dev"` / `"prod"`. The release workflow picks the tree based on `vars.BLITZLOG_PROVIDER`. |
+| `infra/alicloud/bootstrap/` | One-time Alicloud bootstrap stack: shared OSS buckets (agent logs + STT models) |
 | `infra/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool and per-user local LLM config into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
 | `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
@@ -69,7 +74,7 @@ Two modes:
 - An existing VPC and subnet (Blitzlog needs to launch into one)
 - An S3 bucket for Terraform state
 - A GitHub App installed on the target repo
-- **Python 3.12 on the deploy host.** `terraform apply` runs `python3 -m venv` and `pip install -r lambda/requirements.txt` in a `local-exec` provisioner (`infra/modules/core/lambda.tf`). The lambda runtime is `python3.12`. The local-exec resolves Python 3.12 from the first available source: `command -v python3.12` first (macOS's `python3.12` works), then `~/.local/share/mise/installs/python/3.12.*/bin/python3` (the project's `mise.toml` pins `python = "3.12"`; `mise install` puts it there). If your deploy host has a different `python3` default (e.g., Ubuntu Desktop's `python3.14`), the local-exec still picks the mise install — as long as `mise install` has been run once. If neither Python 3.12 source exists, the local-exec fails loudly with instructions to install it.
+- **Python 3.12 on the deploy host.** `terraform apply` runs `python3 -m venv` and `pip install -r lambda/requirements.txt` in a `local-exec` provisioner (`infra/aws/modules/core/lambda.tf`). The lambda runtime is `python3.12`. The local-exec resolves Python 3.12 from the first available source: `command -v python3.12` first (macOS's `python3.12` works), then `~/.local/share/mise/installs/python/3.12.*/bin/python3` (the project's `mise.toml` pins `python = "3.12"`; `mise install` puts it there). If your deploy host has a different `python3` default (e.g., Ubuntu Desktop's `python3.14`), the local-exec still picks the mise install — as long as `mise install` has been run once. If neither Python 3.12 source exists, the local-exec fails loudly with instructions to install it.
 
 ---
 
@@ -79,7 +84,7 @@ Blitzlog deploys into a single AWS account but supports multiple **environments*
 
 ### 1. Bootstrap the shared S3 buckets (one-time)
 
-Both `prod` and `dev` reference the same shared S3 buckets (`agent_logs` and `stt_models`) via data sources. Those buckets are owned by a separate one-time stack at `infra/bootstrap/`. Apply it once before any env:
+Both `prod` and `dev` reference the same shared S3 buckets (`agent_logs` and `stt_models`) via data sources. Those buckets are owned by a separate one-time stack at `infra/aws/bootstrap/`. Apply it once before any env:
 
 ```bash
 cd infra/bootstrap
@@ -92,22 +97,22 @@ terraform apply
 
 This creates the two buckets and configures encryption, versioning, public-access-block, and lifecycle rules on them. Per-env stacks never mutate the buckets — they only read/write keys under them, scoped by IAM to the env-specific key prefix (`s3://<bucket>/prod/...` vs `s3://<bucket>/dev/...`).
 
-After the bootstrap apply, copy the bucket names into both `infra/prod/terraform.tfvars` and `infra/dev/terraform.tfvars` (`agent_logs_bucket_name` and `stt_models_bucket_name` — they MUST match).
+After the bootstrap apply, copy the bucket names into both `infra/aws/prod/terraform.tfvars` and `infra/aws/dev/terraform.tfvars` (`agent_logs_bucket_name` and `stt_models_bucket_name` — they MUST match).
 
 ### 2. Provide the required variables
 
 Copy and edit the production tfvars:
 
 ```bash
-cp infra/prod/terraform.tfvars.example infra/prod/terraform.tfvars
+cp infra/aws/prod/terraform.tfvars.example infra/aws/prod/terraform.tfvars
 ```
 
-Open `infra/prod/terraform.tfvars` (the file is gitignored — never commit it) and fill in the required fields. See the example file for the full list, including the optional STT and alerting knobs.
+Open `infra/aws/prod/terraform.tfvars` (the file is gitignored — never commit it) and fill in the required fields. See the example file for the full list, including the optional STT and alerting knobs.
 
-The state backend (`backend "s3"`) in `infra/prod/main.tf` is generic — the `bucket` and `key` fields are intentionally empty. Supply them via the shipped `-backend.hcl` file:
+The state backend (`backend "s3"`) in `infra/aws/prod/main.tf` is generic — the `bucket` and `key` fields are intentionally empty. Supply them via the shipped `-backend.hcl` file:
 
 ```hcl
-# infra/prod/prod-backend.hcl
+# infra/aws/prod/prod-backend.hcl
 bucket = "<your-tf-state-bucket>"
 key    = "prod/blitzlog.tfstate"
 region = "ap-east-1"
@@ -174,46 +179,129 @@ Each env has:
 
 ### Directory layout
 
+Issue #126 moved every cloud-specific path under `infra/<cloud>/`.
+The `infra/user-pool/` module is the only top-level per-user stack
+(Phase 5 will split it per-cloud as well).
+
 ```
 infra/
-├── bootstrap/                 # ONE-TIME: creates the shared S3 buckets + their config
-│   ├── main.tf                # (agent_logs + stt_models, encryption, versioning, PAB, lifecycle)
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── bootstrap-backend.hcl  # state key: bootstrap/blitzlog-bootstrap.tfstate
-│   ├── terraform.tfvars       # gitignored — your real bootstrap values
-│   └── terraform.tfvars.example
-├── modules/
-│   └── core/                  # all blitzlog resources, parameterized by var.environment
+├── aws/                        # AWS-shaped tree (default; `BLITZLOG_PROVIDER=aws`)
+│   ├── bootstrap/              # ONE-TIME: shared S3 buckets + OIDC IAM roles
+│   │   ├── main.tf             # (agent_logs + stt_models, encryption, versioning, PAB, lifecycle)
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── secrets.tf          # per-env SSM parameter map (the per-leaf defaults)
+│   │   ├── deploy-role.tf      # GHA deploy OIDC role
+│   │   ├── packer-role.tf      # GHA Packer OIDC role
+│   │   ├── integration-test-role.tf
+│   │   ├── github-oidc-provider.tf
+│   │   ├── data-sources.tf
+│   │   └── terraform.tfvars.example
+│   ├── modules/
+│   │   └── core/               # all AWS resources, parameterized by var.environment
+│   │       ├── main.tf
+│   │       ├── variables.tf    # environment (required, validated)
+│   │       ├── outputs.tf
+│   │       ├── lambda.tf
+│   │       ├── iam.tf
+│   │       ├── ec2.tf
+│   │       ├── apigateway.tf
+│   │       ├── alerting.tf
+│   │       ├── storage.tf      # data "aws_s3_bucket" X 2 — references bootstrap-owned buckets
+│   │       ├── scheduler.tf    # EventBridge Scheduler role for #145 token-refresh chain
+│   │       └── locals.tf
+│   ├── prod/                   # prod wrapper: `module "core" { environment = "prod", ... }`
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── prod-backend.hcl.example
+│   │   ├── aws.tfvars.example  # operator copies to aws.tfvars
+│   │   └── .terraform.lock.hcl
+│   ├── dev/                    # dev wrapper: `module "core" { environment = "dev", ... }`
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── dev-backend.hcl.example
+│   │   ├── aws.tfvars.example
+│   │   └── .terraform.lock.hcl
+│   └── packer/                 # Packer AMI build (AWS-only; baked by release workflow)
+├── alicloud/                   # Alicloud-shaped tree (`BLITZLOG_PROVIDER=alicloud`)
+│   ├── bootstrap/              # ONE-TIME: shared OSS buckets
+│   │   ├── main.tf             # (agent_logs + stt_models, encryption, versioning, PAB)
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── terraform.tfvars.example
+│   ├── modules/
+│   │   └── core/               # all Alicloud resources (Function Compute + ECS + RAM + ...)
+│   │       ├── main.tf
+│   │       ├── variables.tf
+│   │       ├── outputs.tf
+│   │       ├── function_compute.tf   # alicloud_fc_service + alicloud_fc_function
+│   │       ├── ram.tf                # alicloud_ram_role / alicloud_ram_policy (IAM analogue)
+│   │       ├── ecs.tf                # alicloud_vpc + alicloud_vswitch + SG
+│   │       ├── apigateway.tf
+│   │       ├── oss.tf                # data sources — buckets owned by alicloud/bootstrap
+│   │       ├── mns.tf                # alicloud_mns_queue (SQS analogue)
+│   │       ├── kms.tf                # CMK
+│   │       ├── secrets.tf            # alicloud_kms_secret (SSM analogue)
+│   │       └── locals.tf
+│   ├── prod/                   # prod wrapper, alicloud-shaped
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── prod-backend.hcl.example  # `oss` backend
+│   │   └── alicloud.tfvars.example
+│   └── dev/                    # dev wrapper, alicloud-shaped
 │       ├── main.tf
-│       ├── variables.tf       # environment (required, validated)
+│       ├── variables.tf
 │       ├── outputs.tf
-│       ├── lambda.tf
-│       ├── iam.tf
-│       ├── ec2.tf
-│       ├── apigateway.tf
-│       ├── alerting.tf
-│       ├── storage.tf         # data "aws_s3_bucket" X 2 — references bootstrap-owned buckets
-│       └── locals.tf
-├── prod/                      # prod wrapper: `module "core" { environment = "prod", ... }`
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── prod-backend.hcl
-│   ├── terraform.tfvars       # gitignored — your real prod values
-│   └── terraform.tfvars.example
-├── dev/                       # dev wrapper: `module "core" { environment = "dev", ... }`
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── dev-backend.hcl
-│   ├── terraform.tfvars       # gitignored — your real dev values
-│   └── terraform.tfvars.example
-└── user-pool/                 # per-user Telegram bot pool + per-user local LLM config.
-                              # Each user runs this LOCALLY (no shared S3 backend).
-                              # Params land under /blitzlog/users/<login>/... — shared
-                              # across envs, no `environment` variable needed.
+│       ├── dev-backend.hcl.example
+│       └── alicloud.tfvars.example
+└── user-pool/                  # per-user Telegram bot pool + per-user local LLM config.
+                               # Each user runs this LOCALLY (no shared S3 backend).
+                               # Params land under /blitzlog/users/<login>/... — shared
+                               # across envs, no `environment` variable needed.
+                               # Phase 5 follow-up moves it to infra/{aws,alicloud}/user-pool/.
 ```
+
+### User-data scripts (per-cloud split, issue #126)
+
+The user-data scripts that the function (FC) hands to `RunInstances`
+at launch live in `lambda/scripts/`, split per-cloud. The
+`lambda/scripts/__init__.py` dispatcher reads `BLITZLOG_PROVIDER`
+at function cold start and re-exports the right cloud's
+`build_autonomous_user_data` / `build_assisted_user_data` so
+`lambda/handler.py` doesn't need to branch on the cloud.
+
+```
+lambda/
+└── scripts/
+    ├── __init__.py            # dispatcher on BLITZLOG_PROVIDER
+    ├── aws/                   # AWS-shaped user-data (default)
+    │   ├── __init__.py
+    │   ├── _common.py         # prologue (Packer-baked blitzlog_s3_* +
+    │   │                      # `aws ssm get-parameter` for secrets)
+    │   ├── autonomous.py
+    │   └── assisted.py
+    └── alicloud/              # Alicloud-shaped user-data
+        ├── __init__.py
+        ├── _common.py         # prologue (installs ossutil + aliyun CLI,
+        │                      # inlines blitzlog_oss_* + `aliyun kms
+        │                      # GetSecretValue` for secrets)
+        ├── autonomous.py
+        └── assisted.py
+```
+
+The two trees are byte-for-byte parallel in the public API
+(`build_autonomous_user_data(repo, issue_number, ...)`,
+`build_assisted_user_data(repo, issue_number, bot_token, ...)`);
+the only difference is the prologue in `_common.py` and the
+bucket env-var names (`OSS_*` vs `S3_*`). The Packer image is
+still AWS-only; the Alicloud user-data installs `ossutil` and
+`aliyun` CLI on first boot (Phase 5 brings a per-cloud Packer
+image). The watchdog's log upload remains hard-coded to
+`blitzlog_s3_*`; on the Alicloud path it fails silently (`|| true`
+swallow) — the MNS DLQ + FC dead-letter config catch the failure.
 
 ### Spinning up a fresh dev environment
 
@@ -223,7 +311,7 @@ infra/
 
 3. **Provision dev tfvars:**
    ```bash
-   cp infra/dev/terraform.tfvars.example infra/dev/terraform.tfvars
+   cp infra/aws/dev/terraform.tfvars.example infra/aws/dev/terraform.tfvars
    # fill in the dev App credentials, sandbox repo installation ID, etc.
    ```
 
@@ -242,6 +330,59 @@ infra/
    Paste that URL into the sandbox repo's GitHub webhook configuration (Settings → Webhooks) with the dev App's webhook secret.
 
 6. **Open an issue on the sandbox repo** labeled `autonomous`. The dev Lambda handles it end-to-end. The prod Lambda is untouched.
+
+### Cloud provider selection (Alicloud, issue #126)
+
+Blitzlog can target AWS (default) or Alicloud. Each per-env stack
+lives under `infra/<provider>/<env>/`, and the release workflow
+picks the tree based on the `BLITZLOG_PROVIDER` repo variable
+(default `aws`):
+
+| `vars.BLITZLOG_PROVIDER` | Per-env stack | Backend | Per-provider tfvars |
+|---|---|---|---|
+| `aws` (default) | `infra/aws/{dev,prod}/` | `s3` (ap-east-1) | `aws.tfvars` |
+| `alicloud` | `infra/alicloud/{dev,prod}/` | `oss` (cn-hangzhou) | `alicloud.tfvars` |
+
+The `terraform init` step switches backends, the `terraform plan`
+step passes the per-provider tfvars file, and the Lambda's
+`BLITZLOG_PROVIDER` env var is set by Terraform from the chosen
+module. The `BLITZLOG_PROVIDER=alicloud` path is a **runtime path
+only** for now: the Packer AMI build is AWS-only (Phase 5 adds
+the Aliyun image builder), and the release workflow fails fast
+with a clear error if `BLITZLOG_PROVIDER=alicloud` is set until
+Phase 5 lands.
+
+The function-side user-data script is also provider-dispatched:
+`lambda/scripts/__init__.py` re-exports `build_assisted_user_data`
+and `build_autonomous_user_data` from
+`scripts.aws.*` or `scripts.alicloud.*` based on `BLITZLOG_PROVIDER`.
+The Alicloud user-data installs `ossutil` + `aliyun` CLI on first
+boot (the Packer image is still AWS-only) and inlines a
+`blitzlog_oss_*` bash library (parallel to the AWS-side
+`blitzlog_s3_*`). The Aliyun IMDS at 100.100.100.200 replaces
+AWS IMDSv2; `aliyun kms GetSecretValue` replaces
+`aws ssm get-parameter`. The bucket env-var names are
+`OSS_LOGS_BUCKET` / `OSS_LOG_PREFIX` (vs the AWS-side
+`S3_*` prefix). The runtime half of the dispatch is the
+`lambda/scripts/alicloud/` tree.
+
+To deploy an Alicloud env manually:
+
+```bash
+cd infra/alicloud/bootstrap   # ONE-TIME: creates the shared OSS buckets
+terraform init -backend-config=bootstrap-backend.hcl
+terraform apply
+
+cd ../dev
+cp alicloud.tfvars.example alicloud.tfvars  # fill in your values
+terraform init -backend-config=dev-backend.hcl
+terraform plan -var-file=alicloud.tfvars
+terraform apply
+```
+
+The Lambda-side provider factory (`lambda/provider/__init__.py`)
+dispatches on `BLITZLOG_PROVIDER` at cold start; no code change
+is needed when switching clouds.
 
 ### Day-to-day workflow
 
@@ -275,7 +416,7 @@ the release mode:
   (= CODEOWNERS) must approve before the apply runs.
 
 The OIDC role `blitzlog-deploy-role` is provisioned by
-[`infra/bootstrap/deploy-role.tf`](infra/bootstrap/deploy-role.tf) and
+[`infra/aws/bootstrap/deploy-role.tf`](infra/aws/bootstrap/deploy-role.tf) and
 assumes the same trust surface as the Packer role
 (`blitzlog-packer-build-role`): any branch of `great-wall-connect/blitzlog`
 can assume it, plus the admin-SSO escape hatch for local applies.
@@ -386,7 +527,7 @@ the state bucket). The setup is one-time per repo:
    The map keys match the SSM leaf names (kebab-case). The
    bootstrap writes each value to `/blitzlog/<env>/<key>`. Missing
    keys fall back to per-leaf defaults declared in
-   `infra/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
+   `infra/aws/bootstrap/secrets.tf`'s `local.leaf_defaults`. The five
    required keys (`github-app-id`, `github-app-private-key`,
    `github-app-installation-id`, `github-webhook-secret`,
    `opencode-api-key`) have no default — the apply fails fast
@@ -404,7 +545,7 @@ the state bucket). The setup is one-time per repo:
    feed them into terraform as `TF_VAR_<name>` env vars.
 
    The full set of parameters provisioned (22 leaves × 2 envs =
-   44 total) is declared in `infra/bootstrap/secrets.tf`'s
+   44 total) is declared in `infra/aws/bootstrap/secrets.tf`'s
    `deploy_parameter_types` local. The 4 SecureString leaves are
    `github-app-private-key`, `github-webhook-secret`,
    `opencode-api-key`, and `stt-api-key`; the other 18 are
@@ -438,14 +579,14 @@ terraform plan    # review — every blitzlog-* resource will be replaced becaus
 terraform apply
 ```
 
-The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/prod/` should be empty.
+The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/aws/prod/` should be empty.
 
 ### Migrating S3 buckets out of the prod stack into the bootstrap stack
 
 If the existing prod deployment managed the `agent_logs` and `stt_models` buckets (i.e. they were created by Terraform before the bootstrap stack existed), refactor them out with `terraform state rm` + `terraform import`. Apply the bootstrap stack first so the buckets exist:
 
 ```bash
-# 1. Apply the bootstrap stack so the buckets are owned by infra/bootstrap/.
+# 1. Apply the bootstrap stack so the buckets are owned by infra/aws/bootstrap/.
 cd infra/bootstrap
 terraform init -backend-config=bootstrap-backend.hcl
 terraform plan
@@ -469,7 +610,7 @@ terraform import module.core.data.aws_s3_bucket.stt_models gwc-blitzlog-stt-mode
 terraform plan    # must be empty (no diff)
 ```
 
-After this, both buckets are owned by `infra/bootstrap/`. `infra/prod/` and `infra/dev/` reference them by name. Subsequent dev `apply` does not collide on bucket creation.
+After this, both buckets are owned by `infra/aws/bootstrap/`. `infra/aws/prod/` and `infra/aws/dev/` reference them by name. Subsequent dev `apply` does not collide on bucket creation.
 
 ### State file layout
 
@@ -906,7 +1047,7 @@ aws ssm get-parameter \
 
 In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present: True` followed by the invalid-signature path.
 
-**Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/prod/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/prod/`, and pasting the new secret into GitHub.
+**Fix:** Set both sides to the same value (`github_webhook_secret` in `infra/aws/prod/terraform.tfvars` and the GitHub webhook **Secret** field), then rotate by updating tfvars and re-running `terraform apply` in `infra/aws/prod/`, and pasting the new secret into GitHub.
 
 ### Label added but no instance launched
 
@@ -953,9 +1094,9 @@ List locks first with `aws s3 ls s3://<agent_logs_bucket>/bot-pool-locks/ --recu
 
 **Symptom:** Spot price lookup returns nothing, or every spot launch attempt fails; capacity / availability errors in Lambda logs.
 
-**Diagnose:** Blitzlog defaults to spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (the `spot_instance_types` Terraform variable in `infra/modules/core/variables.tf`, plumbed to the `infra/prod/` and `infra/dev/` layers). Some regions have little or no spot capacity for `t4g.*`.
+**Diagnose:** Blitzlog defaults to spot types `t4g.medium`, `t4g.large`, and `t4g.xlarge` (the `spot_instance_types` Terraform variable in `infra/aws/modules/core/variables.tf`, plumbed to the `infra/aws/prod/` and `infra/aws/dev/` layers). Some regions have little or no spot capacity for `t4g.*`.
 
-**Fix:** Switch `aws_region` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to a region with Arm spot inventory, or override `spot_instance_types` in the same tfvars file with families that have inventory in your region, then re-run `terraform apply`. The list is passed to the Lambda as the `SPOT_INSTANCE_TYPES_JSON` env var, so no Lambda rebuild is needed.
+**Fix:** Switch `aws_region` in `infra/aws/prod/terraform.tfvars` (or `infra/aws/dev/terraform.tfvars`) to a region with Arm spot inventory, or override `spot_instance_types` in the same tfvars file with families that have inventory in your region, then re-run `terraform apply`. The list is passed to the Lambda as the `SPOT_INSTANCE_TYPES_JSON` env var, so no Lambda rebuild is needed.
 
 ### `ec2:TerminateInstances` `UnauthorizedOperation` from the agent watchdog
 
@@ -966,15 +1107,15 @@ no identity-based policy allows the ec2:TerminateInstances action
 ```
 The EC2 instance then sits idle for the full 2-hour EC2 lifecycle before self-terminating. (The `aws ec2 terminate-instances` line in the watchdog wraps the call in `|| true`, so the failure is silent in the bootstrap log.)
 
-**Diagnose:** The EC2 agent role's `ec2:TerminateInstances` grant in `infra/modules/core/iam.tf` is gated on the instance carrying the matching `ec2:ResourceTag/Environment` tag. If the launch path missed that tag, the IAM condition never matches and the call is denied. Inspect the instance's tags from the EC2 console or `aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].Tags'`.
+**Diagnose:** The EC2 agent role's `ec2:TerminateInstances` grant in `infra/aws/modules/core/iam.tf` is gated on the instance carrying the matching `ec2:ResourceTag/Environment` tag. If the launch path missed that tag, the IAM condition never matches and the call is denied. Inspect the instance's tags from the EC2 console or `aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].Tags'`.
 
-**Fix:** Confirm `lambda/ec2.py:launch_ec2_spot_instance` emits an `Environment` tag whose value equals `BLITZLOG_ENV` (set by `infra/modules/core/lambda.tf`). Re-deploy the Lambda zip (`mise run build`) and terminate any orphaned instances manually with an admin role.
+**Fix:** Confirm `lambda/ec2.py:launch_ec2_spot_instance` emits an `Environment` tag whose value equals `BLITZLOG_ENV` (set by `infra/aws/modules/core/lambda.tf`). Re-deploy the Lambda zip (`mise run build`) and terminate any orphaned instances manually with an admin role.
 
 ### Log upload silently failing (`AccessDenied` on `s3:PutObject`)
 
 **Symptom:** No run logs appear at `s3://<agent_logs_bucket>/<repo>/issue/<n>/logs/...` after an agent run, even though the bootstrap log contains a `[…] Logs uploaded to S3` line. (The `aws s3 cp …` line wraps the upload in `|| true`, so the failure is silent.)
 
-**Diagnose:** The EC2 agent role grants `s3:PutObject` only on `${var.environment}/*` keys (`infra/modules/core/iam.tf:191-200`). The bootstrap user-data (`lambda/scripts/autonomous.py:_upload_logs_and_terminate_script`, `lambda/scripts/assisted.py:362`) must therefore prefix log-upload keys with `$BLITZLOG_ENV/`. If the prefix is missing, the destination falls outside the IAM grant and the call is denied. Check the watchdog's `aws s3 cp` invocation in `/var/log/backend-bootstrap.log` and look for `LOG_KEY="$BLITZLOG_ENV/…` — not `LOG_KEY="<repo>/…`.
+**Diagnose:** The EC2 agent role grants `s3:PutObject` only on `${var.environment}/*` keys (`infra/aws/modules/core/iam.tf:191-200`). The bootstrap user-data (`lambda/scripts/autonomous.py:_upload_logs_and_terminate_script`, `lambda/scripts/assisted.py:362`) must therefore prefix log-upload keys with `$BLITZLOG_ENV/`. If the prefix is missing, the destination falls outside the IAM grant and the call is denied. Check the watchdog's `aws s3 cp` invocation in `/var/log/backend-bootstrap.log` and look for `LOG_KEY="$BLITZLOG_ENV/…` — not `LOG_KEY="<repo>/…`.
 
 **Fix:** Re-deploy the Lambda zip with the env-prefixed `LOG_KEY` (`mise run build`) and `terraform apply` so the IAM is current. Already-orphaned log lines are not recoverable.
 
@@ -1017,7 +1158,7 @@ The model file must exist at `/opt/whisper-stt/models/ggml-<stt_model>.bin` and 
 
 **Symptom:** Invocations fail after ~3 minutes; messages appear on the SQS DLQ `blitzlog-prod-lambda-dlq` (or `blitzlog-dev-lambda-dlq` for the dev env).
 
-**Diagnose:** Lambda `timeout = 180` in `infra/modules/core/lambda.tf`. Work that runs longer than that (slow GitHub App auth, SSM, or especially EC2 spot launch retries across AZs) will time out. Check CloudWatch `/aws/lambda/blitzlog-prod-handler` (or `blitzlog-dev-handler` for the dev env) for the truncated request, then inspect DLQ:
+**Diagnose:** Lambda `timeout = 180` in `infra/aws/modules/core/lambda.tf`. Work that runs longer than that (slow GitHub App auth, SSM, or especially EC2 spot launch retries across AZs) will time out. Check CloudWatch `/aws/lambda/blitzlog-prod-handler` (or `blitzlog-dev-handler` for the dev env) for the truncated request, then inspect DLQ:
 
 ```bash
 aws sqs receive-message \
@@ -1066,7 +1207,7 @@ Assisted-mode agents can accept Telegram voice notes, transcribe them with a sel
 
 ### Setup
 
-Two ways to populate the model in the shared STT models bucket (`s3://<stt_models_bucket>/models/`, where `<stt_models_bucket>` is the name you set in `infra/bootstrap/terraform.tfvars` — both prod and dev use the same bucket):
+Two ways to populate the model in the shared STT models bucket (`s3://<stt_models_bucket>/models/`, where `<stt_models_bucket>` is the name you set in `infra/aws/bootstrap/terraform.tfvars` — both prod and dev use the same bucket):
 
 1. **Manual upload** (default). One-time, after `terraform apply`:
 
@@ -1077,13 +1218,13 @@ Two ways to populate the model in the shared STT models bucket (`s3://<stt_model
      "s3://$(terraform output -raw stt_models_bucket)/models/ggml-base.en.bin"
    ```
 
-   For multilingual support, download `ggml-base.bin`, `ggml-small.bin`, `ggml-large-v3.bin`, etc. from the same HuggingFace mirror and upload under the same `models/` prefix. Update `stt_model` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) to match (`base`, `small`, `large-v3`, etc.).
+   For multilingual support, download `ggml-base.bin`, `ggml-small.bin`, `ggml-large-v3.bin`, etc. from the same HuggingFace mirror and upload under the same `models/` prefix. Update `stt_model` in `infra/aws/prod/terraform.tfvars` (or `infra/aws/dev/terraform.tfvars`) to match (`base`, `small`, `large-v3`, etc.).
 
-2. **Auto-upload via Terraform** (opt-in). Set `upload_stt_model = true` in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`) and re-apply. The `terraform_data.stt_model_upload` provisioner runs on the Terraform host (CI or dev machine), downloads `ggml-${stt_model}.bin` from `stt_model_source_url`, and uploads it to S3. Skipped automatically if the object already exists. Requires:
+2. **Auto-upload via Terraform** (opt-in). Set `upload_stt_model = true` in `infra/aws/prod/terraform.tfvars` (or `infra/aws/dev/terraform.tfvars`) and re-apply. The `terraform_data.stt_model_upload` provisioner runs on the Terraform host (CI or dev machine), downloads `ggml-${stt_model}.bin` from `stt_model_source_url`, and uploads it to S3. Skipped automatically if the object already exists. Requires:
    - Outbound HTTPS from the Terraform host to the source URL.
    - `s3:PutObject` on `arn:aws:s3:::blitzlog-<env>-stt-models/models/*` from the Terraform host's credentials (the EC2 instance role only has `s3:GetObject` — the Terraform host needs its own write perm).
 
-3. Configure the STT vars in `infra/prod/terraform.tfvars` (or `infra/dev/terraform.tfvars`). Defaults work out of the box for `base.en` + English. Re-run `terraform apply`.
+3. Configure the STT vars in `infra/aws/prod/terraform.tfvars` (or `infra/aws/dev/terraform.tfvars`). Defaults work out of the box for `base.en` + English. Re-run `terraform apply`.
 
 4. The EC2 instance picks everything up automatically on the next assisted-mode launch — no per-user config required. Per-user STT preferences (model, voice) live in the bot's own `/settings` menu, not in blitzlog.
 

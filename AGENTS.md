@@ -55,7 +55,7 @@ The plumbing for this is in three places (issue #119):
   `_common.py:script_header`); the bootstrap `git config
   --global user.{name,email}` on the host and exports
   `GIT_USER_NAME` / `GIT_USER_EMAIL` env vars. The
-  Packer-baked watchdog (`infra/packer/scripts-docker-ubuntu/
+  Packer-baked watchdog (`infra/aws/packer/scripts-docker-ubuntu/
   watchdog.sh`) forwards them via `-e` flags into the container.
   The container's `entrypoint.sh` (lines 88-91) runs the matching
   `git config --global` so any commit the agent makes inside the
@@ -134,7 +134,7 @@ Hard rules:
 3. **Never per-sender identity in the bootstrap.** The audit-trail identity is owned by the operator, not by the webhook `sender_login`. Assisted commits and autonomous commits get the same identity, sourced from the same SSM parameters.
 4. **Surface setup errors loudly.** When the Bump step finds a missing `OWNER_LOGIN` or missing SSM param, it aborts with `FATAL: ... terraform apply in infra/user-pool/`. The EC2 bootstrap's `2>/dev/null || echo ""` swallow only covers the case where the user-pool stack simply hasn't been applied yet — never fall back to a fictional identity silently.
 
-The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` from env and runs `git config --global user.{name,email}`. The watchdog (`infra/packer/scripts-docker-ubuntu/watchdog.sh`) passes both vars to the container via `-e`. The bootstrap writes them to `/etc/blitzlog.env` so the watchdog's rewrite preserves them.
+The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` from env and runs `git config --global user.{name,email}`. The watchdog (`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh`) passes both vars to the container via `-e`. The bootstrap writes them to `/etc/blitzlog.env` so the watchdog's rewrite preserves them.
 
 ## GitHub Token Freshness (Issue #145)
 
@@ -142,7 +142,7 @@ GitHub App installation tokens are capped to **1 hour** regardless of the reques
 
 1. The Lambda mints a fresh token at webhook time and writes it to `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>` (per-(env, owner, repo, issue) so two issues numbered the same in different repos don't collide).
 2. Right after the EC2 launch, the Lambda schedules a chain of 10 one-time EventBridge Scheduler events, 50 min apart, each of which re-mints the token (via the existing `get_github_app_token` path) and overwrites the same SecureString.
-3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the bind-mounted `/root/.git-credentials.d/github` and `/root/.config/gh/hosts.yml` whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
+3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the bind-mounted `/root/.git-credentials.d/github` and `/root/.config/gh/hosts.yml` whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
 
 **No agent-side code change is required.** The chain is fully Lambda-owned (no per-instance state, no continuous schedule); if the EC2 instance dies before the chain ends, the remaining events fire and no-op against the missing SSM parameter.
 

@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scripts.autonomous import build_autonomous_user_data
+from scripts.aws.autonomous import build_autonomous_user_data
 
 
 def _with_env(fn):
@@ -172,7 +172,7 @@ def _extract_blitzlog_env_heredoc(script: str) -> str:
 class TestAutonomousEnvFileQuoting(unittest.TestCase):
     """Regression: the heredoc that writes /etc/blitzlog.env is consumed
     by `bash source /etc/blitzlog.env` in the host's watchdog
-    (`infra/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
+    (`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
     watchdog rewrites it with a properly-quoted copy. If a value with
     spaces is written unquoted, bash parses the second token as a
     command name and the bootstrap dies with `command not found`.

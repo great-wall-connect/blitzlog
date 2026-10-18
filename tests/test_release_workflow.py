@@ -772,7 +772,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         """The Bump step identifies the pool to read git-author
         params from via `vars.OWNER_LOGIN`. The deploy-role's
         SSMGitAuthorIdentityRead grant (in
-        infra/bootstrap/deploy-role.tf) targets the same
+        infra/aws/bootstrap/deploy-role.tf) targets the same
         /blitzlog/users/*/git-author/* subtree the packer role
         needs to read. OWNER_LOGIN is the only new repo variable
         the operator must set — terraform-apply-dev.yml doesn't
@@ -1296,6 +1296,117 @@ class TestDockerImagesWorkflow(unittest.TestCase):
             r"\s+if: github\.event_name != 'pull_request'\s*\n"
             r"\s+uses: docker/login-action@v\d+",
             "docker-images.yml must log into GHCR on the non-PR path (workflow_dispatch / push)",
+        )
+
+
+class TestAlicloudProviderDispatch(unittest.TestCase):
+    """Regression guards for the BLITZLOG_PROVIDER dispatch in
+    ``release.yml`` (issue #126).
+
+    Most of the dispatch shape is asserted in
+    ``test_terraform_env_isolation.py::TestAlicloudProviderDispatch``
+    (where the cross-file invariants live). This class covers the
+    additional shape that lives specifically in release.yml:
+
+    - the `Validate provider` step explicitly fails fast when
+      BLITZLOG_PROVIDER=alicloud (Packer is AWS-only in this PR).
+    - the `Render TF_VAR_* env from SSM` step is gated on
+      `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the
+      Alicloud path.
+    - the `terraform plan` step uses `${BLITZLOG_PROVIDER}.tfvars`
+      so the per-provider tfvars file is passed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RELEASE_YML.read_text()
+
+    def test_validate_provider_step_present(self):
+        """The deploy job must include a Validate provider step
+        that fails fast on alicloud.
+        """
+        self.assertRegex(
+            self.text,
+            r"(?ms)^\s+- name: Validate provider\s*\n"
+            r"\s+env:\s*\n"
+            r"\s+BLITZLOG_PROVIDER:.*\$\{\{ env\.BLITZLOG_PROVIDER \}\}",
+            "release.yml must include a 'Validate provider' step that reads "
+            "env.BLITZLOG_PROVIDER",
+        )
+        # The case statement for alicloud must fail with a clear error.
+        self.assertIn(
+            "BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step",
+            self.text,
+            "release.yml must fail fast when BLITZLOG_PROVIDER=alicloud",
+        )
+
+    def test_ssm_render_step_gated_to_aws(self):
+        """The 'Render TF_VAR_* env from SSM' step must be gated on
+        `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the
+        Alicloud path.
+        """
+        # Find the step's `if:` clause by looking at the line right
+        # after the step name. We accept either a same-line
+        # `if:` or a block-style `if:` on the next line.
+        self.assertRegex(
+            self.text,
+            r"(?ms)Render TF_VAR_\* env from SSM\s*\n"
+            r"\s+if: env\.BLITZLOG_PROVIDER == 'aws'",
+            "release.yml must gate 'Render TF_VAR_* env from SSM' on "
+            "BLITZLOG_PROVIDER == 'aws' so the step doesn't run for Alicloud",
+        )
+
+    def test_terraform_plan_uses_per_provider_tfvars(self):
+        """The `terraform plan` step must pass
+        `-var-file=${BLITZLOG_PROVIDER}.tfvars` so the per-provider
+        tfvars file is used.
+        """
+        # The plan step body contains the `TFVARS_FILE=...` line
+        # and the `-var-file=...` reference. We just check both
+        # are present; a finer-grained regex was brittle against
+        # the YAML whitespace/indentation.
+        plan_block_match = re.search(
+            r"(?ms)- name: terraform plan\b.*?(?=\n\s*-\s|\Z)", self.text
+        )
+        self.assertIsNotNone(
+            plan_block_match,
+            "release.yml must have a 'terraform plan' step",
+        )
+        plan_block = plan_block_match.group(0)
+        self.assertIn(
+            "TFVARS_FILE=",
+            plan_block,
+            "terraform plan step must derive TFVARS_FILE from BLITZLOG_PROVIDER",
+        )
+        self.assertIn(
+            "${BLITZLOG_PROVIDER}.tfvars",
+            plan_block,
+            "terraform plan step must use ${BLITZLOG_PROVIDER}.tfvars "
+            "as the -var-file argument",
+        )
+
+    def test_terraform_init_switches_backend_by_provider(self):
+        """The `terraform init` step must switch between S3 (AWS)
+        and OSS (Alicloud) backends based on BLITZLOG_PROVIDER.
+        """
+        self.assertIn(
+            "TF_BACKEND_BUCKET_OSS",
+            self.text,
+            "release.yml terraform init must reference TF_BACKEND_BUCKET_OSS "
+            "for the Alicloud path",
+        )
+        # The init step has both branches. We don't regex-match the
+        # full step body (the heredoc-style commands make that
+        # brittle); we just check the two key flags are referenced.
+        self.assertIn(
+            "region=ap-east-1",
+            self.text,
+            "release.yml terraform init must use region=ap-east-1 for the AWS S3 backend",
+        )
+        self.assertIn(
+            "region=cn-hangzhou",
+            self.text,
+            "release.yml terraform init must use region=cn-hangzhou for the Alicloud OSS backend",
         )
 
 

@@ -7,7 +7,7 @@ files (test_scripts_*, test_auth.py, test_bot_pool.py, test_ec2.py).
 
 Tests in this file:
     - `TestLambdaHandlerBotPool`: webhook → launch flow (entrypoint)
-    - `TestLambdaBuildConfiguration`: infra/modules/core/lambda.tf content
+    - `TestLambdaBuildConfiguration`: infra/aws/modules/core/lambda.tf content
     - `TestLambdaRuntimeImportPath`: AWS Lambda sys.path layout regression
     - `TestMiseToml`: top-level mise.toml Node/Terraform pinning regressions
     - `TestRefreshBranch` (issue #145): the EventBridge Scheduler
@@ -154,7 +154,7 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
 
 
 class TestLambdaBuildConfiguration(unittest.TestCase):
-    """Regression tests for infra/modules/core/lambda.tf build-time configuration.
+    """Regression tests for infra/aws/modules/core/lambda.tf build-time configuration.
 
     A mistake here silently produces a broken Lambda zip at runtime
     (e.g., 1-byte server.py from a stale cp reference). These tests
@@ -164,7 +164,7 @@ class TestLambdaBuildConfiguration(unittest.TestCase):
 
     @staticmethod
     def _read_lambda_tf():
-        with open("infra/modules/core/lambda.tf", "r", encoding="utf-8") as f:
+        with open("infra/aws/modules/core/lambda.tf", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_lambda_build_copies_python_shim(self):

@@ -355,7 +355,7 @@ jobs:
       # ----------------------------------------------------------------
       # Bake the AMI from the image we just pushed (issue #91).
       #
-      # The Packer pipeline (infra/packer/agent-docker-ubuntu.pkr.hcl)
+      # The Packer pipeline (infra/aws/packer/agent-docker-ubuntu.pkr.hcl)
       # already publishes the AMI id to /blitzlog/<env>/agent-ami-id-
       # docker-ubuntu via its shell-local post-processor; we just need
       # to map mode -> Packer `environment`:
@@ -381,7 +381,7 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # OIDC into the role that infra/bootstrap/packer-role.tf
+          # OIDC into the role that infra/aws/bootstrap/packer-role.tf
           # provisions. Trust policy already covers any branch of
           # great-wall-connect/blitzlog. vars.AWS_ACCOUNT_ID must
           # be set at the repo or org level before this runs.
@@ -520,7 +520,7 @@ jobs:
           # whose /blitzlog/users/<OWNER>/git-author/{name,email}
           # SSM params hold the commit author identity. The
           # deploy-role's SSMGitAuthorIdentityRead grant (see
-          # infra/bootstrap/deploy-role.tf) lets the worker fetch
+          # infra/aws/bootstrap/deploy-role.tf) lets the worker fetch
           # them. Optional: when unset, the Bump step falls back
           # to the historical `release-bot` identity (issue #119
           # legacy carve-out) so the canonical release pipeline
@@ -645,16 +645,16 @@ jobs:
   #   release -> apply infra/prod
   #
   # OIDC role: blitzlog-deploy-role, provisioned by
-  # infra/bootstrap/deploy-role.tf. Trust policy mirrors the
+  # infra/aws/bootstrap/deploy-role.tf. Trust policy mirrors the
   # Packer role's OIDC block (any branch of great-wall-connect/
   # blitzlog) but drops the EC2 service-principal statement — the
-  # local-exec in infra/modules/core/lambda.tf:35-92 runs on the
+  # local-exec in infra/aws/modules/core/lambda.tf:35-92 runs on the
   # runner, not on an EC2 instance.
   #
   # Per-env concurrency serializes CI runs (cancel-in-progress:
   # false) so a long apply blocks the next one rather than racing
   # it. Local-vs-CI races remain possible (the project chose no
-  # DynamoDB lock table; see infra/prod/main.tf:4-9 and
+  # DynamoDB lock table; see infra/aws/prod/main.tf:4-9 and
   # README.md:295-307).
   #
   # Prod gate: when the mode is `release` (prod), the job would
@@ -682,7 +682,7 @@ jobs:
     runs-on: ubuntu-26.04
     # 20 min covers a typical plan + apply + local-exec (Python 3.12
     # venv + pip install for the lambda bundle, see
-    # infra/modules/core/lambda.tf:35-92). The Packer bake has
+    # infra/aws/modules/core/lambda.tf:35-92). The Packer bake has
     # already published the AMI id to SSM, so the deploy is
     # strictly a terraform run — no AMI build.
     timeout-minutes: 20
@@ -700,6 +700,13 @@ jobs:
       cancel-in-progress: false
     env:
       BLITZLOG_ENV: ${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }}
+      # Issue #126: BLITZLOG_PROVIDER selects the per-cloud tree
+      # (infra/aws/{dev,prod}/ for AWS, infra/alicloud/{dev,prod}/
+      # for Alicloud). Default "aws" preserves the pre-#126
+      # behaviour. The Packer step below fails fast when this is
+      # set to "alicloud" because the AMI bake is AWS-only in
+      # this PR; the Aliyun image builder is Phase 5.
+      BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}
       STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate' }}
       AWS_REGION: ap-east-1
 
@@ -717,13 +724,34 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref_name }}
           fetch-depth: 0
 
+      # Issue #126: Alicloud provider pre-flight. The Packer step
+      # below is AWS-only; fail the job fast if BLITZLOG_PROVIDER is
+      # alicloud. The Alicloud tree itself is applied later in this
+      # job (the `terraform init/plan/apply` steps).
+      - name: Validate provider
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+        run: |
+          set -euo pipefail
+          case "${BLITZLOG_PROVIDER}" in
+            aws) ;;
+            alicloud)
+              echo "FATAL: BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step (Phase 5 follow-up). Set vars.BLITZLOG_PROVIDER=aws or unset it to apply AWS." >&2
+              exit 1
+              ;;
+            *)
+              echo "FATAL: BLITZLOG_PROVIDER=${BLITZLOG_PROVIDER} is not a recognised provider. Use 'aws' or 'alicloud'." >&2
+              exit 1
+              ;;
+          esac
+
       - name: Install mise
         uses: jdx/mise-action@v4
 
       - name: Install Python toolchain
         # The local-exec in null_resource.lambda_build resolves
         # Python 3.12 from `~/.local/share/mise/installs/python/...`
-        # (see infra/modules/core/lambda.tf:65-75). mise.toml pins
+        # (see infra/aws/modules/core/lambda.tf:65-75). mise.toml pins
         # python = "3.12", so `mise install` puts it there.
         run: mise install
 
@@ -732,7 +760,7 @@ jobs:
         with:
           terraform_version: 1.9.8
 
-      # Build the Lambda bundle into `infra/modules/core/build/`
+      # Build the Lambda bundle into `infra/aws/modules/core/build/`
       # BEFORE `terraform plan` runs. The data source
       # `module.core.data.archive_file.lambda_zip` (lambda.tf:1-7)
       # reads that directory at plan time to compute
@@ -742,11 +770,11 @@ jobs:
       # runs on `terraform apply`, so the dir doesn't exist on a
       # fresh runner by the time plan runs. The release job above
       # builds into `infra/build/` (the release asset path), not
-      # `infra/modules/core/build/`, so we can't share artifacts
+      # `infra/aws/modules/core/build/`, so we can't share artifacts
       # between the two jobs.
       #
       # This command mirrors the local-exec in
-      # `infra/modules/core/lambda.tf:57-92` and uses the same
+      # `infra/aws/modules/core/lambda.tf:57-92` and uses the same
       # Python-resolution ladder (system python3.12 → mise →
       # fail loudly).
       - name: Pre-build Lambda bundle
@@ -760,28 +788,28 @@ jobs:
             echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
             exit 1
           fi
-          BUILD_DIR=infra/modules/core/build
-          rm -rf "$BUILD_DIR" infra/modules/core/.build-venv
+          BUILD_DIR=infra/aws/modules/core/build
+          rm -rf "$BUILD_DIR" infra/aws/modules/core/.build-venv
           mkdir -p "$BUILD_DIR"
           cp -r lambda "$BUILD_DIR"/
           mkdir -p "$BUILD_DIR/lambda/packages/whisper-stt-shim"
           cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
-          "$PYTHON_BIN" -m venv infra/modules/core/.build-venv
-          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/modules/core/.build-venv/bin/python3
-          infra/modules/core/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t "$BUILD_DIR"
-          rm -rf infra/modules/core/.build-venv
+          "$PYTHON_BIN" -m venv infra/aws/modules/core/.build-venv
+          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/aws/modules/core/.build-venv/bin/python3
+          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t "$BUILD_DIR"
+          rm -rf infra/aws/modules/core/.build-venv
 
       - name: Configure AWS credentials (OIDC) for terraform
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # OIDC into the role provisioned by infra/bootstrap/
+          # OIDC into the role provisioned by infra/aws/bootstrap/
           # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)
           # is used by the Packer workflow above.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
 
       # Fetch per-env deploy config + secrets from SSM Parameter
-      # Store. The deploy role (infra/bootstrap/deploy-role.tf)
+      # Store. The deploy role (infra/aws/bootstrap/deploy-role.tf)
       # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the
       # OIDC session can read these. We fetch the entire env
       # subtree in one round trip (cheaper + atomic) and map
@@ -795,7 +823,7 @@ jobs:
       # forks on this public repo can't read them).
       #
       # Placeholder detection: every parameter was provisioned
-      # by infra/bootstrap/secrets.tf with
+      # by infra/aws/bootstrap/secrets.tf with
       # value=PLACEHOLDER_SET_VIA_AWS_CLI; the bootstrap
       # `lifecycle.ignore_changes=[value]` keeps the operator's
       # real value intact across subsequent applies. The sanity
@@ -804,7 +832,16 @@ jobs:
       # one-time-setup error rather than a confusing
       # "GitHub App auth failed" deep inside the Lambda at
       # runtime.
+      #
+      # Issue #126: this step is AWS-only. The Alicloud path
+      # uses the operator's `alicloud.tfvars` (gitignored, copied
+      # from `alicloud.tfvars.example`) directly via -var-file
+      # in the `terraform plan` step above. The Phase 5
+      # follow-up will add a KMS Secrets fetch (mirroring this
+      # step) once the Aliyun OIDC role is provisioned in
+      # infra/alicloud/bootstrap/deploy-role.tf.
       - name: Render TF_VAR_* env from SSM
+        if: env.BLITZLOG_PROVIDER == 'aws'
         env:
           BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
         run: |
@@ -867,37 +904,66 @@ jobs:
       # state buckets), the key is per-env
       # (<env>/blitzlog.tfstate), the region is hard-coded
       # ap-east-1 (matches the bootstrap role's trust policy).
+      #
+      # Issue #126: when BLITZLOG_PROVIDER=alicloud, the backend
+      # switches from AWS S3 to Alicloud OSS. The state bucket
+      # name comes from vars.TF_BACKEND_BUCKET_OSS (default
+      # `gwc-infra-tfstate` so the standard install needs no
+      # operator action), the region is hard-coded cn-hangzhou to
+      # match the bootstrap role's trust policy.
       - name: terraform init
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         env:
           TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tfstate' }}
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
-          terraform init -input=false \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${{ env.STATE_KEY }}" \
-            -backend-config="region=ap-east-1"
+          if [ "${BLITZLOG_PROVIDER}" = "alicloud" ]; then
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="region=cn-hangzhou"
+          else
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="region=ap-east-1"
+          fi
 
       - name: terraform validate
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         run: terraform validate -no-color
 
+      # Issue #126: pass the per-provider tfvars file. The naming
+      # convention is `<provider>.tfvars` (e.g. `aws.tfvars` for the
+      # AWS path, `alicloud.tfvars` for the Alicloud path). The
+      # files are gitignored operator-side; the example file in the
+      # same directory is the template.
       - name: terraform plan
         id: plan
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
           # -out=tfplan serialises the plan to a file so the
           # apply step consumes the exact same plan (no drift
           # between plan and apply). -no-color keeps the log
           # readable in the GH Actions UI.
-          terraform plan -no-color -input=false -out=tfplan
+          TFVARS_FILE="${BLITZLOG_PROVIDER}.tfvars"
+          if [ -f "${TFVARS_FILE}" ]; then
+            terraform plan -no-color -input=false -var-file="${TFVARS_FILE}" -out=tfplan
+          else
+            echo "FATAL: ${TFVARS_FILE} not found in $(pwd). Copy the *.tfvars.example to ${TFVARS_FILE} and fill in the values." >&2
+            exit 1
+          fi
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-${{ env.BLITZLOG_ENV }}
-          path: infra/${{ env.BLITZLOG_ENV }}/tfplan
+          name: tfplan-${{ env.BLITZLOG_PROVIDER }}-${{ env.BLITZLOG_ENV }}
+          path: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}/tfplan
           # 14-day retention matches the issue body's plan
           # reusability goal (the plan is a snapshot, not a
           # long-lived artifact).
@@ -905,7 +971,7 @@ jobs:
 
       - name: terraform apply
         id: apply
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         # Always consumes the plan from the previous step; never
         # re-plans in-band. Keeps plan↔apply symmetric so a
         # reviewer looking at the artifact can be sure the apply
@@ -914,7 +980,7 @@ jobs:
 
       - name: Capture terraform output
         if: steps.apply.outcome == 'success'
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         # `webhook_url` is the only output the operator needs
         # after a successful apply (it's the URL the GitHub App
         # webhook should target). Capture the full -json output

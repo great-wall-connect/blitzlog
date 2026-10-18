@@ -47,7 +47,7 @@ truth: it tags each image build with `v{X.Y.Z}` (release) or
 `v{X.Y.Z}-pr{N}` (pr-test) and bakes a corresponding AMI. The Packer
 build receives `agent_image_tag` via `-var` from the workflow.
 
-`infra/packer/docker-images.pkrvars.hcl` is the **default** for local
+`infra/aws/packer/docker-images.pkrvars.hcl` is the **default** for local
 debug builds only; the release workflow overrides it. Its current value
 is a relic from before the release pipeline landed — bumping it is no
 longer the canonical way to ship a new image version.
@@ -63,7 +63,7 @@ The Lambda reads this SSM parameter via `get_agent_ami()` in
 LTS arm64 minimal AMI (the same one Packer uses as `source_ami_filter`).
 
 Build pipeline:
-- `infra/packer/agent-docker-ubuntu.pkr.hcl`
+- `infra/aws/packer/agent-docker-ubuntu.pkr.hcl`
 
 ## Spot interruption handling
 

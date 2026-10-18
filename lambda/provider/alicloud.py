@@ -620,7 +620,7 @@ class AlicloudCompute(ComputeProvider):
              https://oss-$region.aliyuncs.com` — downloads the bootstrap.
 
         The `aliyun` CLI is pre-installed by the Packer pipeline
-        (`infra/packer/agent-docker-ubuntu.pkr.hcl` Phase 5+
+        (`infra/aws/packer/agent-docker-ubuntu.pkr.hcl` Phase 5+
         will switch the bootstrap heredoc to render `aliyun oss
         cp` natively; today the EC2-side heredoc still uses
         `aws s3 cp` because Phase 5 has not shipped yet).

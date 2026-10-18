@@ -15,7 +15,7 @@ grant only surfaces 50 minutes after a fresh instance launches
 — and by then the agent has already done most of its work. The
 tests below pin the exact Sid + actions + condition that the
 chain's `iam:PassRole` requires so a future refactor of
-`infra/modules/core/iam.tf` cannot drop it without failing here.
+`infra/aws/modules/core/iam.tf` cannot drop it without failing here.
 """
 
 import re
@@ -23,14 +23,14 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LAMBDA_IAM_TF = REPO_ROOT / "infra" / "modules" / "core" / "iam.tf"
+LAMBDA_IAM_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "iam.tf"
 
 
 def _policy_body_for_inline_lambda_role(iam_tf: str) -> str:
     """Return the HCL body of the Lambda role's inline policy block.
 
     The Lambda role is `aws_iam_role.lambda_role` in
-    `infra/modules/core/iam.tf`. Its inline policy is the
+    `infra/aws/modules/core/iam.tf`. Its inline policy is the
     `jsonencode({...})` call inside the
     `aws_iam_role_policy.lambda_policy` resource, which lives in
     the same `iam.tf` file (separate from the EC2 agent role and

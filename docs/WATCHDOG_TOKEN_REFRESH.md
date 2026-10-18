@@ -181,15 +181,15 @@ remaining events fire and no-op against the missing SSM parameter
 | File | Role |
 |---|---|
 | `lambda/handler.py` | The Lambda's `action == "refresh"` branch + the 10-iter `schedule_next_refresh` chain. |
-| `infra/modules/core/scheduler.tf` | The per-env EventBridge Scheduler IAM role + schedule group. |
-| `infra/packer/scripts-docker-ubuntu/watchdog.sh` | The host-side lifecycle manager. Sources the poll library, starts the loop, SIGTERMs it on container exit. |
-| `infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter` + diff-checked in-place rewrite of the two bind-mounted credential files. |
+| `infra/aws/modules/core/scheduler.tf` | The per-env EventBridge Scheduler IAM role + schedule group. |
+| `infra/aws/packer/scripts-docker-ubuntu/watchdog.sh` | The host-side lifecycle manager. Sources the poll library, starts the loop, SIGTERMs it on container exit. |
+| `infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter` + diff-checked in-place rewrite of the two bind-mounted credential files. |
 | `tests/test_watchdog_credential_poll.py` | 6 library-in-isolation tests. |
 | `tests/test_watchdog_credential_poll_e2e.py` | 9 tests spanning Level 1 (8) + Level 2 (1). |
 | `tests/conftest.py` | Registers the `integration` marker + auto-skip hook. |
 | `scripts/test-dev-spot.sh` | Level 3 wrapper around the manual procedure below. |
 | `.github/workflows/integration-test.yml` | Nightly schedule for Level 2. |
-| `infra/bootstrap/integration-test-role.tf` | Narrow-OIDC IAM role for the nightly integration job. |
+| `infra/aws/bootstrap/integration-test-role.tf` | Narrow-OIDC IAM role for the nightly integration job. |
 
 ## Nightly CI
 
@@ -439,4 +439,4 @@ done
 | Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
 | `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
-| Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/bootstrap/`). |
+| Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/aws/bootstrap/`). |

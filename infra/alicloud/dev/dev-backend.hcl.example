@@ -1,0 +1,14 @@
+# Alicloud OSS backend config for the dev env.
+#
+# Mirror of infra/aws/dev/prod-backend.hcl.example. The OSS bucket
+# must be created manually (or via the bootstrap stack at
+# infra/alicloud/bootstrap/) before `terraform init` — backend
+# init does NOT create the bucket.
+#
+# Usage:
+#   terraform init -input=false \
+#     -backend-config=infra/alicloud/dev/dev-backend.hcl
+
+bucket = "blitzlog-dev-tfstate"
+key    = "dev/blitzlog.tfstate"
+region = "cn-hangzhou"

@@ -11,7 +11,7 @@ export async function archiveSession({ $, archiveDir = "/workspace/.blitzlog", s
   // these first means the operator's recovery path is intact even when
   // the JSON export comes back empty. The host's watchdog uploads
   // /workspace/.blitzlog/* wholesale
-  // (infra/packer/scripts-docker-ubuntu/watchdog.sh:243-250), so anything
+  // (infra/aws/packer/scripts-docker-ubuntu/watchdog.sh:243-250), so anything
   // we land in this directory lands in the operator's recovery path
   // automatically.
   const metadata = JSON.stringify({ sessionId, branch, commit, timestamp: Date.now() });

@@ -1,5 +1,5 @@
 """Regression: pin the COMMON_ARGS / mode-specific split invariant in
-`infra/packer/scripts-docker-ubuntu/watchdog.sh`.
+`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh`.
 
 The watchdog runs under `set -euo pipefail` and `source`s
 `/etc/blitzlog.env` before building the `COMMON_ARGS=( ... )` array
@@ -8,7 +8,7 @@ set in the shell by the time the array is built — otherwise `set -u`
 aborts the watchdog before the container even starts.
 
 The watchdog has a documented invariant (see the comment block at
-`infra/packer/scripts-docker-ubuntu/watchdog.sh:139-143`):
+`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh:139-143`):
 
 > Mode-specific env vars. We don't reference these outside the
 > matching branch — `set -u` would otherwise kill the script when a
@@ -45,9 +45,9 @@ import re
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WATCHDOG = os.path.join(REPO_ROOT, "infra/packer/scripts-docker-ubuntu/watchdog.sh")
-AUTONOMOUS_PY = os.path.join(REPO_ROOT, "lambda/scripts/autonomous.py")
-ASSISTED_PY = os.path.join(REPO_ROOT, "lambda/scripts/assisted.py")
+WATCHDOG = os.path.join(REPO_ROOT, "infra/aws/packer/scripts-docker-ubuntu/watchdog.sh")
+AUTONOMOUS_PY = os.path.join(REPO_ROOT, "lambda/scripts/aws/autonomous.py")
+ASSISTED_PY = os.path.join(REPO_ROOT, "lambda/scripts/aws/assisted.py")
 
 # Vars the watchdog sets in-script (from SSM, `openssl rand`, etc.)
 # BEFORE the `COMMON_ARGS=(...)` array is built. These do NOT need

@@ -1,0 +1,41 @@
+# Alicloud prod tfvars — copy to alicloud.tfvars and fill in.
+#
+# This is the prod env. Use the dedicated prod 'Blitzlog' GitHub App
+# + your real user repos. See infra/aws/prod/terraform.tfvars.example
+# for the AWS-side analogue.
+
+alicloud_region = "cn-hangzhou"
+
+# VPC and VSwitches.
+vpc_id         = ""
+vswitch_ids    = []
+
+# SSH ingress: empty = no SSH ingress.
+ssh_allowed_cidrs = []
+
+# GitHub App: prod 'Blitzlog' app.
+github_app_id              = "REPLACE_ME_prod_app_id"
+github_app_private_key     = "REPLACE_ME_prod_app_private_key_base64"
+github_app_installation_id = "REPLACE_ME_prod_installation_id"
+github_webhook_secret      = "REPLACE_ME_prod_webhook_secret"
+
+# Cloud Monitor alarm email: empty = no email subscription.
+alert_email = ""
+
+# OpenCode: prod model + API key.
+opencode_model            = "minimax-coding-plan/MiniMax-M3"
+opencode_agent_max_steps  = 500
+opencode_api_key          = "REPLACE_ME_prod_opencode_api_key"
+
+# OSS bucket name for prod agent logs. Must be globally unique.
+agent_logs_bucket_name = "blitzlog-prod-agent-logs"
+
+# Whisper STT config.
+stt_api_url            = "http://127.0.0.1:7878/v1"
+stt_api_key            = "placeholder-not-used-by-localhost-shim"
+stt_model              = "base.en"
+stt_language           = "en"
+stt_models_bucket_name = "blitzlog-prod-stt-models"
+
+# ECS preemptible spot instance types.
+spot_instance_types = ["ecs.t6-c1m2.large", "ecs.t6-c1m4.large", "ecs.t6-c1m4.xlarge"]

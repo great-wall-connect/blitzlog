@@ -1,7 +1,7 @@
 """Static analysis tests for the multi-env Terraform layout.
 
 These tests do NOT need AWS credentials. They parse the HCL/JSON in
-infra/modules/core/iam.tf and assert that:
+infra/aws/modules/core/iam.tf and assert that:
 
 - The Lambda role for any single env does not reference the OTHER env's SSM prefix
 - Resource names embed var.environment so prod and dev stacks never collide
@@ -22,12 +22,12 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-IAM_TF = REPO_ROOT / "infra" / "modules" / "core" / "iam.tf"
-LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
-EC2_TF = REPO_ROOT / "infra" / "modules" / "core" / "ec2.tf"
-ALERTING_TF = REPO_ROOT / "infra" / "modules" / "core" / "alerting.tf"
-STORAGE_TF = REPO_ROOT / "infra" / "modules" / "core" / "storage.tf"
-LOCALS_TF = REPO_ROOT / "infra" / "modules" / "core" / "locals.tf"
+IAM_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "iam.tf"
+LAMBDA_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "lambda.tf"
+EC2_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "ec2.tf"
+ALERTING_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "alerting.tf"
+STORAGE_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "storage.tf"
+LOCALS_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "locals.tf"
 USER_POOL_MAIN = REPO_ROOT / "infra" / "user-pool" / "main.tf"
 USER_POOL_VARS = REPO_ROOT / "infra" / "user-pool" / "variables.tf"
 
@@ -202,7 +202,7 @@ class TestEnvNamespacing(unittest.TestCase):
     def test_environment_variable_is_validated(self):
         """The environment variable must restrict input to safe characters."""
         variables_tf = (
-            REPO_ROOT / "infra" / "modules" / "core" / "variables.tf"
+            REPO_ROOT / "infra" / "aws" / "modules" / "core" / "variables.tf"
         ).read_text()
         match = re.search(
             r'variable\s+"environment"\s*\{(?P<body>.*?)\n\}\n',
@@ -385,7 +385,7 @@ class TestEnvNamespacing(unittest.TestCase):
     def test_storage_uses_data_sources_not_resources(self):
         """storage.tf must declare both buckets as data sources, not resources.
 
-        Both buckets are owned by the infra/bootstrap/ stack. Each env (prod,
+        Both buckets are owned by the infra/aws/bootstrap/ stack. Each env (prod,
         dev, ...) references them by name via `data "aws_s3_bucket"` so a
         second `terraform apply` does not try to recreate a bucket the first
         env already owns (BucketAlreadyOwnedByYou).
@@ -398,7 +398,7 @@ class TestEnvNamespacing(unittest.TestCase):
             )
         # Per-env stacks must NOT own bucket-config resources (encryption,
         # versioning, lifecycle, public-access-block) — those live in
-        # infra/bootstrap/.
+        # infra/aws/bootstrap/.
         for forbidden in (
             'resource "aws_s3_bucket" "agent_logs"',
             'resource "aws_s3_bucket" "stt_models"',
@@ -409,25 +409,27 @@ class TestEnvNamespacing(unittest.TestCase):
             self.assertNotIn(
                 forbidden,
                 self.storage_tf,
-                f"storage.tf must not contain {forbidden!r} — bucket config is owned by infra/bootstrap/",
+                f"storage.tf must not contain {forbidden!r} — bucket config is owned by infra/aws/bootstrap/",
             )
 
     def test_bootstrap_stack_exists_and_owns_buckets(self):
-        """The infra/bootstrap/ stack must exist and contain the bucket resources.
+        """The infra/aws/bootstrap/ stack must exist and contain the bucket resources.
 
         Without it, per-env `terraform apply` fails because the data sources
         point at non-existent bucket names.
         """
-        bootstrap_main = (REPO_ROOT / "infra" / "bootstrap" / "main.tf").read_text()
+        bootstrap_main = (
+            REPO_ROOT / "infra" / "aws" / "bootstrap" / "main.tf"
+        ).read_text()
         self.assertIn(
             'resource "aws_s3_bucket" "agent_logs"',
             bootstrap_main,
-            "infra/bootstrap/main.tf must own the agent_logs bucket",
+            "infra/aws/bootstrap/main.tf must own the agent_logs bucket",
         )
         self.assertIn(
             'resource "aws_s3_bucket" "stt_models"',
             bootstrap_main,
-            "infra/bootstrap/main.tf must own the stt_models bucket",
+            "infra/aws/bootstrap/main.tf must own the stt_models bucket",
         )
         # The bootstrap stack must configure the same hardening the old
         # per-env stack did (encryption, versioning, PAB, lifecycle).
@@ -440,7 +442,7 @@ class TestEnvNamespacing(unittest.TestCase):
             self.assertIn(
                 required,
                 bootstrap_main,
-                f"infra/bootstrap/main.tf must configure {required} on the shared buckets",
+                f"infra/aws/bootstrap/main.tf must configure {required} on the shared buckets",
             )
 
     def test_lambda_wires_spot_instance_types_env_var(self):
@@ -456,7 +458,7 @@ class TestEnvNamespacing(unittest.TestCase):
         self.assertIn(
             "SPOT_INSTANCE_TYPES_JSON",
             self.lambda_tf,
-            "infra/modules/core/lambda.tf must pass SPOT_INSTANCE_TYPES_JSON "
+            "infra/aws/modules/core/lambda.tf must pass SPOT_INSTANCE_TYPES_JSON "
             "as a Lambda env var so operators can override spot instance "
             "families per region (issue #26)",
         )
@@ -469,21 +471,21 @@ class TestEnvNamespacing(unittest.TestCase):
         # The variable must be declared in variables.tf so prod/dev layers
         # can override it in terraform.tfvars.
         variables_tf = (
-            REPO_ROOT / "infra" / "modules" / "core" / "variables.tf"
+            REPO_ROOT / "infra" / "aws" / "modules" / "core" / "variables.tf"
         ).read_text()
         self.assertIn(
             'variable "spot_instance_types"',
             variables_tf,
-            "infra/modules/core/variables.tf must declare spot_instance_types",
+            "infra/aws/modules/core/variables.tf must declare spot_instance_types",
         )
         # Plumbed through both env layers so terraform.tfvars overrides
         # actually reach the core module.
         for layer in ("prod", "dev"):
-            layer_main = (REPO_ROOT / "infra" / layer / "main.tf").read_text()
+            layer_main = (REPO_ROOT / "infra" / "aws" / layer / "main.tf").read_text()
             self.assertIn(
                 "spot_instance_types = var.spot_instance_types",
                 layer_main,
-                f"infra/{layer}/main.tf must pass spot_instance_types to the core module",
+                f"infra/aws/{layer}/main.tf must pass spot_instance_types to the core module",
             )
 
     def test_log_upload_path_is_env_prefixed(self):
@@ -510,7 +512,12 @@ class TestEnvNamespacing(unittest.TestCase):
         key second) is unchanged.
         """
         watchdog = (
-            REPO_ROOT / "infra" / "packer" / "scripts-docker-ubuntu" / "watchdog.sh"
+            REPO_ROOT
+            / "infra"
+            / "aws"
+            / "packer"
+            / "scripts-docker-ubuntu"
+            / "watchdog.sh"
         ).read_text()
         self.assertRegex(
             watchdog,
@@ -547,6 +554,298 @@ class TestEnvNamespacing(unittest.TestCase):
             "${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/* — the "
             "log-upload code (autonomous.py + assisted.py) prefixes keys with "
             "$BLITZLOG_ENV/, so this is the path the runtime actually uses.",
+        )
+
+
+class TestAlicloudProviderDispatch(unittest.TestCase):
+    """Static analysis tests for the Alicloud Terraform split (issue #126).
+
+    The issue adds `infra/alicloud/{modules/core,dev,prod,bootstrap}/`
+    and a per-env tfvars file. The dispatch is at the
+    `.github/workflows/release.yml` level: `vars.BLITZLOG_PROVIDER`
+    defaults to `aws`, the working-directory includes the provider
+    prefix, and the backend switches from S3 to OSS.
+
+    These tests guard the invariants of the split without touching
+    AWS credentials or Alicloud credentials. They complement the
+    AWS-side `TestEnvNamespacing` tests above.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    ALICLOUD_MODULE = REPO_ROOT / "infra" / "alicloud" / "modules" / "core"
+    ALICLOUD_DEV = REPO_ROOT / "infra" / "alicloud" / "dev"
+    ALICLOUD_PROD = REPO_ROOT / "infra" / "alicloud" / "prod"
+    ALICLOUD_BOOTSTRAP = REPO_ROOT / "infra" / "alicloud" / "bootstrap"
+    RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+    def test_alicloud_module_directory_layout(self):
+        """The Alicloud module tree must mirror the AWS one 1-to-1.
+
+        Issue #126 acceptance criteria: each resource file in
+        `infra/alicloud/modules/core/` has a top-of-file mapping
+        comment pointing to the AWS analogue. We assert both the
+        file existence and the comment presence.
+        """
+        expected_files = {
+            "function_compute.tf": "infra/aws/modules/core/lambda.tf",
+            "ecs.tf": "infra/aws/modules/core/ec2.tf",
+            "ram.tf": "infra/aws/modules/core/iam.tf",
+            "apigateway.tf": "infra/aws/modules/core/apigateway.tf",
+            "oss.tf": "infra/aws/modules/core/storage.tf",
+            "mns.tf": "infra/aws/modules/core/alerting.tf",
+            "kms.tf": "infra/aws/modules/core/iam.tf",
+            "variables.tf": "infra/aws/modules/core/variables.tf",
+            "outputs.tf": "infra/aws/modules/core/outputs.tf",
+            "locals.tf": "infra/aws/modules/core/locals.tf",
+            "main.tf": "infra/aws/modules/core/main.tf",
+        }
+        for filename, aws_analogue in expected_files.items():
+            path = self.ALICLOUD_MODULE / filename
+            self.assertTrue(
+                path.exists(),
+                f"{path} must exist (analogue of {aws_analogue})",
+            )
+            # First 20 lines must mention the AWS analogue somewhere.
+            head = "\n".join(path.read_text().splitlines()[:20])
+            self.assertIn(
+                aws_analogue,
+                head,
+                f"{filename} must reference its AWS analogue ({aws_analogue}) "
+                f"in the top-of-file comment block, so a reader knows the mapping.",
+            )
+
+    def test_alicloud_dev_prod_have_no_count_gated_module(self):
+        """The per-cloud directory layout removes the need for
+        `count` on the `module "core"` call.
+
+        The issue body's draft proposed a `local.provider` switch
+        with `count = local.provider == "alicloud" ? 1 : 0`; the
+        chosen layout (`infra/aws/<env>` vs `infra/alicloud/<env>`)
+        makes the gating obsolete. This test guards the simpler
+        shape: each per-cloud main.tf calls `module "core"` once
+        with no `count`.
+        """
+        for layer_dir, env in (
+            (self.ALICLOUD_DEV, "dev"),
+            (self.ALICLOUD_PROD, "prod"),
+        ):
+            main = (layer_dir / "main.tf").read_text()
+            self.assertIn(
+                'module "core"',
+                main,
+                f"infra/alicloud/{env}/main.tf must call module 'core'",
+            )
+            # The block must NOT have a `count` argument on the
+            # module call. We grep for `module "core" {` and
+            # assert the body has no `count =` line.
+            start = main.find('module "core"')
+            end = main.find("}", start)
+            body = main[start:end]
+            self.assertNotIn(
+                "count",
+                body,
+                f"infra/alicloud/{env}/main.tf must not count-gate the "
+                f"module call (per-cloud directory layout makes it obsolete); "
+                f"got:\n{body}",
+            )
+
+    def test_alicloud_dev_prod_terraform_tfvars_example_exists(self):
+        """The per-env tfvars.example must exist for the operator to copy from.
+
+        The release workflow's `terraform plan` step requires
+        `<provider>.tfvars` to exist (it fails fast if not). The
+        operator copies the `.tfvars.example` to the actual tfvars
+        file. Same convention as the AWS path.
+        """
+        for layer_dir, env in (
+            (self.ALICLOUD_DEV, "dev"),
+            (self.ALICLOUD_PROD, "prod"),
+        ):
+            example = layer_dir / "alicloud.tfvars.example"
+            self.assertTrue(
+                example.exists(),
+                f"infra/alicloud/{env}/alicloud.tfvars.example must exist "
+                f"as the template the operator copies to alicloud.tfvars",
+            )
+
+    def test_alicloud_bootstrap_exists(self):
+        """The Alicloud bootstrap stack must exist (mirrors
+        `infra/aws/bootstrap/`) — both for the OSS buckets and as the
+        future home of the Aliyun OIDC role for the GHA workflow.
+
+        Issue #126 doesn't list a bootstrap file explicitly, but
+        without one the per-env `data "alicloud_oss_buckets"`
+        references would fail at `terraform apply` time (the
+        operator would have to create the buckets manually). The
+        bootstrap is the natural one-time setup.
+        """
+        for filename in ("main.tf", "variables.tf", "outputs.tf"):
+            self.assertTrue(
+                (self.ALICLOUD_BOOTSTRAP / filename).exists(),
+                f"infra/alicloud/bootstrap/{filename} must exist",
+            )
+
+    def test_function_compute_sets_blitzlog_provider_alicloud(self):
+        """The FC function's `environment_variables` block must set
+        `BLITZLOG_PROVIDER = "alicloud"`.
+
+        This is the runtime half of the dispatch: the lambda's
+        provider factory (lambda/provider/__init__.py) reads this
+        env var on cold start and picks `AlicloudCompute` /
+        `AlicloudSecretStore` / `AlicloudObjectStore`. If the value
+        is missing or wrong, the FC falls back to AWS and the
+        runtime fails at the first AWS API call.
+        """
+        fc = (self.ALICLOUD_MODULE / "function_compute.tf").read_text()
+        # Find the environment_variables block.
+        start = fc.find("environment_variables")
+        self.assertGreater(
+            start, 0, "function_compute.tf must have an environment_variables block"
+        )
+        # Walk braces to find the end of the block.
+        depth = 0
+        i = start
+        while i < len(fc):
+            if fc[i] == "{":
+                depth += 1
+            elif fc[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        block = fc[start : i + 1]
+        self.assertIn(
+            'BLITZLOG_PROVIDER     = "alicloud"',
+            block,
+            f'environment_variables must set BLITZLOG_PROVIDER = "alicloud"; got:\n{block}',
+        )
+
+    def test_ram_does_not_reference_aws_iam(self):
+        """Defensive guard: the Alicloud RAM file must not contain
+        any `aws_iam_*` resource type. A copy-paste from iam.tf
+        would silently try to provision AWS resources from the
+        Alicloud tree, which would fail at `terraform apply` (no AWS
+        creds in the alicloud context).
+
+        Comments and prose are fine — the test scans only code
+        lines (anything containing a `=` or starting with
+        whitespace + `resource `).
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        for line in ram.splitlines():
+            stripped = line.lstrip()
+            # Skip pure-comment lines and blank lines.
+            if not stripped or stripped.startswith("#"):
+                continue
+            # Code lines: a `resource "aws_iam_*" "` would be a
+            # bug. We don't care about mentions in action names,
+            # which would appear in `jsonencode` blocks (those
+            # don't contain `aws_iam_` as a substring anyway —
+            # AWS IAM actions use lowercase `iam:*`).
+            if "aws_iam_" in stripped:
+                self.fail(
+                    f"ram.tf code line contains 'aws_iam_': {line!r}\n"
+                    f"Use alicloud_ram_* resource types instead. "
+                    f"A copy-paste from iam.tf would silently try to "
+                    f"provision AWS resources."
+                )
+
+    def test_release_workflow_dispatches_by_provider(self):
+        """The release workflow's deploy job must read
+        `vars.BLITZLOG_PROVIDER`, default to `aws`, and use it in
+        the working-directory of every terraform step.
+
+        Without this, a `BLITZLOG_PROVIDER=alicloud` deploy would
+        apply the AWS tree (default fallback) — the wrong cloud.
+        """
+        text = self.RELEASE_YML.read_text()
+        # Find the deploy job section.
+        deploy_idx = text.find("deploy:\n")
+        self.assertGreater(deploy_idx, 0, "release.yml must have a deploy job")
+        # Roughly the deploy job body (until the next top-level `name:` or
+        # end of file — heuristic, but sufficient for a regression guard).
+        body = text[deploy_idx:]
+
+        self.assertIn(
+            "BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}",
+            body,
+            "deploy job env must define BLITZLOG_PROVIDER with the "
+            "vars.BLITZLOG_PROVIDER || 'aws' default",
+        )
+        # Every terraform step in the deploy job must use the
+        # provider prefix in working-directory. We count the
+        # occurrences of `working-directory: infra/${{ env.BLITZLOG_ENV }}`
+        # (the pre-#126 shape) — there must be ZERO, and at least
+        # one `working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}`.
+        self.assertNotIn(
+            "working-directory: infra/${{ env.BLITZLOG_ENV }}",
+            body,
+            "deploy job working-directory must include the provider prefix; "
+            "the pre-#126 shape `infra/${{ env.BLITZLOG_ENV }}` would skip the "
+            "BLITZLOG_PROVIDER dispatch.",
+        )
+        self.assertIn(
+            "working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}",
+            body,
+            "deploy job working-directory must use the provider prefix",
+        )
+
+    def test_release_workflow_fails_loud_on_alicloud_without_phase5(self):
+        """The Packer step is AWS-only. The deploy job must fail
+        fast when `BLITZLOG_PROVIDER=alicloud` (until the Aliyun
+        image builder lands in Phase 5).
+
+        Without this guard, an operator setting
+        `vars.BLITZLOG_PROVIDER=alicloud` would have the Packer
+        step run against the AWS account (wrong image) before the
+        Alicloud terraform plan/apply ever runs.
+        """
+        text = self.RELEASE_YML.read_text()
+        deploy_idx = text.find("deploy:\n")
+        body = text[deploy_idx:]
+        self.assertIn(
+            "BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step",
+            body,
+            "deploy job must fail fast when BLITZLOG_PROVIDER=alicloud; "
+            "Packer is AWS-only until Phase 5.",
+        )
+
+    def test_release_workflow_uses_per_provider_tfvars(self):
+        """The `terraform plan` step must pass `-var-file=${BLITZLOG_PROVIDER}.tfvars`.
+
+        Without the per-provider tfvars file, the operator's
+        Alicloud-specific config (region, VSwitch ids, GitHub App
+        creds) would be missing and the plan would fail.
+        """
+        text = self.RELEASE_YML.read_text()
+        deploy_idx = text.find("deploy:\n")
+        body = text[deploy_idx:]
+        self.assertIn(
+            "${BLITZLOG_PROVIDER}.tfvars",
+            body,
+            "terraform plan step must pass -var-file=${BLITZLOG_PROVIDER}.tfvars",
+        )
+
+    def test_release_workflow_picks_oss_backend_for_alicloud(self):
+        """The `terraform init` step must switch backends based on
+        `BLITZLOG_PROVIDER`. AWS uses S3 + ap-east-1; Alicloud uses
+        OSS + cn-hangzhou.
+
+        Without the switch, the Alicloud apply would try to
+        initialise an S3 backend (wrong cloud).
+        """
+        text = self.RELEASE_YML.read_text()
+        deploy_idx = text.find("deploy:\n")
+        body = text[deploy_idx:]
+        self.assertIn(
+            "TF_BACKEND_BUCKET_OSS",
+            body,
+            "terraform init step must reference TF_BACKEND_BUCKET_OSS for the Alicloud path",
+        )
+        self.assertIn(
+            "region=cn-hangzhou",
+            body,
+            "terraform init step must use cn-hangzhou as the OSS backend region",
         )
 
 
