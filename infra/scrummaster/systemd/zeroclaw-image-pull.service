@@ -1,0 +1,21 @@
+# zeroclaw-image-pull.service — load the Packer-baked zeroclaw image (issue #135).
+#
+# Installed by infra/packer/scripts-scrummaster-ubuntu/01-system.sh;
+# enabled (not started) by infra/scrummaster/user-data.sh. Idempotent:
+# re-loading an image that is already present is a no-op for dockerd.
+# A failure is logged in the journal (`journalctl -u zeroclaw-image-pull`)
+# and does not block boot.
+
+[Unit]
+Description=Load the pinned zeroclaw container image into dockerd
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/zeroclaw/images/zeroclaw.tar.gz
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker load -i /opt/zeroclaw/images/zeroclaw.tar.gz
+
+[Install]
+WantedBy=multi-user.target

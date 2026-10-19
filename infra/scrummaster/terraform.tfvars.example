@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+#   cd infra/scrummaster
+#   terraform init -backend-config=scrummaster-backend.hcl
+#   terraform apply
+
+aws_region = "ap-east-1"
+
+vpc_id    = "vpc-0123456789abcdef0"
+subnet_id = "subnet-0123456789abcdef0"
+
+# Must match the -var zeroclaw_image_tag=... the AMI was baked with.
+zeroclaw_image_tag = "default-features-v0.8.6"
+
+# Operator SSH access. Empty list disables port 22 ingress.
+ssh_allowed_cidrs = ["203.0.113.10/32"]
+ssh_key_name      = "my-ec2-keypair"
