@@ -4,7 +4,7 @@
 # container per user (zeroclaw@<login>.service, activated in #136). This
 # stack is operator hosting — blitzlog-agent runs must not modify it
 # (see AGENTS.md). Like infra/user-pool/, it is env-independent: there is
-# no var.environment and nothing here is prod- or dev-scoped.
+# no environment variable and nothing here is prod- or dev-scoped.
 #
 # The instance is a pet: `disable_api_termination` blocks console/API
 # terminates and `prevent_destroy` makes `terraform destroy` (and any

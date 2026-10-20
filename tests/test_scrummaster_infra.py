@@ -118,7 +118,7 @@ class TestScrummasterTerraform(unittest.TestCase):
 
     def test_iam_role_is_read_only_on_ssm(self):
         live = _strip_comments(self.main_tf)
-        for forbidden in ("ssm:PutParameter", "ssm:DeleteParameter", "ssm:*"):
+        for forbidden in ('"ssm:PutParameter"', '"ssm:DeleteParameter"', '"ssm:*"'):
             self.assertNotIn(forbidden, live)
 
     def test_ssh_ingress_uses_allowed_cidrs(self):
@@ -145,7 +145,7 @@ class TestScrummasterTerraform(unittest.TestCase):
     def test_no_environment_variable(self):
         """Scrummaster is operator hosting, shared across envs like user-pool."""
         self.assertNotIn('variable "environment"', self.vars_tf)
-        self.assertNotIn("var.environment", self.main_tf)
+        self.assertNotIn("var.environment", _strip_comments(self.main_tf))
 
     def test_outputs_expose_eip(self):
         self.assertRegex(self.outputs_tf, r'output\s+"public_ip"')

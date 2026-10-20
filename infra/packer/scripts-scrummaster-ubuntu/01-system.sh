@@ -65,7 +65,7 @@ echo "Resolved ${ZEROCLAW_REPO}:${ZEROCLAW_IMAGE_TAG} -> ${IMAGE_REF}"
 sudo docker pull --platform linux/arm64 "$IMAGE_REF"
 
 sudo mkdir -p "$IMAGE_DIR"
-sudo sh -c "docker save '${IMAGE_REF}' | gzip > '${IMAGE_DIR}/zeroclaw.tar.gz'"
+sudo sh -c "docker save '${IMAGE_REF}' | gzip > /opt/zeroclaw/images/zeroclaw.tar.gz"
 echo "$IMAGE_REF" | sudo tee "${IMAGE_DIR}/zeroclaw.ref" >/dev/null
 
 # Install the systemd units. The template unit carries a
