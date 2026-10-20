@@ -72,18 +72,27 @@ resource "null_resource" "lambda_build" {
       # The lambda runtime is python3.12 (see `runtime = "python3.12"` above).
       # The build MUST use the same version — otherwise C extensions
       # (e.g., cryptography's `_cffi_backend.cpython-312-*.so`) link against
-      # the wrong Python ABI and fail to import at lambda runtime. Resolve
-      # Python 3.12 from the first source we find:
-      #   1. system python3.12 (apt install python3.12)
-      #   2. mise's Python 3.12 install (the project pins python = "3.12" in
-      #      mise.toml, so this is the common case)
-      #   3. fail loudly
-      PYTHON_BIN="$(command -v python3.12 || true)"
-      if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+      # the wrong Python ABI and fail to import at lambda runtime.
+      #
+      # Python-resolution ladder: the project pins python = "3.12" in
+      # mise.toml, so the canonical interpreter is whatever mise
+      # installed at ~/.local/share/mise/installs/python/3.12.*. Prefer
+      # it over `command -v python3.12` because PATH is fragile — a bare
+      # `uv python install 3.12` (which produces a python without
+      # `ensurepip._bundled`) will shadow the mise interpreter and break
+      # `python -m venv`. Order:
+      #   1. mise-managed python 3.12 (project canonical pin).
+      #   2. system python3.12 (apt install python3.12 — last resort).
+      #   3. fail loudly.
+      PYTHON_BIN=""
+      if [ -d "$HOME/.local/share/mise/installs/python" ]; then
         PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
       fi
+      if [ -z "$PYTHON_BIN" ]; then
+        PYTHON_BIN="$(command -v python3.12 || true)"
+      fi
       if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
-        echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
+        echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
         exit 1
       fi
       rm -rf ${path.module}/build ${path.module}/.build-venv
@@ -97,7 +106,10 @@ resource "null_resource" "lambda_build" {
       mkdir -p ${path.module}/build/lambda/packages/whisper-stt-shim
       cp ${path.module}/../../../../packages/whisper-stt-shim/server.py \
          ${path.module}/build/lambda/packages/whisper-stt-shim/
-      "$PYTHON_BIN" -m venv ${path.module}/.build-venv
+      # `--without-pip` skips ensurepip (which fails on bare pythons
+      # that don't ship the bundled wheel), then get-pip.py bootstraps
+      # pip from PyPI regardless of the interpreter's ensurepip state.
+      "$PYTHON_BIN" -m venv --without-pip ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
       ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/${var.lambda_requirements} -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv

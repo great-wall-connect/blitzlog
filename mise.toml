@@ -47,6 +47,22 @@ mkdir -p infra/build
 cp -r lambda infra/build/
 mkdir -p infra/build/lambda/packages/whisper-stt-shim
 cp packages/whisper-stt-shim/server.py infra/build/lambda/packages/whisper-stt-shim/
+# Python-resolution ladder + `--without-pip` + get-pip.py bootstrap
+# mirror the local-exec in infra/aws/modules/core/lambda.tf so the
+# bundle build never depends on `ensurepip._bundled` (which can be
+# missing on bare `uv python install` interpreters). `python3` is the
+# toolchain [tools] python = "3.12" from above.
+PYTHON_BIN=""
+if [ -d "$HOME/.local/share/mise/installs/python" ]; then
+  PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3.12 || true)"
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
+  exit 1
+fi
 # The bundle installs `${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}`
 # from lambda/. For an alicloud-deploy PR that flips this to
 # `requirements-alicloud.txt`, override via the env var when invoking
@@ -54,7 +70,8 @@ cp packages/whisper-stt-shim/server.py infra/build/lambda/packages/whisper-stt-s
 # run build`). Defaults to the slim AWS bundle so the alibaba SDKs
 # (oss2, alibabacloud_kms20160120, alibabacloud_ecs20140526) stay out
 # of the AWS Lambda zip.
-python3 -m venv infra/.build-venv
+"$PYTHON_BIN" -m venv --without-pip infra/.build-venv
+curl -sS https://bootstrap.pypa.io/get-pip.py | infra/.build-venv/bin/python3
 infra/.build-venv/bin/pip install --no-cache-dir -r lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} -t infra/build/
 rm -rf infra/.build-venv
 cd infra && terraform init
