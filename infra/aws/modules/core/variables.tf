@@ -164,3 +164,14 @@ variable "spot_instance_types" {
     error_message = "Each entry in spot_instance_types must be a valid EC2 instance type name (e.g. t4g.medium, m6i.large)."
   }
 }
+
+variable "lambda_requirements" {
+  description = "Filename (relative to lambda/) of the per-cloud pip-compiled requirements file installed into the AWS Lambda zip. Defaults to requirements-aws.txt so the AWS deploy stays slim: boto3 + PyJWT + cryptography + requests only. The alibaba SDKs (oss2 / alibabacloud_kms20160120 / alibabacloud_ecs20140526) belong to lambda/requirements-alicloud.txt and are NOT shipped to the AWS deploy — alicloud is a Phase 5 follow-up (#124), and when that lands Function Compute ≠ Lambda so a parallel infra/alicloud/modules/core/lambda.tf analog (with `lambda_requirements = \"requirements-alicloud.txt\"`) will be added rather than reusing this module."
+  type        = string
+  default     = "requirements-aws.txt"
+
+  validation {
+    condition     = can(regex("^requirements-[a-z]+\\.txt$", var.lambda_requirements))
+    error_message = "lambda_requirements must be a per-cloud requirements file (e.g. requirements-aws.txt, requirements-alicloud.txt)."
+  }
+}

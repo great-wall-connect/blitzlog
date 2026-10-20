@@ -1,0 +1,9 @@
+# AWS Lambda bundle — shared deps + boto3. Compiled to
+# requirements-aws.txt. The infra/aws/modules/core/lambda.tf
+# `null_resource.lambda_build` reads this file (via var.lambda_requirements
+# in that module, which defaults to "requirements-aws.txt"); the
+# release + terraform-apply-dev workflows pass LAMBDA_REQUIREMENTS_FILE
+# when they need to deviate.
+-r requirements.in
+
+boto3

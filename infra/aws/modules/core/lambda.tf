@@ -18,9 +18,11 @@ data "archive_file" "lambda_zip" {
 #     lambda/bot_pool.py            # per-user bot pool + locks
 #     lambda/llm_guard.py           # IP safety guard for local LLM endpoints
 #     lambda/ec2.py                 # EC2 spot launch + helpers
-#     lambda/scripts/aws/_common.py     # shared prologue + install/config builders
+#     lambda/scripts/aws/_common.py     # shared prologue + install/config builders (AWS path)
 #     lambda/scripts/aws/autonomous.py  # build_autonomous_user_data
 #     lambda/scripts/aws/assisted.py    # build_assisted_user_data
+#     lambda/scripts/alicloud/...       # alicloud user-data scripts (Phase 5 — not invoked by the AWS deploy)
+#     lambda/scripts/__init__.py        # dispatcher: BLITZLOG_PROVIDER selects the per-cloud tree
 #
 # opencode plugins + tools (idle_watchdog, periodic_autosave,
 # session_archive, spot_watchdog, shutdown) live in
@@ -58,8 +60,10 @@ resource "null_resource" "lambda_build" {
     provider_aws_py      = filemd5("${path.module}/../../../../lambda/provider/aws.py")
     provider_alicloud_py = filemd5("${path.module}/../../../../lambda/provider/alicloud.py")
 
-    # Runtime deps + the embedded whisper-stt shim
-    requirements = filemd5("${path.module}/../../../../lambda/requirements.txt")
+    # Runtime deps + the embedded whisper-stt shim. var.lambda_requirements
+    # selects the per-cloud requirements file (default requirements-aws.txt;
+    # an alicloud-deploy PR would override to requirements-alicloud.txt).
+    requirements = filemd5("${path.module}/../../../../lambda/${var.lambda_requirements}")
   }
 
   provisioner "local-exec" {
@@ -95,7 +99,7 @@ resource "null_resource" "lambda_build" {
          ${path.module}/build/lambda/packages/whisper-stt-shim/
       "$PYTHON_BIN" -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
-      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/requirements.txt -t ${path.module}/build/
+      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/${var.lambda_requirements} -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv
     EOT
   }
@@ -108,13 +112,14 @@ resource "aws_lambda_function" "handler" {
   handler          = "lambda.handler.lambda_handler"
   runtime          = "python3.12"
   role             = aws_iam_role.lambda_role.arn
-  # PR #84 added the oss2 / alibabacloud_ecs20140526 /
-  # alibabacloud_kms20160120 SDKs. The factory in lambda/provider/
-  # lazy-imports the Alicloud + Azure modules behind
-  # `importlib.util.find_spec` (see PR #133 follow-up), so an AWS
-  # cold start no longer pays the import cost; 512 MB still gives
-  # ~3-4x headroom for the AWS boto3 + cryptography C extension on
-  # a warm start.
+  # 512 MB is enough headroom for the AWS boto3 + cryptography C
+  # extension on a warm start. The alibaba SDKs (oss2 +
+  # alibabacloud_kms20160120 + alibabacloud_ecs20140526) live in
+  # lambda/requirements-alicloud.txt and are NOT packaged into this
+  # AWS zip — the factory in lambda/provider/__init__.py lazy-imports
+  # the alicloud module behind `importlib.util.find_spec` /
+  # `importlib.import_module`, but with the per-cloud requirements
+  # split the AWS Lambda code never even sees those wheels on /tmp.
   memory_size = 512
   timeout     = 180
   dead_letter_config {

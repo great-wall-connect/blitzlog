@@ -796,7 +796,13 @@ jobs:
           cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
           "$PYTHON_BIN" -m venv infra/aws/modules/core/.build-venv
           curl -sS https://bootstrap.pypa.io/get-pip.py | infra/aws/modules/core/.build-venv/bin/python3
-          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t "$BUILD_DIR"
+          # ${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} lets a future
+          # alicloud terraform-apply-dev job flip this to
+          # requirements-alicloud.txt without touching the script body.
+          # The alibaba SDKs (oss2, alibabacloud_kms20160120,
+          # alibabacloud_ecs20140526) belong to requirements-alicloud.txt
+          # and are NOT shipped to the AWS deploy.
+          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
           rm -rf infra/aws/modules/core/.build-venv
 
       - name: Configure AWS credentials (OIDC) for terraform
