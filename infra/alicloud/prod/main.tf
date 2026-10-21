@@ -1,5 +1,14 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.10"
+
+  required_providers {
+    # See infra/alicloud/dev/main.tf for the why; this stack has the
+    # same implicit-source drift risk.
+    alicloud = {
+      source  = "aliyun/alicloud"
+      version = "~> 2.0"
+    }
+  }
 
   backend "oss" {
     bucket = ""

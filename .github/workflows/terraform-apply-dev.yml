@@ -134,7 +134,7 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.8
+          terraform_version: 1.16.6
 
       - name: Configure AWS credentials (OIDC) for terraform
         uses: aws-actions/configure-aws-credentials@v6

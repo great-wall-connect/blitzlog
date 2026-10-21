@@ -16,12 +16,12 @@
 #                                      -> alicloud_oss_bucket_lifecycle_rule
 
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.10"
 
   required_providers {
     alicloud = {
       source  = "aliyun/alicloud"
-      version = "~> 1.0"
+      version = "~> 2.0"
     }
   }
 
@@ -38,6 +38,13 @@ provider "alicloud" {
 
 resource "alicloud_oss_bucket" "agent_logs" {
   bucket = var.agent_logs_bucket_name
+}
+
+# Bucket ACL was deprecated in provider v1.220.0; it now lives on its
+# own resource. We keep the same `private` ACL so the existing OSS
+# permission model is unchanged.
+resource "alicloud_oss_bucket_acl" "agent_logs" {
+  bucket = alicloud_oss_bucket.agent_logs.bucket
   acl    = "private"
 }
 
@@ -56,8 +63,12 @@ resource "alicloud_oss_bucket_server_side_encryption" "agent_logs" {
 
 resource "alicloud_oss_bucket" "stt_models" {
   bucket        = var.stt_models_bucket_name
-  acl           = "private"
   force_destroy = false
+}
+
+resource "alicloud_oss_bucket_acl" "stt_models" {
+  bucket = alicloud_oss_bucket.stt_models.bucket
+  acl    = "private"
 }
 
 # Versioning + public access block + encryption + lifecycle mirror

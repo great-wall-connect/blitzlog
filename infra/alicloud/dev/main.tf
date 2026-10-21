@@ -1,5 +1,18 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.10"
+
+  required_providers {
+    # Declared explicitly here so the root's `provider "alicloud"`
+    # block below resolves `alicloud` to `aliyun/alicloud 2.x` rather
+    # than the implicit default `hashicorp/alicloud` (which would
+    # pull in a dead provider binary). The module's
+    # `required_providers` on its own does not change the root's
+    # resolution.
+    alicloud = {
+      source  = "aliyun/alicloud"
+      version = "~> 2.0"
+    }
+  }
 
   backend "oss" {
     bucket = ""

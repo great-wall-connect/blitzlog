@@ -1,27 +1,38 @@
 # Analogue of infra/aws/modules/core/lambda.tf.
 #
-# Aliyun Function Compute (FC) is the AWS Lambda analogue. The
-# `null_resource.lambda_build` provisioner is byte-identical to the
-# AWS one (same Python 3.12 venv, same `lambda/` package layout, same
-# `filemd5` trigger list) because the source tree is provider-agnostic.
-# The cloud-side wrapper uses alicloud_fc_service + alicloud_fc_function
-# with `runtime = "python3.12"` (Aliyun's `python3.12` runtime id).
+# Aliyun Function Compute v3 (`alicloud_fcv3_function`) is the AWS
+# Lambda analogue and replaces the deprecated v1 `alicloud_fc_service`
+# + `alicloud_fc_function` pair (deprecated in provider v1.272.0).
+# The v3 API is flat: there is no separate "service" resource; the
+# `function_name` is a top-level string. The runtime id for Python
+# 3.12 is identical (`python3.12`).
 #
-# Aliyun FC differs from AWS Lambda in three ways we have to model here:
-#
-#   1. FC services require an explicit `internet_access` + `vpc_config`
-#      block; AWS Lambda handles this implicitly.
-#   2. FC functions reference the service they're deployed in
-#      (`alicloud_fc_service.handler.name`) instead of being a single
-#      resource like `aws_lambda_function`.
-#   3. Aliyun has no API Gateway HTTP API in the AWS sense (no
-#      `protocol_type = "HTTP"`); the API Gateway is configured in
-#      apigateway.tf and points at the FC function's invoke URL.
+# The `null_resource.lambda_build` provisioner is byte-identical to
+# the AWS one (same Python 3.12 venv, same `lambda/` package layout)
+# because the source tree is provider-agnostic. The only TF-side
+# difference between AWS and Alicloud is the requirements-file name
+# (`var.lambda_requirements`, defaulting to `requirements-alicloud.txt`
+# here vs. `requirements-aws.txt` on the AWS side — see #155's commit
+# `chore(lambda): slim AWS Lambda bundle by per-cloud requirements
+# split`).
 #
 # Token refresh chain (issue #145) is intentionally NOT modelled here:
 # Aliyun has no EventBridge Scheduler equivalent in this PR, so
 # `BLITZLOG_PROVIDER=alicloud` will hold a 1 h token only (the GitHub
 # hard cap). Follow-up issue for the Aliyun scheduler equivalent.
+#
+# Code-delivery shape (unique to fcv3 vs the AWS Lambda analogue):
+# alicloud_fcv3_function does NOT accept a `filename` like
+# aws_lambda_function does — it wants either a base64-encoded
+# `code.zip_file` (whose ~50 MB would land in state on every apply)
+# or an OSS object reference (`code.oss_bucket_name` +
+# `code.oss_object_name`). We use the OSS path: a corresponding
+# `alicloud_oss_bucket_object.fc_code` below uploads the zip built
+# by `null_resource.lambda_build` and `data.archive_file.function_zip`
+# into the shared agent-logs bucket under
+# `${local.fc_code_object_key}` (defined in locals.tf:42). The FC
+# execution role has an `oss:GetObject` grant scoped to that
+# exact key — see ram.tf.
 
 data "archive_file" "function_zip" {
   type        = "zip"
@@ -55,8 +66,12 @@ resource "null_resource" "lambda_build" {
     provider_aws_py      = filemd5("${path.module}/../../../../lambda/provider/aws.py")
     provider_alicloud_py = filemd5("${path.module}/../../../../lambda/provider/alicloud.py")
 
-    # Runtime deps + the embedded whisper-stt shim
-    requirements = filemd5("${path.module}/../../../../lambda/requirements.txt")
+    # Per-cloud runtime deps. `var.lambda_requirements` defaults to
+    # `requirements-alicloud.txt` so the alibaba SDKs (oss2,
+    # alibabacloud_kms20160120, alibabacloud_ecs20140526) ship in
+    # this zip without contaminating the AWS Lambda bundle (see
+    # infra/aws/modules/core/variables.tf:lambda_requirements).
+    requirements = filemd5("${path.module}/../../../../lambda/${var.lambda_requirements}")
   }
 
   provisioner "local-exec" {
@@ -90,41 +105,57 @@ resource "null_resource" "lambda_build" {
          ${path.module}/build/lambda/packages/whisper-stt-shim/
       "$PYTHON_BIN" -m venv ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
-      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/requirements.txt -t ${path.module}/build/
+      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/${var.lambda_requirements} -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv
     EOT
   }
 }
 
-# Function Compute service. One service per env; the function is
-# deployed INTO the service. Aliyun's `internet_access = true` is the
-# default and matches AWS Lambda's default-egress posture.
+# Upload the function zip to OSS so alicloud_fcv3_function can pull
+# it from `code{oss_bucket_name,oss_object_name}` below. The bucket
+# is shared across envs (the bootstrap stack creates it once) so the
+# key is env-namespaced — `local.fc_code_object_key` =
+# `fc-code/<env>/function.zip` — and the FC execution role's
+# oss:GetObject grant in ram.tf is scoped to that exact key.
+resource "alicloud_oss_bucket_object" "fc_code" {
+  bucket      = local.agent_logs_bucket_name_resolved
+  key         = local.fc_code_object_key
+  source      = data.archive_file.function_zip.output_path
+  content_md5 = data.archive_file.function_zip.output_md5
+  # Default AES256 is fine; no KMS needed because the zip is a
+  # derivative build artifact (no embedded GitHub / OpenCode / STT
+  # secrets — those flow through KMS Secrets at function cold start).
+  acl = "private"
+}
+
+# Function Compute v3 function. v3 is the modern API
+# (`fc:2023-03-30`); the v1 fc_service + fc_function pair is
+# deprecated in provider v1.272.0. v3 functions are flat: there is
+# no separate `alicloud_fcv3_service` resource, the `function_name`
+# is a top-level argument, and the role is attached to the function
+# rather than to a wrapping service.
 #
-# The execution RAM role is attached to the SERVICE (not the
-# function) — this is the aliyun/alicloud provider's design. The
-# `role` attribute here is the ARN of the FC execution role from
-# ram.tf.
-resource "alicloud_fc_service" "handler" {
-  name            = "blitzlog-${var.environment}-handler"
+# `internet_access = true` mirrors the v1 posture (FC functions
+# reach the public internet for OSS, KMS, ECS, and the GitHub /
+# OpenCode APIs). The ECS instance-side networking is owned by
+# ecs.tf.
+resource "alicloud_fcv3_function" "handler" {
+  function_name   = "blitzlog-${var.environment}-handler"
+  description     = "Blitzlog webhook handler (env: ${var.environment})"
+  runtime         = "python3.12"
+  handler         = "lambda.handler.lambda_handler"
+  memory_size     = 512
+  timeout         = 180
   internet_access = true
   role            = alicloud_ram_role.lambda_role.arn
 
-  # No VPC config: FC is invoked via API Gateway, which connects from
-  # the public internet. The ECS agent (which DOES need VPC) is
-  # modelled in ecs.tf. Keeping FC serverless-public mirrors the
-  # AWS-Lambda "no VPC" posture in infra/aws/modules/core/lambda.tf.
-}
-
-resource "alicloud_fc_function" "handler" {
-  service  = alicloud_fc_service.handler.name
-  name     = "blitzlog-${var.environment}-handler"
-  filename = data.archive_file.function_zip.output_path
-  # `code_checksum` is the FC analogue of `source_code_hash`.
-  code_checksum = data.archive_file.function_zip.output_base64sha256
-  handler       = "lambda.handler.lambda_handler"
-  runtime       = "python3.12"
-  memory_size   = 512
-  timeout       = 180
+  # Code comes from OSS (uploaded by alicloud_oss_bucket_object.fc_code
+  # above). The explicit object reference avoids the ~50 MB base64
+  # blob that `code.zip_file = file(...)` would put into plan state.
+  code {
+    oss_bucket_name = local.agent_logs_bucket_name_resolved
+    oss_object_name = local.fc_code_object_key
+  }
 
   environment_variables = {
     BLITZLOG_ENV = var.environment
@@ -132,14 +163,15 @@ resource "alicloud_fc_function" "handler" {
     # lambda/provider/__init__.py. The factory reads this on cold
     # start and picks AlicloudCompute / AlicloudSecretStore /
     # AlicloudObjectStore. The OSS2 / KMS / ECS SDKs are bundled
-    # in the zip from lambda/requirements.in (alibabacloud_*).
+    # in the zip from lambda/requirements-alicloud.txt
+    # (alibabacloud_*).
     BLITZLOG_PROVIDER     = "alicloud"
     VPC_ID                = var.vpc_id
     VSWITCH_IDS           = join(",", var.vswitch_ids)
     ECS_SECURITY_GROUP_ID = alicloud_security_group.agent_sg.id
     # Aliyun has no instance-profile concept; the RAM role name is
     # passed directly to RunInstances via the `RamRoleName` parameter.
-    RAM_INSTANCE_PROFILE_NAME = alicloud_ram_role.ecs_agent_role.name
+    RAM_INSTANCE_PROFILE_NAME = alicloud_ram_role.ecs_agent_role.role_name
     OPENCODE_MODEL            = var.opencode_model
     OPENCODE_AGENT_MAX_STEPS  = tostring(var.opencode_agent_max_steps)
     OSS_LOGS_BUCKET           = local.agent_logs_bucket_name_resolved
@@ -158,11 +190,7 @@ resource "alicloud_fc_function" "handler" {
 
   depends_on = [
     alicloud_ram_role_policy_attachment.lambda_policy,
+    alicloud_oss_bucket_object.fc_code,
     null_resource.lambda_build,
   ]
-
-  lifecycle {
-    # FC has no `last_modified` attribute (unlike AWS Lambda's
-    # timestamp); no equivalent ignore_changes needed.
-  }
 }

@@ -5,7 +5,7 @@
 
 resource "alicloud_kms_key" "secrets" {
   description            = "Customer master key for Blitzlog secrets (env: ${var.environment})"
-  key_state              = "Enabled"
+  status                 = "Enabled"
   pending_window_in_days = 7
   # Rotation is operator-driven; we don't enable automatic rotation
   # because secrets have independent lifecycles (a rotation event for

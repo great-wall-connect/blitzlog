@@ -87,13 +87,9 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.8
+          terraform_version: 1.16.6
 
       - name: terraform fmt (recursive)
-        run: terraform fmt -check -recursive
-
-      - name: terraform fmt (matrix entry ${{ matrix.dir }})
-        working-directory: ${{ matrix.dir }}
         run: terraform fmt -check -recursive
 
       - name: terraform init (backend disabled, ${{ matrix.dir }})

@@ -12,12 +12,12 @@ output "webhook_url" {
 
 output "lambda_function_name" {
   description = "Name of the Function Compute function"
-  value       = alicloud_fc_function.handler.name
+  value       = alicloud_fcv3_function.handler.function_name
 }
 
 output "lambda_function_arn" {
   description = "ARN of the Function Compute function. Aliyun uses `acs:fc:<region>:<account>:functions/<service>/<name>` — this is the value the API Gateway backend config will reference."
-  value       = alicloud_fc_function.handler.function_arn
+  value       = alicloud_fcv3_function.handler.function_arn
 }
 
 output "ec2_security_group_id" {
@@ -27,7 +27,7 @@ output "ec2_security_group_id" {
 
 output "ec2_instance_profile_name" {
   description = "RAM role name for ECS agent role. AWS analogue: ec2_instance_profile_name (IAM instance profile). On Alicloud the RAM role is attached directly to the ECS instance via the RunInstances `RamRoleName` parameter, so this is just the role name."
-  value       = alicloud_ram_role.ecs_agent_role.name
+  value       = alicloud_ram_role.ecs_agent_role.role_name
 }
 
 output "api_gateway_id" {

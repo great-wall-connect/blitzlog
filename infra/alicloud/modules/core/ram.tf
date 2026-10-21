@@ -30,7 +30,7 @@
 
 # Function Compute execution role.
 resource "alicloud_ram_role" "lambda_role" {
-  name        = "blitzlog-${var.environment}-function-role"
+  role_name   = "blitzlog-${var.environment}-function-role"
   description = "FC execution role for blitzlog (env: ${var.environment})"
   assume_role_policy_document = jsonencode({
     Version = "1"
@@ -178,6 +178,21 @@ resource "alicloud_ram_policy" "lambda_policy" {
         ]
         Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/${local.ssm_ephemeral_root}/*"
       },
+      {
+        Effect = "Allow"
+        Action = [
+          "oss:GetObject",
+        ]
+        # The FC function fetches its own code zip from OSS at cold
+        # start (see alicloud_oss_bucket_object.fc_code in
+        # function_compute.tf and the
+        # code{oss_bucket_name=…,oss_object_name=…} block on
+        # alicloud_fcv3_function.handler). The grant is restricted to
+        # the per-env key so the role cannot read other paths under
+        # the agent-logs bucket. The deploy-time AK that uploads the
+        # zip is the bucket owner; it does not need a RAM grant.
+        Resource = "${local.agent_logs_bucket_arn}/${local.fc_code_object_key}"
+      },
     ]
   })
 }
@@ -185,12 +200,12 @@ resource "alicloud_ram_policy" "lambda_policy" {
 resource "alicloud_ram_role_policy_attachment" "lambda_policy" {
   policy_name = alicloud_ram_policy.lambda_policy.policy_name
   policy_type = "Custom"
-  role_name   = alicloud_ram_role.lambda_role.name
+  role_name   = alicloud_ram_role.lambda_role.role_name
 }
 
 # ECS instance role.
 resource "alicloud_ram_role" "ecs_agent_role" {
-  name        = "blitzlog-${var.environment}-ecs-agent-role"
+  role_name   = "blitzlog-${var.environment}-ecs-agent-role"
   description = "ECS execution role for the blitzlog agent (env: ${var.environment})"
   assume_role_policy_document = jsonencode({
     Version = "1"
@@ -307,7 +322,7 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
 resource "alicloud_ram_role_policy_attachment" "ecs_agent_policy" {
   policy_name = alicloud_ram_policy.ecs_agent_policy.policy_name
   policy_type = "Custom"
-  role_name   = alicloud_ram_role.ecs_agent_role.name
+  role_name   = alicloud_ram_role.ecs_agent_role.role_name
 }
 
 # Instance profile is the Alicloud analogue of
@@ -318,5 +333,5 @@ resource "alicloud_ram_role_policy_attachment" "ecs_agent_policy" {
 # `RamRoleName` parameter on RunInstances. We just expose the role
 # name as the equivalent output so the function env block can pass
 # it through.
-# (See `alicloud_ram_role.ecs_agent_role.name` usage in
+# (See `alicloud_ram_role.ecs_agent_role.role_name` usage in
 # `AlicloudCompute.run_instances`.)

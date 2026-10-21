@@ -6,19 +6,18 @@
 # unchanged.
 #
 # Aliyun API Gateway has no equivalent of `aws_lambda_permission` —
-# the API Gateway invokes the FC function via its service name, and
-# the FC service's `internet_access = true` (see
+# the API Gateway invokes the FC function via its name + region, and
+# the FC function's `internet_access = true` (see
 # function_compute.tf) lets API Gateway reach the function without
 # extra plumbing. The `aws_apigatewayv2_integration.webhook` →
 # `aws_lambda_function.handler.arn` indirection collapses into
-# `alicloud_api_gateway_api_config` pointing at the FC service.
+# `alicloud_api_gateway_api_config` pointing at the FC function.
 #
-# This file intentionally declares only the resources that the
-# aliyun/alicloud provider supports as of 1.0.0. The full webhook
-# URL is published via `alicloud_api_gateway_group.webhook.sub_domain`
-# once the operator wires up the Function Compute backend in the
-# Aliyun console. The `webhook_url` output is exposed for the
-# downstream modules.
+# function_version = "3.0" below points API Gateway at FCV3 (the
+# `fc:2023-03-30` API). The `service_name` argument is only
+# required when `function_version = "2.0"` (the v1
+# `alicloud_fc_service` model), so we omit it; FCV3 functions live
+# flat against the account-level default service.
 
 resource "alicloud_api_gateway_group" "webhook" {
   name        = "blitzlog-${var.environment}-webhook-group"
@@ -44,28 +43,23 @@ resource "alicloud_api_gateway_api" "webhook" {
     mode     = "PASSTHROUGH"
   }
 
-  # Backend wiring: the API Gateway forwards `POST /` to the FC
-  # function `lambda.handler.lambda_handler` in service
-  # `blitzlog-${var.environment}-handler`. The `function_base_url` is
-  # the function's invoke URL; the provider derives it from
-  # `service_name` + `function_name` + `region` when omitted, but we
-  # set it explicitly to document the path.
+  # Backend wiring: API Gateway forwards `POST /` to the FCV3 function
+  # `lambda.handler.lambda_handler`. The FCV3 invoke URL is derived
+  # by API Gateway from `region` + `function_name` + the account id;
+  # we do NOT pass `function_base_url` (that argument is only for
+  # `function_type = "HttpTrigger"`).
   fc_service_config {
-    function_base_url = format(
-      "https://%s.%s.fc.aliyuncs.com/proxy/%s/%s",
-      alicloud_fc_service.handler.name,
-      var.alicloud_region,
-      alicloud_fc_service.handler.name,
-      alicloud_fc_function.handler.name,
-    )
-    service_name  = alicloud_fc_service.handler.name
-    function_name = alicloud_fc_function.handler.name
+    function_name = alicloud_fcv3_function.handler.function_name
     function_type = "FCEvent"
     method        = "POST"
     path          = "/"
     region        = var.alicloud_region
-    arn_role      = alicloud_ram_role.lambda_role.arn
-    timeout       = 30000
+    # `function_version = "3.0"` selects FCV3; `service_name` is
+    # intentionally unset because the FCV3 model has no separate
+    # service resource (alicloud_fcv3_function is flat).
+    function_version = "3.0"
+    arn_role         = alicloud_ram_role.lambda_role.arn
+    timeout          = 30000
   }
 }
 

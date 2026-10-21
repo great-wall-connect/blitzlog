@@ -29,9 +29,9 @@ resource "alicloud_vswitch" "agent" {
 }
 
 resource "alicloud_security_group" "agent_sg" {
-  name        = "blitzlog-${var.environment}-agent-sg"
-  description = "Security group for autonomous coding agent ECS instances (env: ${var.environment})"
-  vpc_id      = var.vpc_id
+  security_group_name = "blitzlog-${var.environment}-agent-sg"
+  description         = "Security group for autonomous coding agent ECS instances (env: ${var.environment})"
+  vpc_id              = var.vpc_id
 
   # Aliyun security_group_rule uses a single resource per direction.
   # The egress rule mirrors infra/aws/modules/core/ec2.tf:6-18.

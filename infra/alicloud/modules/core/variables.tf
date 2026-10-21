@@ -146,3 +146,14 @@ variable "spot_instance_types" {
     error_message = "Each entry in spot_instance_types must be a valid Aliyun ECS instance type name (e.g. ecs.t6-c1m2.large)."
   }
 }
+
+variable "lambda_requirements" {
+  description = "Filename (relative to lambda/) of the per-cloud pip-compiled requirements file installed into the Function Compute zip. Defaults to requirements-alicloud.txt so the alicloud path ships the alibaba SDKs (oss2, alibabacloud_kms20160120, alibabacloud_ecs20140526) without dragging them into the AWS Lambda zip. AWS analogue: infra/aws/modules/core/variables.tf:lambda_requirements (defaults to requirements-aws.txt there)."
+  type        = string
+  default     = "requirements-alicloud.txt"
+
+  validation {
+    condition     = can(regex("^requirements-[a-z]+\\.txt$", var.lambda_requirements))
+    error_message = "lambda_requirements must be a per-cloud requirements file (e.g. requirements-alicloud.txt)."
+  }
+}

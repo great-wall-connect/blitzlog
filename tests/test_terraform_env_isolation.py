@@ -848,6 +848,405 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "terraform init step must use cn-hangzhou as the OSS backend region",
         )
 
+    # ------------------------------------------------------------------
+    # Provider-currency + deprecation-cleanup guards (PR #155 follow-up).
+    # ------------------------------------------------------------------
+
+    def test_alicloud_provider_pinned_to_v2(self):
+        """Every Alicloud stack must declare `aliyun/alicloud ~> 2.0`.
+
+        The provider shipped 2.0.0 on 2026-10-12. The PR started on
+        `~> 1.0` (locked at 1.294.0). The v2 upgrade guide's
+        breaking changes (api_gateway_instance to_connect_vpc_ip_block,
+        cr_repo, cs_kubernetes*, db_instance_classes, instance_types)
+        do NOT touch any resource blitzlog uses, so the jump is
+        safe — but only if every stack *requests* 2.0. A drift in
+        one of the four stacks would silently downgrade the others.
+        """
+        for stack in (
+            self.ALICLOUD_MODULE / "main.tf",
+            self.ALICLOUD_DEV / "main.tf",
+            self.ALICLOUD_PROD / "main.tf",
+            self.ALICLOUD_BOOTSTRAP / "main.tf",
+        ):
+            text = stack.read_text()
+            self.assertIn(
+                'source  = "aliyun/alicloud"',
+                text,
+                f"{stack} must declare the aliyun/alicloud provider source explicitly",
+            )
+            self.assertIn(
+                'version = "~> 2.0"',
+                text,
+                f"{stack} must pin aliyun/alicloud to ~> 2.0",
+            )
+
+    def test_required_version_floor(self):
+        """All four Alicloud stacks must require Terraform >= 1.10.
+
+        aliyun/alicloud 2.0's framework-provider features (ephemeral
+        resources) need >= 1.10; latest stable is 1.16.6. The PR
+        previously used ">= 1.0" which would have permitted a host
+        too old to load the 2.0 provider.
+        """
+        for stack in (
+            self.ALICLOUD_MODULE / "main.tf",
+            self.ALICLOUD_DEV / "main.tf",
+            self.ALICLOUD_PROD / "main.tf",
+            self.ALICLOUD_BOOTSTRAP / "main.tf",
+        ):
+            text = stack.read_text()
+            self.assertRegex(
+                text,
+                r'required_version\s*=\s*">=\s*1\.10"',
+                f"{stack} must require terraform_version >= 1.10",
+            )
+
+    def test_dev_and_prod_declare_alicloud_provider(self):
+        """infra/alicloud/{dev,prod}/main.tf must declare
+        `required_providers { alicloud = { source = "aliyun/alicloud" } }`.
+
+        Without it, the root's `provider "alicloud" {}` block resolves
+        to Terraform's implicit `hashicorp/alicloud` source rather than
+        `aliyun/alicloud`. The PR observed this bug: both lock files
+        contained a stray `registry.terraform.io/hashicorp/alicloud
+        2.0.0` entry alongside `aliyun/alicloud 1.294.0` — i.e. a
+        dead 200 MB provider binary downloaded and configured per
+        deploy. This test fails the moment someone removes the
+        `required_providers` block.
+        """
+        for stack, env in (
+            (self.ALICLOUD_DEV, "dev"),
+            (self.ALICLOUD_PROD, "prod"),
+        ):
+            text = (stack / "main.tf").read_text()
+            self.assertIn(
+                "required_providers",
+                text,
+                f"infra/alicloud/{env}/main.tf must declare required_providers "
+                f"so the implicit-source drift doesn't pull in hashicorp/alicloud.",
+            )
+            self.assertIn(
+                'source  = "aliyun/alicloud"',
+                text,
+                f"infra/alicloud/{env}/main.tf required_providers must source "
+                f"aliyun/alicloud (NOT hashicorp/alicloud).",
+            )
+
+    def test_no_legacy_fc_or_mns_resources(self):
+        """The Alicloud module must use `alicloud_fcv3_function` +
+        `alicloud_message_service_queue` — the v1
+        `alicloud_fc_service` / `alicloud_fc_function` /
+        `alicloud_mns_queue` resources are all deprecated.
+
+        The 2.0 provider still accepts these aliases (forwarded to
+        the v3 implementations under the hood), but the user
+        explicitly wants no starting technical debt — so we
+        migrate forward now.
+        """
+        module_dir = self.ALICLOUD_MODULE
+        all_tf = "\n".join(p.read_text() for p in module_dir.glob("*.tf"))
+
+        for legacy in (
+            "alicloud_fc_service",
+            "alicloud_fc_function",
+            "alicloud_mns_queue",
+        ):
+            for line in all_tf.splitlines():
+                stripped = line.lstrip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                self.assertNotIn(
+                    f'resource "{legacy}"',
+                    stripped,
+                    f"legacy resource type {legacy!r} is deprecated by provider "
+                    f"v2.0.0; migrate to the replacement (alicloud_fcv3_function "
+                    f"or alicloud_message_service_queue).\nLine: {line!r}",
+                )
+
+        self.assertIn(
+            'resource "alicloud_fcv3_function" "handler"',
+            all_tf,
+            "alicloud_fcv3_function.handler must replace the legacy "
+            "alicloud_fc_function pair",
+        )
+        self.assertIn(
+            'resource "alicloud_message_service_queue" "dlq"',
+            all_tf,
+            "alicloud_message_service_queue.dlq must replace the deprecated "
+            "alicloud_mns_queue.dlq",
+        )
+
+    def test_no_deprecated_field_or_attribute_names(self):
+        """Field-level deprecation cleanup: the v2 provider still
+        emits warnings for the old field/attribute names even
+        though they still work. Validate the migrations landed:
+
+          - alicloud_security_group.name        -> security_group_name
+          - alicloud_kms_key.key_state         -> status
+          - alicloud_ram_role.name             -> role_name
+          - <ram role>.name  attribute         -> .role_name
+
+        We scan only resource/code lines (skip comments and
+        jsonencode blocks where action names can contain
+        substring matches by accident).
+        """
+        module_dir = self.ALICLOUD_MODULE
+
+        def code_lines(path: Path) -> list[str]:
+            out = []
+            for line in path.read_text().splitlines():
+                stripped = line.lstrip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                out.append(line)
+            return out
+
+        # ecs.tf: security_group.name -> security_group_name
+        ecs = code_lines(module_dir / "ecs.tf")
+        self.assertNotIn(
+            'name        = "blitzlog-${var.environment}-agent-sg"',
+            "\n".join(ecs),
+            "alicloud_security_group.name is deprecated; use security_group_name",
+        )
+        self.assertTrue(
+            any("security_group_name" in ln for ln in ecs),
+            "ecs.tf must set security_group_name on alicloud_security_group",
+        )
+
+        # kms.tf: key_state -> status
+        kms = code_lines(module_dir / "kms.tf")
+        self.assertNotIn(
+            'key_state              = "Enabled"',
+            "\n".join(kms),
+            "alicloud_kms_key.key_state is deprecated; use status",
+        )
+        self.assertTrue(
+            any('status                 = "Enabled"' in ln for ln in kms),
+            "kms.tf must set status on alicloud_kms_key",
+        )
+
+        # ram.tf: no `name =` on alicloud_ram_role resources,
+        # and no `.name` references on role_policy_attachment /
+        # FC env-var / outputs.
+        ram = code_lines(module_dir / "ram.tf")
+        ram_text = "\n".join(ram)
+        self.assertNotRegex(
+            ram_text,
+            r'resource "alicloud_ram_role" "[^"]+"\s*\{[^}]*?\n\s*name\s*=',
+            "alicloud_ram_role.name is deprecated; use role_name",
+        )
+        self.assertNotIn(
+            "role_name   = alicloud_ram_role.lambda_role.name",
+            ram_text,
+            "role_policy_attachment.role_name must use .role_name (not .name)",
+        )
+        self.assertNotIn(
+            "role_name   = alicloud_ram_role.ecs_agent_role.name",
+            ram_text,
+            "role_policy_attachment.role_name must use .role_name (not .name)",
+        )
+
+        # function_compute.tf: the FC env-var must use .role_name for
+        # RAM_INSTANCE_PROFILE_NAME. Outputs already use .role_name.
+        fc = code_lines(module_dir / "function_compute.tf")
+        fc_text = "\n".join(fc)
+        self.assertNotIn(
+            "RAM_INSTANCE_PROFILE_NAME = alicloud_ram_role.ecs_agent_role.name",
+            fc_text,
+            "FC env-var RAM_INSTANCE_PROFILE_NAME must use .role_name (not .name)",
+        )
+        self.assertIn(
+            "RAM_INSTANCE_PROFILE_NAME = alicloud_ram_role.ecs_agent_role.role_name",
+            fc_text,
+            "FC env-var RAM_INSTANCE_PROFILE_NAME must be wired to "
+            "alicloud_ram_role.ecs_agent_role.role_name",
+        )
+
+    def test_function_compute_uses_oss_object_for_code(self):
+        """alicloud_fcv3_function has no `filename` arg — code must
+        reference an OSS object. Validate the upload exists and the
+        fcv3 function's `code` block points at it.
+
+        Avoids re-introducing the v1 alicloud_fc_function shape (which
+        accepted a local filename) via copy-paste.
+        """
+        fc = (self.ALICLOUD_MODULE / "function_compute.tf").read_text()
+        self.assertIn(
+            'resource "alicloud_oss_bucket_object" "fc_code"',
+            fc,
+            "function_compute.tf must upload the zip via "
+            "alicloud_oss_bucket_object.fc_code (fcv3 has no filename arg)",
+        )
+        # The fcv3 function's code block must reference the OSS object
+        # (not the deprecated base64 zip_file path with a huge state blob).
+        self.assertIn(
+            "oss_bucket_name = local.agent_logs_bucket_name_resolved",
+            fc,
+            "alicloud_fcv3_function code{} must reference the OSS bucket",
+        )
+        self.assertIn(
+            "oss_object_name = local.fc_code_object_key",
+            fc,
+            "alicloud_fcv3_function code{} must reference local.fc_code_object_key",
+        )
+
+    def test_lambda_requirements_variable(self):
+        """The hard error from PR #155's CI: the Alicloud module's
+        null_resource.lambda_build referenced a path that no
+        longer exists (`lambda/requirements.txt`). The fix routes
+        the requirements file through `var.lambda_requirements`
+        (default `requirements-alicloud.txt`) — the same shape as
+        the AWS side.
+
+        Both the `filemd5` triggers and the `pip install -r` call
+        must go through the variable; a bare `requirements.txt`
+        reference anywhere in function_compute.tf regresses the fix.
+        """
+        variables = (self.ALICLOUD_MODULE / "variables.tf").read_text()
+        self.assertIn(
+            'variable "lambda_requirements"',
+            variables,
+            "modules/core/variables.tf must declare lambda_requirements",
+        )
+        self.assertIn(
+            'default     = "requirements-alicloud.txt"',
+            variables,
+            "lambda_requirements must default to requirements-alicloud.txt",
+        )
+
+        fc = (self.ALICLOUD_MODULE / "function_compute.tf").read_text()
+        self.assertNotIn(
+            '"${path.module}/../../../../lambda/requirements.txt"',
+            fc,
+            "function_compute.tf must not hardcode lambda/requirements.txt "
+            "(the file was renamed in the per-cloud requirements split)",
+        )
+        # Both the filemd5 trigger AND the pip install -r line must
+        # interpolate var.lambda_requirements.
+        self.assertIn(
+            'filemd5("${path.module}/../../../../lambda/${var.lambda_requirements}")',
+            fc,
+            "filemd5 trigger must hash `${var.lambda_requirements}`",
+        )
+        self.assertIn(
+            "-r ${path.module}/../../../../lambda/${var.lambda_requirements}",
+            fc,
+            "pip install -r must read `${var.lambda_requirements}`",
+        )
+
+    def test_apigateway_uses_fcv3(self):
+        """The API Gateway backend must point at FCV3 (function_version
+        = "3.0"). Without this, the legacy default of "2.0" expects
+        `service_name`, which doesn't exist in the FCV3 model, and
+        API Gateway fails to wire to the function.
+        """
+        api = (self.ALICLOUD_MODULE / "apigateway.tf").read_text()
+        self.assertIn(
+            'function_version = "3.0"',
+            api,
+            'apigateway.tf fc_service_config must use function_version = "3.0"',
+        )
+        # In v3 the service resource does not exist; we must NOT
+        # reference it on a *code* line. (Comments are fine — the
+        # legacy resource name is the natural way to explain what
+        # we're moving away from.)
+        for line in api.splitlines():
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            self.assertNotIn(
+                "alicloud_fc_service",
+                stripped,
+                f"apigateway.tf must not reference the legacy "
+                f"alicloud_fc_service on a code line.\nLine: {line!r}",
+            )
+            self.assertNotIn(
+                "alicloud_fc_function",
+                stripped,
+                f"apigateway.tf must not reference the legacy "
+                f"alicloud_fc_function on a code line.\nLine: {line!r}",
+            )
+
+    def test_fc_code_oss_grant_in_ram(self):
+        """The FC execution role's RAM policy must grant
+        `oss:GetObject` on the function-code object key — without
+        this the function cannot fetch its own zip on cold start.
+
+        The grant is scoped to `${bucket}/${fc_code_object_key}`
+        (exact path) to keep blast radius minimal.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/${local.fc_code_object_key}",
+            ram,
+            "ram.tf must grant oss:GetObject on the per-env FC code object key "
+            "(local.agent_logs_bucket_arn/local.fc_code_object_key). Without "
+            "this, alicloud_fcv3_function fails to fetch its own code at cold start.",
+        )
+        self.assertIn(
+            "oss:GetObject",
+            ram,
+            "ram.tf must grant oss:GetObject for the FC code download",
+        )
+
+    def test_terraform_pinned_to_1_16_6(self):
+        """Every workflow that installs Terraform + mise.toml must
+        use the same version (1.16.6). A drift between them causes
+        `terraform init` to silently re-pick a different provider
+        set on CI vs local.
+        """
+        # mise.toml
+        mise_toml = (self.REPO_ROOT / "mise.toml").read_text()
+        self.assertIn(
+            'terraform = "1.16.6"',
+            mise_toml,
+            'mise.toml must pin terraform = "1.16.6"',
+        )
+
+        # workflows
+        for wf_rel in (
+            ".github/workflows/lint.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/terraform-apply-dev.yml",
+        ):
+            text = (self.REPO_ROOT / wf_rel).read_text()
+            self.assertIn(
+                "terraform_version: 1.16.6",
+                text,
+                f"{wf_rel} must install terraform_version 1.16.6",
+            )
+            # Old pin must be gone.
+            self.assertNotIn(
+                "terraform_version: 1.9.8",
+                text,
+                f"{wf_rel} must not still pin terraform 1.9.8",
+            )
+
+    def test_mise_tf_plan_points_at_real_dir(self):
+        """The mise `tf-plan` / `tf-apply` tasks used to point at
+        `dir = "infra"` — but `infra/` is no longer a valid Terraform
+        working directory after the per-cloud split (it now contains
+        only per-cloud subdirectories, not a root `main.tf`).
+
+        Both tasks must point at a concrete per-cloud tree. We assert
+        the AWS dev tree because that's the default operator path;
+        per-cloud override is via $BLITZLOG_PROVIDER / $BLITZLOG_ENV.
+        """
+        mise_toml = (self.REPO_ROOT / "mise.toml").read_text()
+        # The bad shape from #126 must be gone.
+        self.assertNotRegex(
+            mise_toml,
+            r'\["tf-(?:plan|apply)"\][^[]*?dir\s*=\s*"infra"\s*\n',
+            'mise.toml tasks[].dir = "infra" is invalid after the per-cloud split',
+        )
+        # Default target is infra/aws/dev.
+        self.assertIn(
+            'dir = "infra/aws/dev"',
+            mise_toml,
+            'mise.toml tf-plan / tf-apply must default to dir = "infra/aws/dev"',
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

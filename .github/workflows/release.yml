@@ -758,7 +758,7 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.8
+          terraform_version: 1.16.6
 
       # Build the Lambda bundle into `infra/aws/modules/core/build/`
       # BEFORE `terraform plan` runs. The data source

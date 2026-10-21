@@ -1,6 +1,6 @@
 [tools]
 python = "3.12"
-terraform = "1.9.8"
+terraform = "1.16.6"
 packer = "1.16.1"
 
 [tasks.bootstrap]
@@ -78,13 +78,19 @@ cd infra && terraform init
 """
 
 [tasks."tf-plan"]
-description = "Terraform plan"
-dir = "infra"
+# Repointed from `infra` after the per-cloud split (issue #126).
+# `infra/` itself is now a directory of per-cloud trees with no
+# root-level `.tf`, so `dir = "infra"` cannot be a working directory
+# for `terraform plan`. Defaults to the AWS dev stack for parity
+# with the most common operator use; pass $BLITZLOG_PROVIDER and
+# $BLITZLOG_ENV to land on the right per-cloud tree, e.g.
+# `BLITZLOG_PROVIDER=alicloud BLITZLOG_ENV=prod mise run tf-plan`.
+dir = "infra/aws/dev"
 run = "terraform plan"
 
 [tasks."tf-apply"]
-description = "Terraform apply"
-dir = "infra"
+# Mirrors tf-plan. See the comment there.
+dir = "infra/aws/dev"
 run = "terraform apply"
 
 [tasks.image-build]
