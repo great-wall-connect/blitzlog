@@ -4,8 +4,8 @@ output "instance_id" {
 }
 
 output "public_ip" {
-  description = "Elastic IP of the scrummaster (ssh ubuntu@<public_ip>)"
-  value       = aws_eip.scrummaster.public_ip
+  description = "Elastic IP of the scrummaster when var.enable_eip is true (ssh ubuntu@<public_ip>), otherwise null"
+  value       = var.enable_eip ? aws_eip.scrummaster[0].public_ip : null
 }
 
 output "ami_id" {

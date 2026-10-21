@@ -140,7 +140,23 @@ class TestScrummasterTerraform(unittest.TestCase):
     def test_variables_declared(self):
         self.assertIn('variable "zeroclaw_image_tag"', self.vars_tf)
         self.assertIn('variable "ssh_allowed_cidrs"', self.vars_tf)
+        self.assertIn('variable "enable_eip"', self.vars_tf)
         self.assertIn(f'default     = "{DEFAULT_TAG}"', self.vars_tf)
+
+    def test_eip_is_optional_and_disabled_by_default(self):
+        """Public IP (EIP + subnet auto-assign) must be disabled by default."""
+        self.assertRegex(
+            self.vars_tf,
+            r'variable\s+"enable_eip"\s*\{[^}]*default\s*=\s*false',
+        )
+        self.assertRegex(
+            self.main_tf,
+            r'resource\s+"aws_eip"\s+"scrummaster"\s*\{[^}]*count\s*=\s*var\.enable_eip\s*\?\s*1\s*:\s*0',
+        )
+        self.assertRegex(
+            self.main_tf,
+            r"associate_public_ip_address\s*=\s*false",
+        )
 
     def test_no_environment_variable(self):
         """Scrummaster is operator hosting, shared across envs like user-pool."""

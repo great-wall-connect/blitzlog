@@ -12,6 +12,8 @@ subnet_id = "subnet-0123456789abcdef0"
 # Must match the -var zeroclaw_image_tag=... the AMI was baked with.
 zeroclaw_image_tag = "default-features-v0.8.6"
 
-# Operator SSH access. Empty list disables port 22 ingress.
-ssh_allowed_cidrs = ["203.0.113.10/32"]
-ssh_key_name      = "my-ec2-keypair"
+# Operator SSH and public IP access. Disabled by default so the instance has
+# no public IP and port 22 ingress is closed unless explicitly enabled.
+enable_eip        = false
+ssh_allowed_cidrs = []
+ssh_key_name      = ""

@@ -156,14 +156,15 @@ resource "aws_security_group_rule" "scrummaster_ssh" {
 # ---------------------------------------------------------------------------
 
 resource "aws_instance" "scrummaster" {
-  ami                     = data.aws_ami.scrummaster.id
-  instance_type           = "t4g.nano"
-  subnet_id               = var.subnet_id
-  key_name                = var.ssh_key_name != "" ? var.ssh_key_name : null
-  vpc_security_group_ids  = [aws_security_group.scrummaster.id]
-  iam_instance_profile    = aws_iam_instance_profile.scrummaster.name
-  disable_api_termination = true
-  user_data               = file("${path.module}/user-data.sh")
+  ami                         = data.aws_ami.scrummaster.id
+  instance_type               = "t4g.nano"
+  subnet_id                   = var.subnet_id
+  associate_public_ip_address = false
+  key_name                    = var.ssh_key_name != "" ? var.ssh_key_name : null
+  vpc_security_group_ids      = [aws_security_group.scrummaster.id]
+  iam_instance_profile        = aws_iam_instance_profile.scrummaster.name
+  disable_api_termination     = true
+  user_data                   = file("${path.module}/user-data.sh")
 
   metadata_options {
     http_tokens = "required"
@@ -192,6 +193,7 @@ resource "aws_instance" "scrummaster" {
 }
 
 resource "aws_eip" "scrummaster" {
+  count    = var.enable_eip ? 1 : 0
   domain   = "vpc"
   instance = aws_instance.scrummaster.id
 

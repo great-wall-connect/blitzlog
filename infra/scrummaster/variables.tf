@@ -22,6 +22,12 @@ variable "ssh_key_name" {
   default     = ""
 }
 
+variable "enable_eip" {
+  description = "Whether to allocate and attach an Elastic IP to the scrummaster instance. Default false keeps the host without a public IP unless explicitly opted in."
+  type        = bool
+  default     = false
+}
+
 variable "vpc_id" {
   description = "VPC to place the scrummaster security group in"
   type        = string
