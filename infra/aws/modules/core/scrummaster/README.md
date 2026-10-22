@@ -1,6 +1,6 @@
 # ZeroClaw on the scrummaster
 
-`infra/scrummaster/` hosts one [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw)
+`infra/aws/modules/core/scrummaster/` (via scrummaster.tf in the same module) hosts one [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw)
 container per user on a long-lived t4g.nano. It is operator hosting —
 blitzlog-agent runs must not modify it (see `AGENTS.md`). ZeroClaw is
 **never installed on the host**; the host only runs `dockerd`, the same
@@ -10,7 +10,7 @@ Docker-first pattern as the main agent (`docs/DOCKER.md`).
 
 The upstream image `ghcr.io/zeroclaw-labs/zeroclaw:<tag>` is pinned by
 digest at Packer build time
-(`infra/packer/scripts-scrummaster-ubuntu/01-system.sh`):
+(`infra/aws/packer/scripts-scrummaster-ubuntu/01-system.sh`):
 
 1. `docker buildx imagetools inspect ghcr.io/zeroclaw-labs/zeroclaw:${zeroclaw_image_tag}`
    resolves the tag to a `sha256:…` digest.
@@ -28,11 +28,11 @@ If the upstream tag is re-pointed, the running scrummaster is unaffected
 until the next Packer rebuild. To upgrade:
 
 ```bash
-cd infra/packer
+cd infra/aws/packer
 packer build -var zeroclaw_image_tag=<new-tag> scrummaster-zeroclaw-ubuntu.pkr.hcl
 ```
 
-then set `zeroclaw_image_tag` in `infra/scrummaster/terraform.tfvars` to
+then set `zeroclaw_image_tag` in `infra/aws/dev/terraform.tfvars` to
 the same value (the stack refuses an AMI whose `ZeroclawTag` differs).
 A new AMI means a new instance, which `prevent_destroy` blocks — lift it
 deliberately in a commit when replacing the host.

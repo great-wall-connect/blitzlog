@@ -418,13 +418,13 @@ jobs:
 
       - name: Packer init
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        working-directory: infra/packer
+        working-directory: infra/aws/packer
         run: packer init agent-docker-ubuntu.pkr.hcl
 
       - name: Packer build (bake AMI, publish id to SSM)
         id: packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        working-directory: infra/packer
+        working-directory: infra/aws/packer
         env:
           BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
           STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}

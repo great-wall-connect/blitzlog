@@ -37,3 +37,27 @@ output "ssm_root" {
   description = "dev SSM root (everything dev lives under this path)"
   value       = module.core.ssm_root
 }
+
+# Scrummaster outputs are re-exported verbatim (no `dev ` prefix) because
+# the resources are env-independent — see infra/aws/modules/core/scrummaster.tf.
+# infra/aws/modules/core/scrummaster/tests/smoketest.sh reads public_ip and
+# zeroclaw_image_tag from `terraform output` run in this directory.
+output "scrummaster_instance_id" {
+  description = "EC2 instance id of the dev scrummaster, or null when enable_scrummaster is false."
+  value       = module.core.scrummaster_instance_id
+}
+
+output "scrummaster_public_ip" {
+  description = "Elastic IP of the dev scrummaster when enable_scrummaster_eip is true, otherwise null (ssh ubuntu@<public_ip>)"
+  value       = module.core.scrummaster_public_ip
+}
+
+output "scrummaster_ami_id" {
+  description = "AMI the dev scrummaster was launched from, or null when enable_scrummaster is false."
+  value       = module.core.scrummaster_ami_id
+}
+
+output "scrummaster_zeroclaw_image_tag" {
+  description = "Upstream zeroclaw tag the dev scrummaster AMI was baked with"
+  value       = module.core.scrummaster_zeroclaw_image_tag
+}

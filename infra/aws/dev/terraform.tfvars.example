@@ -63,3 +63,35 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # State file: S3 key is "dev/blitzlog.tfstate" in the bucket named in dev-backend.hcl.
 # The dev state is independent of prod state — concurrent applies to both
 # environments do not contend on a DynamoDB lock.
+
+# ---------------------------------------------------------------------------
+# Scrummaster (epic #134)
+# ---------------------------------------------------------------------------
+# The long-lived Scrummaster advisor host: a t4g.nano running dockerd + one
+# ZeroClaw container per user-pool user. Read-only over GitHub issues / PRs /
+# S3 session artifacts, answers you over Telegram, and is the only agent role
+# permitted to apply the `autonomous` / `assisted` trigger labels.
+#
+# Requires a Packer bake FIRST — nothing in CI builds this AMI yet:
+#   cd infra/aws/packer
+#   packer init scrummaster-zeroclaw-ubuntu.pkr.hcl
+#   packer build -var zeroclaw_image_tag=default-features-v0.8.6 \
+#                  scrummaster-zeroclaw-ubuntu.pkr.hcl
+# That publishes the AMI id to /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu,
+# which this module reads at plan time.
+#
+# Enable with:
+#   enable_scrummaster = true
+#   zeroclaw_image_tag = "default-features-v0.8.6"
+#
+# Then: infra/aws/modules/core/scrummaster/tests/smoketest.sh
+enable_scrummaster = false
+
+# Must match the -var zeroclaw_image_tag the AMI was baked with. The module
+# refuses to launch an AMI whose ZeroclawTag differs.
+zeroclaw_image_tag = "default-features-v0.8.6"
+
+# Operator access. Disabled by default so the instance has no public IP and
+# port 22 ingress is closed unless explicitly enabled.
+enable_scrummaster_eip = false
+ssh_key_name           = ""

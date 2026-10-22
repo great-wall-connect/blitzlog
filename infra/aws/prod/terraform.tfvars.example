@@ -80,3 +80,15 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # MUST match in
 # State file: S3 key is "prod/blitzlog.tfstate" in the bucket named in prod-backend.hcl.
 # Migrate the legacy single-key state ("blitzlog.tfstate") with:
 #   terraform init -migrate-state -backend-config=prod-backend.hcl
+
+# ---------------------------------------------------------------------------
+# Scrummaster (epic #134)
+# ---------------------------------------------------------------------------
+# The Scrummaster is env-independent: its resources carry no environment
+# infix (blitzlog-scrummaster-role, -sg, -profile) and there is exactly one
+# of them per AWS account. **dev owns it.** Prod must leave this false —
+# enabling it here would collide with dev's instance and IAM objects.
+#
+# Guarded by test_prod_does_not_enable_scrummaster in
+# tests/test_scrummaster_infra.py.
+enable_scrummaster        = false

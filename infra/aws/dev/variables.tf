@@ -128,3 +128,33 @@ variable "spot_instance_types" {
   type        = list(string)
   default     = ["t4g.medium", "t4g.large", "t4g.xlarge"]
 }
+
+# ---------------------------------------------------------------------------
+# Scrummaster (epic #134). The scrummaster is env-independent and carries
+# no environment infix, so only ONE env may enable it — dev is the one.
+# See infra/aws/modules/core/scrummaster.tf.
+# ---------------------------------------------------------------------------
+
+variable "enable_scrummaster" {
+  description = "Create the long-lived Scrummaster advisor host in dev. Requires a Packer bake to have published /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu first (infra/aws/packer/scrummaster-zeroclaw-ubuntu.pkr.hcl)."
+  type        = bool
+  default     = false
+}
+
+variable "zeroclaw_image_tag" {
+  description = "Upstream ghcr.io/zeroclaw-labs/zeroclaw tag the scrummaster AMI must have been baked with."
+  type        = string
+  default     = "default-features-v0.8.6"
+}
+
+variable "ssh_key_name" {
+  description = "Name of an existing EC2 key pair for `ssh ubuntu@<eip>` on the dev scrummaster. Empty launches without a key pair."
+  type        = string
+  default     = ""
+}
+
+variable "enable_scrummaster_eip" {
+  description = "Allocate and attach an Elastic IP to the dev scrummaster instance. Default false keeps the host without a public IP unless explicitly opted in."
+  type        = bool
+  default     = false
+}

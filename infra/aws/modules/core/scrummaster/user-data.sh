@@ -1,5 +1,5 @@
 #!/bin/bash
-# infra/scrummaster/user-data.sh — scrummaster first-boot setup (issue #135).
+# infra/aws/modules/core/scrummaster/user-data.sh — scrummaster first-boot setup (issue #135).
 #
 # Deliberately minimal. Docker, the zeroclaw-host user, the baked image
 # tarball and both systemd units already live in the AMI (Packer,

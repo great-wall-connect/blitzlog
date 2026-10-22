@@ -1,10 +1,19 @@
-# infra/scrummaster/ — operator-managed read-only advisor host (issue #135).
+# infra/scrummaster/ — DEPRECATED. Superseded by
+# infra/aws/modules/core/scrummaster.tf (epic #134).
+#
+# This standalone stack exists only until its state is migrated into the
+# dev stack and this directory is deleted. Its resources now also live in
+# the core module behind `var.enable_scrummaster`, so the two are
+# duplicates: DO NOT apply this stack — you will get a "resource already
+# exists" collision on blitzlog-scrummaster-role / -sg / -profile the
+# moment the migration lands.
+#
+# `user_data` points at the canonical asset inside the core module so
+# there is exactly one copy of it. That path is another thing to fix
+# before this directory goes away.
 #
 # One long-lived on-demand t4g.nano running dockerd + one ZeroClaw
-# container per user (zeroclaw@<login>.service, activated in #136). This
-# stack is operator hosting — blitzlog-agent runs must not modify it
-# (see AGENTS.md). Like infra/user-pool/, it is env-independent: there is
-# no environment variable and nothing here is prod- or dev-scoped.
+# container per user (zeroclaw@<login>.service, activated in #136).
 #
 # The instance is a pet: `disable_api_termination` blocks console/API
 # terminates and `prevent_destroy` makes `terraform destroy` (and any
@@ -164,7 +173,7 @@ resource "aws_instance" "scrummaster" {
   vpc_security_group_ids      = [aws_security_group.scrummaster.id]
   iam_instance_profile        = aws_iam_instance_profile.scrummaster.name
   disable_api_termination     = true
-  user_data                   = file("${path.module}/user-data.sh")
+  user_data                   = file("${path.module}/../aws/modules/core/scrummaster/user-data.sh")
 
   metadata_options {
     http_tokens = "required"

@@ -128,3 +128,12 @@ variable "spot_instance_types" {
   type        = list(string)
   default     = ["t4g.medium", "t4g.large", "t4g.xlarge"]
 }
+
+# ---------------------------------------------------------------------------
+# Scrummaster (epic #134). Deliberately NOT wired through the prod wrapper.
+# The scrummaster's resources are env-independent and carry no environment
+# infix (blitzlog-scrummaster-role, -sg, -profile), so a prod copy would
+# collide with dev's in the shared AWS account. dev is the only env that
+# may enable it. Guarded by test_prod_does_not_enable_scrummaster in
+# tests/test_scrummaster_infra.py.
+# ---------------------------------------------------------------------------

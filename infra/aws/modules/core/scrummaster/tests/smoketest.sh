@@ -1,19 +1,31 @@
 #!/bin/bash
-# infra/scrummaster/tests/smoketest.sh — post-apply smoke test (issue #135).
+# infra/aws/modules/core/scrummaster/tests/smoketest.sh — post-apply smoke test (issue #135).
 #
-# Run from infra/scrummaster/ after `terraform apply`:
-#   bash tests/smoketest.sh [ssh options...]
-# e.g. bash tests/smoketest.sh -i ~/.ssh/my-ec2-keypair.pem
+# The scrummaster is part of the core module (epic #134), so its state
+# lives with the dev stack. Run this after `terraform apply` in
+# infra/aws/dev:
+#   bash infra/aws/modules/core/scrummaster/tests/smoketest.sh [ssh options...]
+# e.g. bash infra/aws/modules/core/scrummaster/tests/smoketest.sh -i ~/.ssh/my-ec2-keypair.pem
 #
 # Reads the EIP from `terraform output`, SSHes in as ubuntu, and asserts
 # the #135 acceptance criteria that can be checked on the host.
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# Walk up from <core>/scrummaster/tests to <core>, then up two more levels
+# to the stack that owns the resources (infra/aws/dev).
+REPO_ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+cd "${REPO_ROOT}/infra/aws/dev"
 
-IP=$(terraform output -raw public_ip)
-TAG=$(terraform output -raw zeroclaw_image_tag)
+IP=$(terraform output -raw scrummaster_public_ip)
+TAG=$(terraform output -raw scrummaster_zeroclaw_image_tag)
+
+if [ -z "$IP" ] || [ "$IP" = "null" ]; then
+    echo "smoketest SKIPPED: scrummaster_public_ip is null." >&2
+    echo "  Enable it with enable_scrummaster = true + enable_scrummaster_eip = true in infra/aws/dev/terraform.tfvars, then re-apply." >&2
+    exit 0
+fi
+
 SSH=(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$@" "ubuntu@${IP}")
 
 FAILED=0

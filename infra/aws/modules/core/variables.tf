@@ -175,3 +175,32 @@ variable "lambda_requirements" {
     error_message = "lambda_requirements must be a per-cloud requirements file (e.g. requirements-aws.txt, requirements-alicloud.txt)."
   }
 }
+
+# ---------------------------------------------------------------------------
+# Scrummaster (epic #134, skeleton #135). See scrummaster.tf for why this
+# is folded into `core` rather than kept as a separate stack.
+# ---------------------------------------------------------------------------
+
+variable "enable_scrummaster" {
+  description = "Create the long-lived Scrummaster advisor host (t4g.nano + one ZeroClaw container per user-pool user). Off by default because enabling it requires a Packer bake to have published /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu first, and nothing in CI bakes that AMI yet — a default-on module would gate the core webhook deploy behind a manual step. The resources are env-independent and carry no `var.environment` infix, so only ONE env may enable this."
+  type        = bool
+  default     = false
+}
+
+variable "zeroclaw_image_tag" {
+  description = "Upstream ghcr.io/zeroclaw-labs/zeroclaw tag the AMI must have been baked with. Packer resolves it to a sha256 digest at build time; this stack refuses to launch an AMI whose ZeroclawTag differs."
+  type        = string
+  default     = "default-features-v0.8.6"
+}
+
+variable "ssh_key_name" {
+  description = "Name of an existing EC2 key pair for `ssh ubuntu@<eip>` on the scrummaster. Empty launches without a key pair. Only used when enable_scrummaster is true."
+  type        = string
+  default     = ""
+}
+
+variable "enable_scrummaster_eip" {
+  description = "Allocate and attach an Elastic IP to the scrummaster instance. Default false keeps the host without a public IP unless explicitly opted in. Only used when enable_scrummaster is true."
+  type        = bool
+  default     = false
+}

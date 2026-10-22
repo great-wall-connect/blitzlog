@@ -81,7 +81,10 @@ The plumbing for this is in three places (issue #119):
 4. **No breaking changes** — Unless explicitly requested in the issue
 5. **Preserve coding style** — Match existing code conventions in the target repo
 6. **Missing build tools are project-side, not agent-side** — If a build fails because a toolchain component (C compiler, linker, system headers, etc.) is missing, **stop and report**; do not run `apt install`, `dnf install`, `brew install`, or equivalent. The project owns its build dependencies via the `bootstrap` task convention documented in [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md); if the project lacks a `bootstrap` task, the fix is a new commit to the target repo, not a self-healing install on the worker instance.
-7. **`infra/scrummaster/*` is operator hosting** — the long-lived scrummaster host (issue #135) is managed by the operator; blitzlog-agent runs must not modify anything under `infra/scrummaster/`.
+
+> The former rule 7 ("`infra/scrummaster/*` is operator hosting — blitzlog-agent runs must not modify anything under it") was **removed** when the Scrummaster moved from a standalone stack at `infra/scrummaster/` into `infra/aws/modules/core/scrummaster.tf` (epic #134, skeleton #135). The Scrummaster is part of the core deployment surface — CI owns it, and blitzlog agents maintain it like any other Terraform. Note that its instance is a pet with `prevent_destroy = true` and `disable_api_termination = true`; flipping either guard is a deliberate operator act, not a routine edit.
+
+The `### Carve-out for infra/scrummaster/` subsection under **Trigger Labels** above is unaffected — that rule governs who may apply the `autonomous` / `assisted` labels, not who may edit the files.
 
 ## Testing Commands
 
