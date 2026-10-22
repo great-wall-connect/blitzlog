@@ -1,14 +1,22 @@
 #!/bin/bash
-# scripts-scrummaster-ubuntu/02-publish-ami-id.sh — Publish scrummaster AMI id to SSM.
+# scripts-scrummaster-docker-ubuntu/02-publish-ami-id.sh — Publish scrummaster
+# AMI id to SSM.
 #
 # Runs as a Packer shell-local post-processor on the LOCAL packer runner
 # (NOT on the source EC2), reading the AMI id from the manifest.json
 # written by the `manifest` post-processor. Same mechanism as
-# scripts-docker-ubuntu/05-publish-ami-id.sh, but the scrummaster is
-# env-independent operator hosting, so the parameter has no env segment.
+# scripts-docker-ubuntu/05-publish-ami-id.sh, and it publishes to the
+# same env-scoped shape so one naming convention covers both AMIs:
+#
+#   /blitzlog/dev/agent-ami-id-zeroclaw-docker-ubuntu
+#   /blitzlog/prod/agent-ami-id-zeroclaw-docker-ubuntu
+#
+# BLITZLOG_ENV comes from `variable "environment"` in
+# scrummaster-zeroclaw-docker-ubuntu.pkr.hcl.
 
 set -euo pipefail
 
+: "${BLITZLOG_ENV:?BLITZLOG_ENV must be set}"
 : "${AWS_REGION:?AWS_REGION must be set}"
 
 MANIFEST="${PACKER_MANIFEST:-manifest.json}"
@@ -28,7 +36,7 @@ if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "null" ]; then
     exit 1
 fi
 
-PARAM="/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu"
+PARAM="/blitzlog/${BLITZLOG_ENV}/agent-ami-id-zeroclaw-docker-ubuntu"
 
 aws ssm put-parameter \
     --name "$PARAM" \
@@ -36,6 +44,6 @@ aws ssm put-parameter \
     --value "$AMI_ID" \
     --overwrite \
     --region "$AWS_REGION" \
-    --description "Packer-built blitzlog scrummaster AMI (Ubuntu 26.04 arm64 + zeroclaw)"
+    --description "Packer-built blitzlog scrummaster AMI (Ubuntu 26.04 arm64 + zeroclaw) for env ${BLITZLOG_ENV}"
 
 echo "Published $AMI_ID to $PARAM"

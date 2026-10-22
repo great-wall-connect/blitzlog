@@ -10,7 +10,7 @@ Docker-first pattern as the main agent (`docs/DOCKER.md`).
 
 The upstream image `ghcr.io/zeroclaw-labs/zeroclaw:<tag>` is pinned by
 digest at Packer build time
-(`infra/aws/packer/scripts-scrummaster-ubuntu/01-system.sh`):
+(`infra/aws/packer/scripts-scrummaster-docker-ubuntu/01-system.sh`):
 
 1. `docker buildx imagetools inspect ghcr.io/zeroclaw-labs/zeroclaw:${zeroclaw_image_tag}`
    resolves the tag to a `sha256:…` digest.
@@ -29,7 +29,7 @@ until the next Packer rebuild. To upgrade:
 
 ```bash
 cd infra/aws/packer
-packer build -var zeroclaw_image_tag=<new-tag> scrummaster-zeroclaw-ubuntu.pkr.hcl
+packer build -var environment=dev -var zeroclaw_image_tag=<new-tag> scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
 ```
 
 then set `zeroclaw_image_tag` in `infra/aws/dev/terraform.tfvars` to

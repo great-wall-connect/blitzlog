@@ -52,11 +52,11 @@ Two modes:
 |---|---|
 | `lambda/handler.py` | Python Lambda: webhook verification, GitHub App auth, EC2 spot launch |
 | `infra/aws/modules/core/` | Reusable Terraform module containing all AWS-shaped blitzlog resources, parameterized by `var.environment` (prod / dev) |
-| `infra/aws/modules/core/scrummaster.tf` | The always-on Scrummaster advisor host (t4g.nano + one ZeroClaw container per user-pool user), folded into the core module so one plan/apply owns the whole system. Gated off by `enable_scrummaster`; epic #134. Assets in `infra/aws/modules/core/scrummaster/`. |
+| `infra/aws/modules/core/scrummaster.tf` | The always-on Scrummaster advisor host (t4g.nano + one ZeroClaw container per user-pool user), folded into the core module so one plan/apply owns the whole system. Env-scoped like the rest of core — each env gets its own host, IAM objects and AMI (`/blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu`). Gated off by `enable_scrummaster`; epic #134. Assets in `infra/aws/modules/core/scrummaster/`. |
 | `infra/aws/prod/` | Thin Terraform wrapper that deploys the AWS core module with `environment = "prod"` |
 | `infra/aws/dev/` | Thin Terraform wrapper that deploys the AWS core module with `environment = "dev"`. Also the only env that may set `enable_scrummaster` — the scrummaster's resources are env-independent, so a prod copy would collide. |
 | `infra/aws/bootstrap/` | One-time AWS bootstrap stack: shared S3 buckets (agent logs + STT models), OIDC IAM roles for Packer + deploy + integration-test workflows, per-env SSM parameters |
-| `infra/aws/packer/` | Packer AMI build (AWS-only); bakes the blitzlog-agent container into an arm64 Ubuntu AMI |
+| `infra/aws/packer/` | Packer AMI builds (AWS-only, arm64 Ubuntu). `agent-docker-ubuntu.pkr.hcl` bakes the blitzlog-agent container; `scrummaster-zeroclaw-docker-ubuntu.pkr.hcl` bakes the ZeroClaw image + systemd units for the Scrummaster host. Both run in `release.yml` in parallel jobs sharing one ref-gate action, and publish their AMI id to `/blitzlog/<env>/agent-ami-id-*`. |
 | `infra/alicloud/modules/core/` | Reusable Terraform module containing all Alicloud-shaped blitzlog resources (Function Compute + ECS + RAM + API Gateway + OSS + MNS + KMS). Issue #126. |
 | `infra/alicloud/{dev,prod}/` | Thin Terraform wrappers that deploy the Alicloud core module with `environment = "dev"` / `"prod"`. The release workflow picks the tree based on `vars.BLITZLOG_PROVIDER`. |
 | `infra/alicloud/bootstrap/` | One-time Alicloud bootstrap stack: shared OSS buckets (agent logs + STT models) |

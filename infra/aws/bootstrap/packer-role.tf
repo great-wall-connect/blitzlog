@@ -1,13 +1,16 @@
-# Packer build role for blitzlog-agent AMIs. The Packer pipeline
-# (infra/aws/packer/agent-docker*.pkr.hcl) runs in GitHub Actions via OIDC and
-# assumes this role to:
+# Packer build role for blitzlog AMIs. Both Packer pipelines
+# (infra/aws/packer/agent-docker-ubuntu.pkr.hcl and
+# infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl) run in
+# GitHub Actions via OIDC and assume this role to:
 #   1. Read the source AMI (Canonical Ubuntu 26.04 LTS arm64)
-#   2. Create the blitzlog agent AMI (ec2:CreateImage)
-#   3. Write the resulting AMI id to /blitzlog/<env>/agent-ami-id-docker-*
+#   2. Create the AMI (ec2:CreateImage)
+#   3. Write the resulting AMI id to /blitzlog/<env>/agent-ami-id-*
 #   4. Read STT model files from the shared S3 bucket during image baking
 #
-# Trust policy: GitHub Actions OIDC for the great-wall-connect/blitzlog repo,
-# workflow_file_ref pinned to the packer-build workflow + branch refs.
+# Trust policy: GitHub Actions OIDC for the great-wall-connect/blitzlog
+# repo. The `sub` claim is matched with StringLike rather than
+# workflow_file_ref + ref constraints, so no workflow path is pinned
+# here — see the trust statement below.
 #
 # The shared `aws_caller_identity.current` and
 # `aws_iam_role.admin_sso` data sources live in
@@ -15,15 +18,8 @@
 # can reuse them without duplicating the lookup.
 
 locals {
-  github_repo   = "great-wall-connect/blitzlog"
-  github_org    = "great-wall-connect"
-  workflow_path = ".github/workflows/packer-build.yml"
-
-  allowed_refs = [
-    "refs/heads/main",
-    "refs/heads/feat/*",
-    "refs/tags/v*",
-  ]
+  github_repo = "great-wall-connect/blitzlog"
+  github_org  = "great-wall-connect"
 }
 
 resource "aws_iam_role" "packer_build" {
@@ -134,6 +130,12 @@ resource "aws_iam_role_policy" "packer_build" {
         ]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu",
+          # Scrummaster AMI (infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl),
+          # published by scripts-scrummaster-docker-ubuntu/02-publish-ami-id.sh to
+          # /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu. Same env-scoped
+          # shape as the agent AMI above, so the existing wildcard pattern would
+          # almost have covered it — the suffix differs, so it needs its own entry.
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-zeroclaw-docker-ubuntu",
           # Git author identity (issue #119) for the release.yml
           # Bump step. The Bump step reads the per-pool
           # /blitzlog/users/<owner>/git-author/{name,email} params

@@ -11,6 +11,11 @@ locals {
   timestamp = formatdate("YYYYMMDD-hhmmss", timestamp())
 }
 
+variable "environment" {
+  type        = string
+  description = "Environment name (prod / dev). Tags the AMI and scopes the SSM parameter it publishes to, matching agent-docker-ubuntu.pkr.hcl."
+}
+
 variable "zeroclaw_image_tag" {
   type        = string
   description = "Upstream tag of ghcr.io/zeroclaw-labs/zeroclaw to bake. Resolved to a sha256 digest at build time (01-system.sh); the AMI only ever runs that digest."
@@ -41,13 +46,14 @@ source "amazon-ebs" "ubuntu" {
   ssh_username         = "ubuntu"
   iam_instance_profile = "blitzlog-packer-build-instance-profile"
 
-  ami_name        = "blitzlog-scrummaster-zeroclaw-ubuntu-${local.timestamp}"
-  ami_description = "Blitzlog scrummaster AMI (Ubuntu 26.04 LTS arm64) with dockerd + baked zeroclaw:${var.zeroclaw_image_tag}"
+  ami_name        = "blitzlog-${var.environment}-scrummaster-ami-zeroclaw-docker-ubuntu-${local.timestamp}"
+  ami_description = "Blitzlog scrummaster AMI (Ubuntu 26.04 LTS arm64) with dockerd + baked zeroclaw:${var.zeroclaw_image_tag} (env: ${var.environment})"
   ami_regions     = [var.aws_region]
 
   tags = {
-    Name        = "blitzlog-scrummaster-zeroclaw-ubuntu-${local.timestamp}"
+    Name        = "blitzlog-${var.environment}-scrummaster-ami-zeroclaw-docker-ubuntu-${local.timestamp}"
     Purpose     = "blitzlog-scrummaster-image"
+    Environment = var.environment
     OsFamily    = "ubuntu"
     Runtime     = "docker"
     ZeroclawTag = var.zeroclaw_image_tag
@@ -62,7 +68,7 @@ source "amazon-ebs" "ubuntu" {
 }
 
 build {
-  name = "blitzlog-scrummaster-zeroclaw-ubuntu"
+  name = "blitzlog-scrummaster-zeroclaw-docker-ubuntu"
 
   sources = ["source.amazon-ebs.ubuntu"]
 
@@ -71,12 +77,12 @@ build {
   # installs both units under /etc/systemd/system/. Packer's `shell`
   # provisioner uploads only its own script, not sibling files.
   provisioner "file" {
-    source      = "${path.root}/../scrummaster/systemd/zeroclaw-image-pull.service"
+    source      = "${path.root}/../modules/core/scrummaster/systemd/zeroclaw-image-pull.service"
     destination = "/tmp/zeroclaw-image-pull.service"
   }
 
   provisioner "file" {
-    source      = "${path.root}/../scrummaster/systemd/zeroclaw@.service"
+    source      = "${path.root}/../modules/core/scrummaster/systemd/zeroclaw@.service"
     destination = "/tmp/zeroclaw@.service"
   }
 
@@ -85,7 +91,7 @@ build {
     environment_vars = [
       "ZEROCLAW_IMAGE_TAG=${var.zeroclaw_image_tag}",
     ]
-    script = "${path.root}/scripts-scrummaster-ubuntu/01-system.sh"
+    script = "${path.root}/scripts-scrummaster-docker-ubuntu/01-system.sh"
   }
 
   # 3. Publish AMI id to SSM (same manifest -> shell-local pattern as
@@ -98,8 +104,9 @@ build {
   post-processor "shell-local" {
     name = "publish-ami-id"
     environment_vars = [
+      "BLITZLOG_ENV=${var.environment}",
       "AWS_REGION=${var.aws_region}",
     ]
-    script = "${path.root}/scripts-scrummaster-ubuntu/02-publish-ami-id.sh"
+    script = "${path.root}/scripts-scrummaster-docker-ubuntu/02-publish-ami-id.sh"
   }
 }

@@ -102,6 +102,9 @@ jobs:
       mode: ${{ steps.detect.outputs.mode }}
       pr_number: ${{ steps.detect.outputs.pr_number }}
       new_version: ${{ steps.detect.outputs.new_version }}
+      # dev for pr-test, prod for release. Single-sourced from the
+      # ref-gate action rather than re-derived per step.
+      blitzlog_env: ${{ steps.detect.outputs.blitzlog_env }}
 
     env:
       IMAGE_NAME: blitzlog-agent
@@ -125,6 +128,17 @@ jobs:
       # refs. The bump type is auto-detected from the conventional
       # commits in the diff (last release tag -> $BUILD_REF) via
       # git-cliff (a battle-hardened conventional-commits parser).
+      # Issue #131: decide release (prod) vs pr-test (dev) from the ref
+      # alone, refusing anything that is neither a release ref nor a ref
+      # with an open PR. Extracted into a composite action so the
+      # scrummaster-packer job — which runs in parallel with this one —
+      # applies the identical gate. Do not inline it here.
+      - name: Ref gate
+        id: ref-gate
+        uses: ./.github/actions/ref-gate
+        with:
+          build-ref: ${{ env.BUILD_REF }}
+
       - name: Detect mode and bump type
         id: detect
         env:
@@ -161,77 +175,16 @@ jobs:
             | tar -xz --strip-components=1 -C /usr/local/bin
           git-cliff --version
 
-          # Ref-gate (issue #131). The primary safety mechanism: only
-          # `main` and `release/*` are eligible for the canonical
-          # release path. Any other ref must have an open PR (pr-test
-          # path) or it is refused outright. This is the regression
-          # guard for release #32 (where dispatching on a feature
-          # branch without an open PR produced a prod v0.4.0
-          # release because the previous "no PR -> release" gate
-          # treated any feature branch as a release candidate).
-          #
-          # Match the BUILD_REF exactly. The earlier `--head "$ref"`
-          # form had a known prefix-collision failure mode (Gemini
-          # analysis, 2026-10-12): if a ref like `feature/foo` is
-          # queried, branches like `feature/foo-bar` and `feature/foobar`
-          # all match because the filter is a `startsWith` style match.
-          # The pipe-to-jq form below does an exact-string match
-          # on `headRefName` and is the safe replacement for the
-          # broken `gh pr list --head "$ref"` form (which is
-          # startsWith-style and silently returns empty for fork
-          # PRs — release #32 regressed on this; see issue #131).
-          #
-          # Why the pipe shape, NOT the broken form (passing the
-          # `jq` flag `--arg r VALUE` to `gh` as a positional arg):
-          # `gh` doesn't accept `--arg` and errors with
-          # `unknown arguments ["r" VALUE EXPR]` (regression caught
-          # by run #38261612554 on 2026-10-12 14:15 UTC). Pushing
-          # the expression to a real `jq` invocation via a pipe
-          # lets `--arg` route correctly. Pinned by
-          # `test_pr_list_pipes_to_jq_not_uses_gh_arg` (the
-          # matching regression-guard test).
-          PR_NUMBER=$(gh pr list --state open --json number,headRefName \
-            | jq --arg r "${{ env.BUILD_REF }}" \
-                 '.[] | select(.headRefName == $r) | .number' \
-            | head -1 || true)
-          case "${{ env.BUILD_REF }}" in
-            main)
-              # Canonical release path. If a PR is open against
-              # main, the operator is running a pr-test against the
-              # main tip — downgrade to pr-test.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                MODE=release
-              fi
-              ;;
-            release/*)
-              # Fallback release branch path. PRs against a
-              # release/* branch are also pr-test.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                MODE=release
-              fi
-              ;;
-            *)
-              # Any other ref. Must have an open PR to qualify
-              # as pr-test. Without one, refuse with a clear
-              # operator-actionable message — the previous gate
-              # silently fell into release mode and deployed
-              # to prod.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                echo "FATAL: BUILD_REF='${{ env.BUILD_REF }}' is not a release ref and has no open PR." >&2
-                echo "  Allowed release refs: 'main' (canonical) or 'release/*' (fallback branch path)." >&2
-                echo "  For a PR-test image, open a PR with '${{ env.BUILD_REF }}' as the head first." >&2
-                echo "  For a production release, dispatch on 'main' (or merge this branch to main and dispatch from there)." >&2
-                echo "  Refusing to run so a feature-branch dispatch cannot accidentally deploy to prod (issue #131)." >&2
-                exit 1
-              fi
-              ;;
-          esac
+          # Ref-gate (issue #131). Single source of truth lives in
+          # .github/actions/ref-gate/action.yml — the scrummaster-packer
+          # job calls the same action so the two AMI bakes can never
+          # disagree about which environment they are building for.
+          # Re-bind its outputs onto the names the remaining steps in
+          # this job already reference (mode, pr_number, blitzlog_env)
+          # so nothing downstream had to change.
+          echo "mode=${{ steps.ref-gate.outputs.mode }}"                 >> "$GITHUB_OUTPUT"
+          echo "pr_number=${{ steps.ref-gate.outputs.pr_number }}"       >> "$GITHUB_OUTPUT"
+          echo "blitzlog_env=${{ steps.ref-gate.outputs.blitzlog_env }}" >> "$GITHUB_OUTPUT"
 
           # Bump type: ask git-cliff. It reads the conventional commits
           # since the last v* tag and outputs the next SemVer on stdout.
@@ -393,24 +346,33 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         env:
           MODE: ${{ steps.detect.outputs.mode }}
+          BLITZLOG_ENV: ${{ steps.detect.outputs.blitzlog_env }}
           NEW_VERSION: ${{ steps.detect.outputs.new_version }}
           PR_NUMBER: ${{ steps.detect.outputs.pr_number }}
         run: |
           set -euo pipefail
-          if [ "$MODE" = "pr-test" ]; then
-            # PR mode -> dev env (PR images get baked into the dev AMI;
-            # last-writer-wins on /blitzlog/dev/agent-ami-id-docker-ubuntu).
-            BLITZLOG_ENV=dev
-            STT_BUCKET=gwc-blitzlog-stt-models
-            AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
-            SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
-          else
-            # release mode -> prod env
-            BLITZLOG_ENV=prod
-            STT_BUCKET=gwc-blitzlog-stt-models
-            AGENT_IMAGE_TAG="v${NEW_VERSION}"
-            SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
-          fi
+          # BLITZLOG_ENV (dev / prod) comes from the ref-gate action via
+          # the detect step — NOT re-derived here. The scrummaster-packer
+          # job reads the same output, so the two AMI bakes cannot drift
+          # onto different environments.
+          #
+          #   dev  <- pr-test:  last-writer-wins on /blitzlog/dev/...
+          #   prod <- release: /blitzlog/prod/...
+          case "$BLITZLOG_ENV" in
+            dev)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
+              SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+              ;;
+            prod)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}"
+              SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
+              ;;
+            *)
+              echo "FATAL: ref-gate returned BLITZLOG_ENV='$BLITZLOG_ENV' (mode=$MODE); expected dev or prod." >&2
+              exit 1
+              ;;
+          esac
+          STT_BUCKET=gwc-blitzlog-stt-models
           echo "blitzlog_env=$BLITZLOG_ENV"      >> "$GITHUB_OUTPUT"
           echo "stt_bucket=$STT_BUCKET"          >> "$GITHUB_OUTPUT"
           echo "agent_image_tag=$AGENT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
@@ -666,9 +628,96 @@ jobs:
   # the deploy step on PRs. Re-add the `environment:` block once
   # the Environment is configured to allow the merged ref.
   # ----------------------------------------------------------------
+  # The scrummaster AMI bake (epic #134). Runs as a SEPARATE JOB so it
+  # executes concurrently with `release` rather than after it — the two
+  # AMIs are independent, and serially baking them doubles wall-clock on
+  # every dispatch. It applies the SAME ref-gate composite action as
+  # `release`, so the agent AMI and the scrummaster AMI can never be
+  # published under different environments.
+  scrummaster-packer:
+    # The name can't interpolate a step output (job `name:` is evaluated
+    # before steps run), so it just says what it does; the env lands in
+    # the logs and in the SSM parameter path.
+    name: Bake scrummaster AMI (parallels release job)
+    runs-on: ubuntu-26.04-arm
+
+    permissions:
+      contents: read
+      packages: read
+      # Required for OIDC into blitzlog-packer-build-role.
+      id-token: write
+
+    env:
+      BUILD_REF: ${{ inputs.ref || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 1
+
+      # Same gate, same action, same decision. `mode` is always one of
+      # release / pr-test here — a refused ref fails this step, which
+      # fails the job, exactly as it fails `release`.
+      - name: Ref gate
+        id: ref-gate
+        uses: ./.github/actions/ref-gate
+        with:
+          build-ref: ${{ env.BUILD_REF }}
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v2
+        with:
+          version: 1.16.1
+
+      - name: Configure AWS credentials (OIDC) for Packer
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-packer-build-role
+          aws-region: ap-east-1
+
+      - name: Packer init
+        working-directory: infra/aws/packer
+        run: packer init scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
+
+      - name: Packer build (bake scrummaster AMI, publish id to SSM)
+        env:
+          BLITZLOG_ENV: ${{ steps.ref-gate.outputs.blitzlog_env }}
+        run: |
+          set -euo pipefail
+          # No GHCR token: the bake pulls the PUBLIC
+          # ghcr.io/zeroclaw-labs/zeroclaw image by digest. It does not
+          # bake any of our own images, so it needs neither
+          # `github_token` nor `agent_image_tag`.
+          packer build -force \
+              -var "environment=${BLITZLOG_ENV}" \
+              scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
+
+          SSM_PARAM="/blitzlog/${BLITZLOG_ENV}/agent-ami-id-zeroclaw-docker-ubuntu"
+          if [ ! -r manifest.json ]; then
+            echo "FATAL: Packer did not write manifest.json (build may have failed before the post-processor ran)" >&2
+            exit 1
+          fi
+          AMI_ID=$(jq -r '.builds[-1].artifact_id' manifest.json | awk -F: '{print $2}')
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "null" ]; then
+            echo "FATAL: could not extract AMI id from manifest.json:" >&2
+            jq . manifest.json | sed 's/^/    /' >&2
+            exit 1
+          fi
+          echo "Baked scrummaster AMI: $AMI_ID -> $SSM_PARAM"
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
-    needs: release
+    # Needs BOTH bakes. The terraform plan reads
+    # /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu whenever
+    # enable_scrummaster is true, so the deploy must not plan before the
+    # scrummaster AMI param exists. Today enable_scrummaster defaults to
+    # false in both envs, which makes the dependency belt-and-braces
+    # rather than load-bearing — keep it anyway so turning the flag on
+    # cannot produce a plan-time failure.
+    needs: [release, scrummaster-packer]
     # Default `needs.X.result` for `needs: release` is `success`,
     # so the deploy job does NOT run if the release job failed
     # (e.g. Packer bake errored or the image build couldn't push).

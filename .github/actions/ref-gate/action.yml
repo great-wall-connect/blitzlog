@@ -1,0 +1,114 @@
+name: "Ref gate"
+description: >
+  Single source of truth for the blitzlog ref -> mode decision
+  (issue #131). Decides whether a dispatch is a canonical `release`
+  (prod) or a `pr-test` (dev), and refuses anything that is neither.
+  Consumed by the `release` job (which additionally computes the version
+  bump) and by the `scrummaster-packer` job, so the two AMI bakes can
+  never disagree about which environment they are building for.
+
+inputs:
+  build-ref:
+    description: "The ref to gate. Pass `inputs.ref || github.ref_name` from a workflow_dispatch."
+    required: true
+
+outputs:
+  mode:
+    description: "Either `release` or `pr-test`."
+    value: ${{ steps.gate.outputs.mode }}
+  pr_number:
+    description: "Open PR number for BUILD_REF, or empty on the release path."
+    value: ${{ steps.gate.outputs.pr_number }}
+  blitzlog_env:
+    description: "`prod` when mode is release, `dev` when mode is pr-test. This is what the AMI bakes publish under."
+    value: ${{ steps.gate.outputs.blitzlog_env }}
+
+runs:
+  using: composite
+  steps:
+    - name: Gate the ref
+      id: gate
+      shell: bash
+      env:
+        BUILD_REF: ${{ inputs.build-ref }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        # Match the BUILD_REF exactly. The earlier `--head "$ref"`
+        # form had a known prefix-collision failure mode (Gemini
+        # analysis, 2026-10-12): if a ref like `feature/foo` is
+        # queried, branches like `feature/foo-bar` and `feature/foobar`
+        # all match because the filter is a `startsWith` style match.
+        # The pipe-to-jq form below does an exact-string match
+        # on `headRefName` and is the safe replacement for the
+        # broken `gh pr list --head "$ref"` form (which is
+        # startsWith-style and silently returns empty for fork
+        # PRs — release #32 regressed on this; see issue #131).
+        #
+        # Why the pipe shape, NOT the broken form (passing the
+        # `jq` flag `--arg r VALUE` to `gh` as a positional arg):
+        # `gh` doesn't accept `--arg` and errors with
+        # `unknown arguments ["r" VALUE EXPR]` (regression caught
+        # by run #38261612554 on 2026-10-12 14:15 UTC). Pushing
+        # the expression to a real `jq` invocation via a pipe
+        # lets `--arg` route correctly. Pinned by
+        # `test_pr_list_pipes_to_jq_not_uses_gh_arg` in
+        # tests/test_release_workflow.py.
+        PR_NUMBER=$(gh pr list --state open --json number,headRefName \
+          | jq --arg r "$BUILD_REF" \
+               '.[] | select(.headRefName == $r) | .number' \
+          | head -1 || true)
+
+        case "$BUILD_REF" in
+          main)
+            # Canonical release path. If a PR is open against
+            # main, the operator is running a pr-test against the
+            # main tip — downgrade to pr-test.
+            if [ -n "$PR_NUMBER" ]; then
+              MODE=pr-test
+            else
+              MODE=release
+            fi
+            ;;
+          release/*)
+            # Fallback release branch path. PRs against a
+            # release/* branch are also pr-test.
+            if [ -n "$PR_NUMBER" ]; then
+              MODE=pr-test
+            else
+              MODE=release
+            fi
+            ;;
+          *)
+            # Any other ref. Must have an open PR to qualify
+            # as pr-test. Without one, refuse with a clear
+            # operator-actionable message — the previous gate
+            # silently fell into release mode and deployed
+            # to prod.
+            if [ -n "$PR_NUMBER" ]; then
+              MODE=pr-test
+            else
+              echo "FATAL: BUILD_REF='$BUILD_REF' is not a release ref and has no open PR." >&2
+              echo "  Allowed release refs: 'main' (canonical) or 'release/*' (fallback branch path)." >&2
+              echo "  For a PR-test image, open a PR with '$BUILD_REF' as the head first." >&2
+              echo "  For a production release, dispatch on 'main' (or merge this branch to main and dispatch from there)." >&2
+              echo "  Refusing to run so a feature-branch dispatch cannot accidentally deploy to prod (issue #131)." >&2
+              exit 1
+            fi
+            ;;
+        esac
+
+        if [ "$MODE" = "release" ]; then
+          BLITZLOG_ENV=prod
+        else
+          BLITZLOG_ENV=dev
+        fi
+
+        {
+          echo "mode=$MODE"
+          echo "pr_number=$PR_NUMBER"
+          echo "blitzlog_env=$BLITZLOG_ENV"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Ref gate: BUILD_REF=$BUILD_REF -> MODE=$MODE (blitzlog_env=$BLITZLOG_ENV, pr=${PR_NUMBER:-none})"

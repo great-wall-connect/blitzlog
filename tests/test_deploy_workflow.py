@@ -742,11 +742,23 @@ class TestReleaseDeployJob(unittest.TestCase):
         )
         self.assertIsNotNone(m, "release.yml must have a `deploy:` job")
         body = m.group("body")
-        self.assertRegex(
-            body,
-            r"(?m)^\s+needs:\s*release\s*$",
-            "release.yml's deploy job must have `needs: release` "
-            "(so the deploy waits for the image build + Packer bake to complete)",
+        # Issue #134: the scrummaster AMI bake is a second, parallel job,
+        # so `needs` became a list. The deploy must still wait for the
+        # agent bake AND the scrummaster bake — its `terraform plan`
+        # reads /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu
+        # whenever enable_scrummaster is true.
+        needs = re.search(r"(?m)^\s+needs:\s*\[(?P<jobs>[^\]]*)\]\s*$", body)
+        self.assertIsNotNone(
+            needs,
+            "release.yml's deploy job must declare `needs: [release, "
+            "scrummaster-packer]` so it waits for both AMI bakes",
+        )
+        declared = {j.strip() for j in needs.group("jobs").split(",")}
+        self.assertEqual(
+            declared,
+            {"release", "scrummaster-packer"},
+            "the deploy job must need exactly the release job and the "
+            "parallel scrummaster-packer job",
         )
 
     def test_deploy_runs_terraform_plan(self):

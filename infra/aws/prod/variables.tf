@@ -130,10 +130,32 @@ variable "spot_instance_types" {
 }
 
 # ---------------------------------------------------------------------------
-# Scrummaster (epic #134). Deliberately NOT wired through the prod wrapper.
-# The scrummaster's resources are env-independent and carry no environment
-# infix (blitzlog-scrummaster-role, -sg, -profile), so a prod copy would
-# collide with dev's in the shared AWS account. dev is the only env that
-# may enable it. Guarded by test_prod_does_not_enable_scrummaster in
-# tests/test_scrummaster_infra.py.
+# Scrummaster (epic #134). Env-scoped like everything else in the core
+# module: prod gets its own scrummaster with its own AMI, published to
+# /blitzlog/prod/agent-ami-id-zeroclaw-docker-ubuntu. Off by default so a
+# fresh prod install stays a single command.
 # ---------------------------------------------------------------------------
+
+variable "enable_scrummaster" {
+  description = "Create the long-lived Scrummaster advisor host in prod. Requires a Packer bake to have published /blitzlog/prod/agent-ami-id-zeroclaw-docker-ubuntu first (infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl)."
+  type        = bool
+  default     = false
+}
+
+variable "zeroclaw_image_tag" {
+  description = "Upstream ghcr.io/zeroclaw-labs/zeroclaw tag the scrummaster AMI must have been baked with."
+  type        = string
+  default     = "default-features-v0.8.6"
+}
+
+variable "ssh_key_name" {
+  description = "Name of an existing EC2 key pair for `ssh ubuntu@<eip>` on the prod scrummaster. Empty launches without a key pair."
+  type        = string
+  default     = ""
+}
+
+variable "enable_scrummaster_eip" {
+  description = "Allocate and attach an Elastic IP to the prod scrummaster instance. Default false keeps the host without a public IP unless explicitly opted in."
+  type        = bool
+  default     = false
+}

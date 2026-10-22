@@ -3,7 +3,7 @@
 #
 # Deliberately minimal. Docker, the zeroclaw-host user, the baked image
 # tarball and both systemd units already live in the AMI (Packer,
-# scripts-scrummaster-ubuntu/01-system.sh). This script only:
+# scripts-scrummaster-docker-ubuntu/01-system.sh). This script only:
 #   - creates the three root-owned parent dirs for per-user bind mounts
 #   - enables the one-shot zeroclaw-image-pull.service (runs on every
 #     subsequent boot; the image is already in dockerd's store from the

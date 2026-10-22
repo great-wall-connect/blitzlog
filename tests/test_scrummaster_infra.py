@@ -36,8 +36,8 @@ LEGACY_SCRUM = REPO_ROOT / "infra" / "scrummaster"
 # the per-cloud split (issue #126); the scrummaster AMI is an AWS artifact
 # (t4g.nano + Amazon Linux), so it lands in the AWS tree.
 PACKER = REPO_ROOT / "infra" / "aws" / "packer"
-PKR_HCL = PACKER / "scrummaster-zeroclaw-ubuntu.pkr.hcl"
-PKR_SCRIPTS = PACKER / "scripts-scrummaster-ubuntu"
+PKR_HCL = PACKER / "scrummaster-zeroclaw-docker-ubuntu.pkr.hcl"
+PKR_SCRIPTS = PACKER / "scripts-scrummaster-docker-ubuntu"
 
 CORE_VARIABLES = CORE / "variables.tf"
 CORE_OUTPUTS = CORE / "outputs.tf"
@@ -159,7 +159,8 @@ class TestScrummasterTerraform(unittest.TestCase):
 
     def test_ami_read_from_scrummaster_ssm_param(self):
         self.assertIn(
-            "/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu", self.main_tf
+            "/blitzlog/${var.environment}/agent-ami-id-zeroclaw-docker-ubuntu",
+            self.main_tf,
         )
 
     def test_user_data_is_wired(self):
@@ -188,15 +189,14 @@ class TestScrummasterTerraform(unittest.TestCase):
             r"associate_public_ip_address\s*=\s*false",
         )
 
-    def test_no_environment_variable(self):
-        """Scrummaster is env-independent, shared across envs like user-pool.
+    def test_uses_the_core_environment_variable(self):
+        """The scrummaster reads var.environment like the rest of core.
 
-        It reads one AMI id from `/blitzlog/scrummaster/...` and one set
-        of `/blitzlog/users/*` params, with no env infix anywhere. Note
-        this checks *usage* in scrummaster.tf — the core module as a whole
-        does declare `variable "environment"` for the Lambda / ECS side.
+        An earlier revision asserted the opposite (env-independent). The
+        module is now uniformly env-scoped; see
+        test_names_embed_environment.
         """
-        self.assertNotIn("var.environment", _strip_comments(self.main_tf))
+        self.assertIn("var.environment", _strip_comments(self.main_tf))
 
     def test_outputs_expose_eip(self):
         self.assertRegex(self.outputs_tf, r'output\s+"scrummaster_public_ip"')
@@ -278,6 +278,70 @@ class TestScrummasterPacker(unittest.TestCase):
         cls.system = (PKR_SCRIPTS / "01-system.sh").read_text()
         cls.publish = (PKR_SCRIPTS / "02-publish-ami-id.sh").read_text()
 
+    def test_packer_declares_environment_variable(self):
+        """The template must take `environment`, like agent-docker-ubuntu.pkr.hcl."""
+        self.assertRegex(
+            self.pkr,
+            r'variable\s+"environment"\s*\{[^}]*type\s*=\s*string',
+            "the scrummaster Packer template must declare variable "
+            '"environment" — without it the AMI cannot be tagged or '
+            "scoped to an environment",
+        )
+
+    def test_packer_env_scopes_ami_name_and_tags(self):
+        live = _strip_comments(self.pkr)
+        self.assertRegex(
+            live,
+            r'ami_name\s*=\s*"blitzlog-\$\{var\.environment\}-scrummaster-ami-zeroclaw-docker-ubuntu-',
+            "ami_name must be env-scoped",
+        )
+        self.assertIn(
+            "Environment = var.environment",
+            live,
+            "AMI tags must carry Environment, matching agent-docker-ubuntu.pkr.hcl",
+        )
+        self.assertNotRegex(
+            live,
+            r'ami_name\s*=\s*"blitzlog-scrummaster-',
+            "the un-scoped ami_name is retired",
+        )
+
+    def test_packer_uploads_systemd_units_from_the_core_module(self):
+        """The `file` provisioners must point at the units' real home.
+
+        They referenced `${path.root}/../scrummaster/systemd/` until the
+        fold into modules/core moved the units to
+        `infra/aws/modules/core/scrummaster/systemd/`. A stale path here
+        fails the bake at the first provisioner — and nothing else in CI
+        exercises this template, so it would rot silently.
+        """
+        live = _strip_comments(self.pkr)
+        self.assertIn(
+            "${path.root}/../modules/core/scrummaster/systemd/zeroclaw-image-pull.service",
+            live,
+            "the image-pull unit must be uploaded from the core module path",
+        )
+        self.assertIn(
+            "${path.root}/../modules/core/scrummaster/systemd/zeroclaw@.service",
+            live,
+            "the template unit must be uploaded from the core module path",
+        )
+        self.assertNotIn(
+            "${path.root}/../scrummaster/systemd/",
+            live,
+            "the pre-fold `infra/aws/scrummaster/systemd/` path does not exist; "
+            "this silently broke the bake once the units moved into modules/core",
+        )
+
+    def test_packer_scripts_use_the_renamed_dir(self):
+        live = _strip_comments(self.pkr)
+        self.assertIn(
+            "${path.root}/scripts-scrummaster-docker-ubuntu/01-system.sh", live
+        )
+        self.assertIn(
+            "${path.root}/scripts-scrummaster-docker-ubuntu/02-publish-ami-id.sh", live
+        )
+
     def test_packer_uses_canonical_arm64_ubuntu(self):
         self.assertIn("ubuntu-resolute-26.04-arm64-server-*", self.pkr)
         self.assertIn('"099720109477"', self.pkr)
@@ -313,9 +377,21 @@ class TestScrummasterPacker(unittest.TestCase):
 
     def test_publish_writes_scrummaster_param(self):
         self.assertIn(
-            "/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu", self.publish
+            'PARAM="/blitzlog/${BLITZLOG_ENV}/agent-ami-id-zeroclaw-docker-ubuntu"',
+            self.publish,
         )
         self.assertIn("manifest", self.publish)
+
+    def test_publish_requires_blitzlog_env(self):
+        """The env must be a required input, not a defaulted one.
+
+        Publishing to an un-scoped path would hand dev and prod the same
+        AMI, which is exactly what the env-scoped naming prevents.
+        """
+        self.assertIn(
+            ': "${BLITZLOG_ENV:?BLITZLOG_ENV must be set}"',
+            self.publish,
+        )
 
 
 class TestScrummasterInCoreModule(unittest.TestCase):
@@ -362,73 +438,122 @@ class TestScrummasterInCoreModule(unittest.TestCase):
                 f"{label} must be gated on var.enable_scrummaster",
             )
 
-    def test_names_are_deliberately_env_independent(self):
-        """The scrummaster's names carry NO `var.environment` infix.
+    def test_names_embed_environment(self):
+        """Every scrummaster resource must be `blitzlog-${var.environment}-scrummaster*`.
 
-        This is load-bearing, not an oversight. Renaming
-        `blitzlog-scrummaster-profile` to
-        `blitzlog-${var.environment}-scrummaster-profile` changes
-        `iam_instance_profile`, which forces replacement of an instance
-        carrying `disable_api_termination = true`. A future contributor
-        "fixing" the naming convention would silently destroy and
-        recreate the scrummaster host, so pin the deviation.
+        An earlier revision kept these env-independent (one host per
+        account). That was reversed: env-scoped naming is the uniform
+        convention for this module, it lets dev and prod run their own
+        scrummaster from their own AMI, and it puts the AMI id in the
+        same env-scoped SSM namespace as the agent AMI. Pin it so a
+        contributor doesn't half-revert and reintroduce a collision
+        between dev and prod.
         """
-        self.assertNotIn(
-            "${var.environment}",
-            self.live,
-            "scrummaster resources must stay env-independent; adding a "
-            "${var.environment} infix to their names changes "
-            "iam_instance_profile and forces replacement of an instance "
-            "with disable_api_termination = true",
-        )
-        self.assertIn(
-            'name = "blitzlog-scrummaster-role"',
-            self.live,
-            "the env-independent naming convention is the documented one",
-        )
-
-    def test_only_dev_wires_the_scrummaster(self):
-        """dev passes the flags through; prod must not.
-
-        Because the names are env-independent, prod enabling the flag
-        would collide with dev's `blitzlog-scrummaster-role` in the
-        shared AWS account. This is the structural guard against that.
-        """
-        dev = DEV_MAIN.read_text()
-        for flag in (
-            "enable_scrummaster",
-            "zeroclaw_image_tag",
-            "ssh_key_name",
-            "enable_scrummaster_eip",
-        ):
-            self.assertRegex(
-                dev,
-                rf"\b{re.escape(flag)}\s*=\s*var\.{re.escape(flag)}\b",
-                f"infra/aws/dev/main.tf must pass {flag} through to module.core",
+        expected = [
+            'name = "blitzlog-${var.environment}-scrummaster-role"',
+            'name = "blitzlog-${var.environment}-scrummaster-ssm-read"',
+            'name = "blitzlog-${var.environment}-scrummaster-profile"',
+            'name        = "blitzlog-${var.environment}-scrummaster-sg"',
+            'Name        = "blitzlog-${var.environment}-scrummaster-eip"',
+            'Name        = "blitzlog-${var.environment}-scrummaster"',
+        ]
+        for snippet in expected:
+            self.assertIn(
+                snippet,
+                self.live,
+                f"scrummaster.tf must name this resource env-scoped: {snippet!r}",
             )
 
-        prod = PROD_MAIN.read_text()
-        self.assertNotIn(
-            "enable_scrummaster",
-            prod,
-            "infra/aws/prod/main.tf must NOT enable the scrummaster — its "
-            "resources are env-independent and would collide with dev's",
+        # No bare un-scoped leftovers from the old convention.
+        for stale in (
+            'name = "blitzlog-scrummaster-role"',
+            'name = "blitzlog-scrummaster-profile"',
+            'name        = "blitzlog-scrummaster-sg"',
+        ):
+            self.assertNotIn(stale, self.live, f"stale env-independent name: {stale!r}")
+
+    def test_tags_carry_environment(self):
+        """The SG / instance / EIP tags must carry `Environment`.
+
+        Core tags every env-scoped resource this way (see ec2.tf). It is
+        how `terraform console` and the AWS console can tell a dev
+        scrummaster from a prod one at a glance.
+        """
+        self.assertGreaterEqual(
+            self.live.count("Environment = var.environment"),
+            3,
+            "scrummaster SG, instance and EIP must all tag Environment",
         )
 
-    def test_prod_tfvars_example_keeps_it_off(self):
-        example = PROD_TFVARS_EXAMPLE.read_text()
+    def test_ami_ssm_param_is_env_scoped(self):
+        """The AMI id must be read from the env-scoped parameter.
+
+        `agent-ami-id-zeroclaw-docker-ubuntu` under
+        `/blitzlog/${var.environment}/` — the same shape
+        agent-docker-ubuntu.pkr.hcl publishes. The old un-scoped
+        `/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu` path would
+        make dev and prod share one AMI, which is the thing the
+        env-scoping exists to prevent.
+        """
         self.assertIn(
-            "enable_scrummaster",
-            example,
-            "infra/aws/prod/terraform.tfvars.example must state the scrummaster "
-            "position explicitly so an operator does not enable it",
+            'name = "/blitzlog/${var.environment}/agent-ami-id-zeroclaw-docker-ubuntu"',
+            self.live,
+            "scrummaster.tf must read the env-scoped AMI parameter",
         )
-        self.assertIn(
-            "enable_scrummaster        = false",
-            example,
-            "infra/aws/prod/terraform.tfvars.example must pin "
-            "enable_scrummaster = false",
+        self.assertNotIn(
+            "/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu",
+            self.live,
+            "the un-scoped AMI parameter path is retired; dev and prod each "
+            "publish their own",
         )
+
+    def test_both_envs_wire_the_scrummaster(self):
+        """dev and prod both pass the flags through to module.core.
+
+        Both are wired because the resources are env-scoped: each env
+        gets its own host, IAM objects and AMI with no collision. Both
+        default off (asserted separately) so a fresh install stays a
+        single command.
+        """
+        for label, path in (("dev", DEV_MAIN), ("prod", PROD_MAIN)):
+            text = path.read_text()
+            for flag in (
+                "enable_scrummaster",
+                "zeroclaw_image_tag",
+                "ssh_key_name",
+                "enable_scrummaster_eip",
+            ):
+                self.assertRegex(
+                    text,
+                    rf"\b{re.escape(flag)}\s*=\s*var\.{re.escape(flag)}\b",
+                    f"infra/aws/{label}/main.tf must pass {flag} through to module.core",
+                )
+
+    def test_both_tfvars_examples_keep_it_off(self):
+        """Both tfvars examples must state enable_scrummaster = false.
+
+        The default is already false in the module and the wrappers, but
+        an operator reading only the .example must see it too — turning
+        it on before the AMI is baked fails the plan at the
+        data-source read.
+        """
+        for label, path in (
+            ("dev", DEV_TFVARS_EXAMPLE),
+            ("prod", PROD_TFVARS_EXAMPLE),
+        ):
+            example = path.read_text()
+            self.assertIn(
+                "enable_scrummaster",
+                example,
+                f"infra/aws/{label}/terraform.tfvars.example must state the "
+                f"scrummaster position explicitly",
+            )
+            self.assertRegex(
+                example,
+                r"enable_scrummaster\s*=\s*false",
+                f"infra/aws/{label}/terraform.tfvars.example must pin "
+                f"enable_scrummaster = false",
+            )
 
     def test_defaults_off_in_core(self):
         variables = CORE_VARIABLES.read_text()
@@ -519,6 +644,123 @@ class TestScrummasterInCoreModule(unittest.TestCase):
             agents,
             "AGENTS.md should record why rule 7 was retired so the next agent "
             "does not restore it",
+        )
+
+
+class TestScrummasterPackerInRelease(unittest.TestCase):
+    """Guards for the parallel scrummaster AMI bake in release.yml.
+
+    The scrummaster AMI bake runs as its own job, concurrent with the
+    agent AMI bake, instead of as extra steps inside the `release` job.
+    That only works if both jobs derive their environment from the SAME
+    gate — hence the shared `.github/actions/ref-gate` composite action.
+    """
+
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+    ACTION = REPO_ROOT / ".github" / "actions" / "ref-gate" / "action.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = cls.WORKFLOW.read_text()
+        cls.action = cls.ACTION.read_text()
+
+    def test_release_workflow_parses(self):
+        """Guard against a YAML syntax error in a 1000-line workflow."""
+        import yaml
+
+        data = yaml.safe_load(self.wf)
+        self.assertIn("scrummaster-packer", data["jobs"])
+
+    def test_scrummaster_packer_is_a_separate_job(self):
+        """It must be its own job — steps inside one job are sequential."""
+        import yaml
+
+        data = yaml.safe_load(self.wf)
+        job = data["jobs"]["scrummaster-packer"]
+        self.assertEqual(
+            list(job.keys()) and job.get("runs-on"),
+            "ubuntu-26.04-arm",
+            "the bake must run on arm64 (Graviton AMIs), like the agent bake",
+        )
+        self.assertNotIn(
+            "needs",
+            job,
+            "the scrummaster job must NOT need `release` — that "
+            "would serialise it instead of running in parallel",
+        )
+
+    def test_both_jobs_call_the_same_ref_gate(self):
+        """Single source of truth for the ref -> env decision.
+
+        If the two jobs ever diverge, the agent AMI lands in one env's
+        SSM param and the scrummaster AMI in the other's — two AMIs, two
+        environments, no error anywhere.
+        """
+        uses = self.wf.count("uses: ./.github/actions/ref-gate")
+        self.assertEqual(
+            uses,
+            2,
+            "both the release job and the scrummaster-packer job must call "
+            "the shared ref-gate action",
+        )
+        self.assertNotIn(
+            "gh pr list --state open",
+            self.wf,
+            "the ref-gate logic must live in the composite action, not be "
+            "re-inlined in the workflow",
+        )
+
+    def test_ref_gate_action_exposes_env(self):
+        import yaml
+
+        data = yaml.safe_load(self.action)
+        self.assertEqual(data["runs"]["using"], "composite")
+        self.assertIn("build-ref", data["inputs"])
+        for out in ("mode", "pr_number", "blitzlog_env"):
+            self.assertIn(out, data["outputs"])
+        # The gate must still refuse non-release refs with no open PR —
+        # that refusal is the issue #131 regression guard.
+        body = data["runs"]["steps"][0]["run"]
+        self.assertIn("Refusing to run", body)
+        self.assertIn("release/*)", body)
+
+    def test_deploy_waits_for_both_bakes(self):
+        import yaml
+
+        data = yaml.safe_load(self.wf)
+        needs = data["jobs"]["deploy"]["needs"]
+        self.assertEqual(
+            sorted(needs),
+            ["release", "scrummaster-packer"],
+            "deploy must wait for both AMI bakes: the terraform plan reads "
+            "the scrummaster AMI SSM param whenever enable_scrummaster is true",
+        )
+
+    def test_packer_role_grants_the_scrummaster_param(self):
+        """CI baking this AMI over OIDC needs write access to its SSM param."""
+        role = (
+            REPO_ROOT / "infra" / "aws" / "bootstrap" / "packer-role.tf"
+        ).read_text()
+        self.assertIn(
+            "parameter/blitzlog/*/agent-ami-id-zeroclaw-docker-ubuntu",
+            role,
+            "packer-role.tf must grant the OIDC bake write access to the "
+            "env-scoped scrummaster AMI parameter, or the post-processor "
+            "fails with AccessDenied",
+        )
+
+    def test_packer_role_drops_the_dangling_workflow_path(self):
+        """`workflow_path` pointed at .github/workflows/packer-build.yml,
+        which does not exist. It was a dead local — the trust policy
+        matches the OIDC `sub` claim instead."""
+        role = (
+            REPO_ROOT / "infra" / "aws" / "bootstrap" / "packer-role.tf"
+        ).read_text()
+        self.assertNotIn(
+            "packer-build.yml",
+            role,
+            "packer-role.tf must not reference the non-existent "
+            "packer-build.yml workflow",
         )
 
 

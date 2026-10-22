@@ -72,13 +72,16 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # S3 session artifacts, answers you over Telegram, and is the only agent role
 # permitted to apply the `autonomous` / `assisted` trigger labels.
 #
-# Requires a Packer bake FIRST — nothing in CI builds this AMI yet:
-#   cd infra/aws/packer
-#   packer init scrummaster-zeroclaw-ubuntu.pkr.hcl
-#   packer build -var zeroclaw_image_tag=default-features-v0.8.6 \
-#                  scrummaster-zeroclaw-ubuntu.pkr.hcl
-# That publishes the AMI id to /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu,
-# which this module reads at plan time.
+# Requires a Packer bake FIRST — the release workflow does this for you in
+# parallel with the agent AMI, on every `pr-test` (dev) dispatch:
+#   packer build -var environment=dev \
+#                  scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
+# That publishes the AMI id to
+# /blitzlog/dev/agent-ami-id-zeroclaw-docker-ubuntu, which this module
+# reads at plan time.
+#
+# Env-scoped: dev gets its own host, IAM objects and AMI. Prod has its own
+# under /blitzlog/prod/. Nothing collides.
 #
 # Enable with:
 #   enable_scrummaster = true

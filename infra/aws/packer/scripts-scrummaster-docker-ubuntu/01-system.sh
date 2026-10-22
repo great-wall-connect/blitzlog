@@ -1,5 +1,5 @@
 #!/bin/bash
-# scripts-scrummaster-ubuntu/01-system.sh — scrummaster host setup (issue #135).
+# scripts-scrummaster-docker-ubuntu/01-system.sh — scrummaster host setup (issue #135).
 #
 # Runs on Canonical's Ubuntu 26.04 LTS arm64 base AMI. Installs dockerd,
 # awscli, git, jq; creates the `zeroclaw-host` user (sole member of the

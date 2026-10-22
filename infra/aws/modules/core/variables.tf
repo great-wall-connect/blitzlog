@@ -182,7 +182,7 @@ variable "lambda_requirements" {
 # ---------------------------------------------------------------------------
 
 variable "enable_scrummaster" {
-  description = "Create the long-lived Scrummaster advisor host (t4g.nano + one ZeroClaw container per user-pool user). Off by default because enabling it requires a Packer bake to have published /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu first, and nothing in CI bakes that AMI yet — a default-on module would gate the core webhook deploy behind a manual step. The resources are env-independent and carry no `var.environment` infix, so only ONE env may enable this."
+  description = "Create the long-lived Scrummaster advisor host (t4g.nano + one ZeroClaw container per user-pool user). Env-scoped like the rest of this module: each env gets its own host, IAM objects and AMI, published to /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu by infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl. Off by default so a fresh install stays a single command — turning it on before the AMI has been baked would fail the plan at the data-source read."
   type        = bool
   default     = false
 }

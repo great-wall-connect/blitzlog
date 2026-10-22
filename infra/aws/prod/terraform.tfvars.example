@@ -84,11 +84,28 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # MUST match in
 # ---------------------------------------------------------------------------
 # Scrummaster (epic #134)
 # ---------------------------------------------------------------------------
-# The Scrummaster is env-independent: its resources carry no environment
-# infix (blitzlog-scrummaster-role, -sg, -profile) and there is exactly one
-# of them per AWS account. **dev owns it.** Prod must leave this false —
-# enabling it here would collide with dev's instance and IAM objects.
+# The long-lived Scrummaster advisor host: a t4g.nano running dockerd + one
+# ZeroClaw container per user-pool user. Read-only over GitHub issues / PRs /
+# S3 session artifacts, answers you over Telegram, and is the only agent role
+# permitted to apply the `autonomous` / `assisted` trigger labels.
 #
-# Guarded by test_prod_does_not_enable_scrummaster in
-# tests/test_scrummaster_infra.py.
-enable_scrummaster        = false
+# Env-scoped: prod gets its own host, IAM objects and AMI, published to
+# /blitzlog/prod/agent-ami-id-zeroclaw-docker-ubuntu. Dev has its own under
+# /blitzlog/dev/. Nothing collides.
+#
+# Requires a Packer bake FIRST — the release workflow does this for you on
+# every `pr-test` (dev) and `release` (prod) dispatch.
+#
+# Enable with:
+#   enable_scrummaster = true
+#   zeroclaw_image_tag = "default-features-v0.8.6"
+enable_scrummaster = false
+
+# Must match the -var zeroclaw_image_tag the AMI was baked with. The module
+# refuses to launch an AMI whose ZeroclawTag differs.
+zeroclaw_image_tag = "default-features-v0.8.6"
+
+# Operator access. Disabled by default so the instance has no public IP and
+# port 22 ingress is closed unless explicitly enabled.
+enable_scrummaster_eip = false
+ssh_key_name           = ""

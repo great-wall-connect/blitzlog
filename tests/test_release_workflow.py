@@ -43,6 +43,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+# Issue #134: the ref-gate moved out of release.yml into a composite
+# action so the parallel scrummaster-packer job applies the identical
+# rule. Tests that assert on the gate itself read this file.
+REF_GATE_ACTION = REPO_ROOT / ".github" / "actions" / "ref-gate" / "action.yml"
 DOCKER_IMAGES_YML = REPO_ROOT / ".github" / "workflows" / "docker-images.yml"
 
 
@@ -75,6 +79,7 @@ class TestReleaseWorkflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = RELEASE_YML.read_text()
+        cls.gate = REF_GATE_ACTION.read_text()
         cls.on_block = _section(cls.text, "on")
 
     def test_triggered_only_by_workflow_dispatch(self):
@@ -182,38 +187,48 @@ class TestReleaseWorkflow(unittest.TestCase):
         )
 
     def test_detect_mode_step_present(self):
-        """release.yml MUST have a step that detects mode (pr-test vs
-        release) from the ref's open-PR status.
+        """release.yml MUST have a Detect step producing mode / bump / new_version.
 
-        The Detect step's bash script must call `gh pr list` against
-        ``$BUILD_REF`` and set the `mode` output (and the `bump` and
-        `new_version` outputs) based on the result.
+        Since issue #134 the mode/pr_number half of that decision comes
+        from the shared ref-gate composite action (so the parallel
+        scrummaster-packer job applies the identical rule); the Detect
+        step re-binds those outputs and still computes the version bump
+        itself with git-cliff, which only the release job needs.
         """
-        # The Detect step is the canonical source of mode/bump/new_version.
         self.assertRegex(
             self.text,
             r"id:\s*detect",
             "release.yml must have a Detect step (id: detect)",
         )
+        self.assertIn(
+            "uses: ./.github/actions/ref-gate",
+            self.text,
+            "release.yml must invoke the shared ref-gate action",
+        )
+        for out in ("mode", "pr_number", "blitzlog_env"):
+            self.assertRegex(
+                self.text,
+                rf'echo "{out}=\$\{{\{{ steps\.ref-gate\.outputs\.{out} \}}\}}"',
+                f"the Detect step must re-bind the ref-gate's {out} output "
+                f"onto the same GITHUB_OUTPUT key the later steps read",
+            )
         self.assertRegex(
             self.text,
-            r"gh pr list",
-            "release.yml's Detect step must call `gh pr list` to detect the mode",
+            r'echo "bump=',
+            "release.yml's Detect step must emit `bump=` (git-cliff still "
+            "runs in the Detect step — the version bump is release-only)",
         )
         self.assertRegex(
             self.text,
-            r"echo \"mode=",
-            "release.yml's Detect step must echo `mode=pr-test|release` as an output",
+            r'echo "new_version=',
+            "release.yml's Detect step must emit `new_version=`",
         )
-        self.assertRegex(
+        self.assertNotIn(
+            "gh pr list",
             self.text,
-            r"echo \"bump=",
-            "release.yml's Detect step must echo `bump=patch|minor|major` as an output",
-        )
-        self.assertRegex(
-            self.text,
-            r"echo \"new_version=",
-            "release.yml's Detect step must echo `new_version=X.Y.Z` as an output",
+            "the `gh pr list` call must live in the ref-gate action, not be "
+            "re-inlined here — two copies of the gate is how the agent AMI "
+            "and the scrummaster AMI would drift onto different environments",
         )
 
     def test_detect_mode_pr_test_when_pr_exists(self):
@@ -221,7 +236,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         step must set MODE=pr-test.
         """
         self.assertRegex(
-            self.text,
+            self.gate,
             r"if \[ -n \"\$\{?PR_NUMBER\}?\" \]; then\s*\n\s*MODE=pr-test",
             "release.yml's Detect step must set MODE=pr-test when an open PR is found",
         )
@@ -934,15 +949,15 @@ class TestReleaseWorkflow(unittest.TestCase):
         # equivalent shell-switch) that explicitly enumerates
         # `main` -> release.
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
         # The case statement must be present.
         self.assertRegex(
             body,
-            r'case\s+"?\$\{\{\s*env\.BUILD_REF\s*\}\}"?\s+in',
+            r'case\s+"\$BUILD_REF"\s+in',
             "Detect step must dispatch on BUILD_REF via a `case` "
             "statement (the ref-gate is the primary safety mechanism).",
         )
@@ -965,8 +980,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         via the new `case` statement).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -988,8 +1003,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         creates these branches).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1009,8 +1024,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         (no prod apply, no tag, no version bump).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1032,8 +1047,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         PR silently fell into release mode and deployed to prod).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1082,8 +1097,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         is pinned by `test_pr_list_pipes_to_jq_not_uses_gh_arg`.
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1114,9 +1129,9 @@ class TestReleaseWorkflow(unittest.TestCase):
         )
         # The broken `--head` filter must be GONE.
         self.assertNotIn(
-            '--head "${{ env.BUILD_REF }}"',
+            '--head "$BUILD_REF"',
             body,
-            'Detect step must NOT use `gh pr list --head "${{ env.BUILD_REF }}"` '
+            'Detect step must NOT use `gh pr list --head "$BUILD_REF"` '
             "anymore — that filter has a known prefix-collision failure "
             "mode (issue #131).",
         )
@@ -1126,7 +1141,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertNotRegex(
             body,
             r"--head\s+\"\$\{\{\s*env\.BUILD_REF\s*\}\}\"",
-            'Detect step must not use any `--head "${{ env.BUILD_REF }}"` '
+            'Detect step must not use any `--head "$BUILD_REF"` '
             "form (exact-string match is the only safe contract).",
         )
 
@@ -1150,8 +1165,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         `gh`/`jq` flag-routing bug.
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")

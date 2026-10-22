@@ -45,4 +45,10 @@ module "core" {
   aws_profile = var.aws_profile
 
   spot_instance_types = var.spot_instance_types
+
+  # Scrummaster (epic #134).
+  enable_scrummaster     = var.enable_scrummaster
+  zeroclaw_image_tag     = var.zeroclaw_image_tag
+  ssh_key_name           = var.ssh_key_name
+  enable_scrummaster_eip = var.enable_scrummaster_eip
 }

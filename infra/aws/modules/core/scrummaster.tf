@@ -18,22 +18,22 @@
 # The destroy/blast-radius isolation the separate stack bought is not
 # worth the setup friction — `dev` exists to be broken and rebuilt.
 #
-# ## Why the names carry NO environment infix
+# ## Naming
 #
-# Every other resource in this module is `blitzlog-${var.environment}-*`.
-# The scrummaster deliberately is not: it is env-independent, exactly
-# like the `/blitzlog/users/*` params and the shared S3 buckets in
-# `storage.tf`. Only one scrummaster should ever exist, and it reads a
-# single env-independent AMI id from `/blitzlog/scrummaster/`.
+# Every resource is `blitzlog-${var.environment}-scrummaster*`, matching the
+# rest of this module (lambda.tf, ec2.tf, iam.tf, storage.tf). An earlier
+# revision kept the scrummaster env-independent, reasoning that only one
+# host should exist; that was wrong. Env-scoped naming is the module's
+# uniform convention, it lets dev and prod run their own scrummaster from
+# their own AMI, and it means the AMI id published by Packer lands in the
+# same env-scoped SSM namespace as the agent AMI:
+# /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu.
 #
-# This is load-bearing, not an oversight. Renaming to
-# `blitzlog-${var.environment}-scrummaster-*` would change
-# `iam_instance_profile`, which forces replacement of an instance that
-# carries `disable_api_termination = true`. Regression test:
-# test_scrummaster_names_are_env_independent in
-# tests/test_scrummaster_infra.py. The corresponding hazard — two envs
-# both enabling it and colliding on the shared name — is guarded by
-# test_prod_does_not_enable_scrummaster.
+# Renaming changes `iam_instance_profile`, which forces replacement of the
+# running instance. Because it carries `disable_api_termination = true`,
+# that replacement is a deliberate operator procedure, not something
+# `terraform apply` can do unattended. See the operator runbook at the end
+# of this file.
 #
 # ## Gating
 #
@@ -63,7 +63,7 @@
 data "aws_ssm_parameter" "scrummaster_ami_id" {
   count = var.enable_scrummaster ? 1 : 0
 
-  name = "/blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu"
+  name = "/blitzlog/${var.environment}/agent-ami-id-zeroclaw-docker-ubuntu"
 }
 
 data "aws_ami" "scrummaster" {
@@ -87,7 +87,7 @@ data "aws_ami" "scrummaster" {
 resource "aws_iam_role" "scrummaster" {
   count = var.enable_scrummaster ? 1 : 0
 
-  name = "blitzlog-scrummaster-role"
+  name = "blitzlog-${var.environment}-scrummaster-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -104,7 +104,7 @@ resource "aws_iam_role" "scrummaster" {
 resource "aws_iam_role_policy" "scrummaster_ssm_read" {
   count = var.enable_scrummaster ? 1 : 0
 
-  name = "blitzlog-scrummaster-ssm-read"
+  name = "blitzlog-${var.environment}-scrummaster-ssm-read"
   role = aws_iam_role.scrummaster[0].id
 
   policy = jsonencode({
@@ -128,7 +128,7 @@ resource "aws_iam_role_policy" "scrummaster_ssm_read" {
 resource "aws_iam_instance_profile" "scrummaster" {
   count = var.enable_scrummaster ? 1 : 0
 
-  name = "blitzlog-scrummaster-profile"
+  name = "blitzlog-${var.environment}-scrummaster-profile"
   role = aws_iam_role.scrummaster[0].name
 }
 
@@ -143,7 +143,7 @@ resource "aws_iam_instance_profile" "scrummaster" {
 resource "aws_security_group" "scrummaster" {
   count = var.enable_scrummaster ? 1 : 0
 
-  name        = "blitzlog-scrummaster-sg"
+  name        = "blitzlog-${var.environment}-scrummaster-sg"
   description = "blitzlog scrummaster (ZeroClaw host)"
   vpc_id      = var.vpc_id
 
@@ -172,7 +172,8 @@ resource "aws_security_group" "scrummaster" {
   }
 
   tags = {
-    Name = "blitzlog-scrummaster-sg"
+    Name        = "blitzlog-${var.environment}-scrummaster-sg"
+    Environment = var.environment
   }
 }
 
@@ -216,8 +217,9 @@ resource "aws_instance" "scrummaster" {
   }
 
   tags = {
-    Name        = "blitzlog-scrummaster"
+    Name        = "blitzlog-${var.environment}-scrummaster"
     Purpose     = "blitzlog-scrummaster"
+    Environment = var.environment
     ZeroclawTag = var.zeroclaw_image_tag
   }
 
@@ -226,7 +228,7 @@ resource "aws_instance" "scrummaster" {
 
     precondition {
       condition     = lookup(data.aws_ami.scrummaster[0].tags, "ZeroclawTag", "") == var.zeroclaw_image_tag
-      error_message = "The scrummaster AMI in /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu was not baked with zeroclaw_image_tag. Rebuild infra/aws/packer/scrummaster-zeroclaw-ubuntu.pkr.hcl with -var zeroclaw_image_tag=<tag>, or set var.zeroclaw_image_tag to the AMI's ZeroclawTag."
+      error_message = "The scrummaster AMI in /blitzlog/${var.environment}/agent-ami-id-zeroclaw-docker-ubuntu was not baked with zeroclaw_image_tag. Rebuild infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl with -var environment=${var.environment} -var zeroclaw_image_tag=<tag>, or set var.zeroclaw_image_tag to the AMI's ZeroclawTag."
     }
   }
 }
@@ -238,6 +240,40 @@ resource "aws_eip" "scrummaster" {
   instance = aws_instance.scrummaster[0].id
 
   tags = {
-    Name = "blitzlog-scrummaster-eip"
+    Name        = "blitzlog-${var.environment}-scrummaster-eip"
+    Environment = var.environment
   }
 }
+# ---------------------------------------------------------------------------
+# Operator runbook: migrating a scrummaster that was created with the
+# previous env-independent names (blitzlog-scrummaster-role / -sg / -profile)
+#
+# This applies only to instances created before the rename to
+# blitzlog-${var.environment}-scrummaster*. A fresh apply is unaffected.
+# Terraform cannot perform the replacement unattended: changing
+# `iam_instance_profile` requires destroying the instance, and
+# `disable_api_termination = true` blocks that.
+#
+#   # 0. Confirm nothing is running before you start.
+#    terraform -chdir=infra/aws/dev plan -out=pre.tfplan
+#
+#   # 1. Temporarily drop the termination guard. Delete the empty
+#    #    prevent_destroy lifecycle block too, or the plan is refused
+#    #    before it can even offer a replacement.
+#    #    (edit this file: disable_api_termination = false)
+#
+#   # 2. Force replacement.
+#    terraform -chdir=infra/aws/dev apply -replace=module.core.aws_instance.scrummaster[0]
+#
+#   # 3. Restore both guards and commit them.
+#    #    (edit this file: disable_api_termination = true)
+#
+#   # 4. The old IAM role / SG / instance profile have no prefix overlap
+#    #    with the new ones, so they are orphaned. The old instance is
+#    #    terminated by step 2 and its EBS volume goes with it.
+#
+# Expect a host with no ZeroClaw per-user container running for the
+# duration of the swap (one launch, typically 60-120s). The per-user
+# state lives on the host under /var/lib/zeroclaw, so plan any migration
+# of that data before step 2 — it does not survive the replacement.
+# ---------------------------------------------------------------------------
