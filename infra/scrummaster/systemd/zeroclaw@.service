@@ -1,0 +1,42 @@
+# zeroclaw@.service — one ZeroClaw container per user (issue #135).
+#
+# %i is the GitHub login. Runs as zeroclaw-host (the only non-root member
+# of the `docker` group); the container process runs as the per-user
+# zeroclaw-<login> UID/GID so it can only touch that user's bind mounts.
+#
+# @ZEROCLAW_IMAGE_DIGEST@ is replaced with the sha256 digest Packer
+# resolved at bake time (scripts-scrummaster-ubuntu/01-system.sh); the
+# unit never references a mutable tag.
+#
+# Not activated in #135: the per-user account and bind-mount dirs land in
+# #136, config.toml in #137, and the first pre-start hook (plugin
+# install) in #138. Until then `docker run` fails by design.
+#
+# `$$` escapes `$` from systemd's own variable expansion so the shell
+# sees `$(id -u ...)`.
+
+[Unit]
+Description=ZeroClaw scrummaster daemon for %i
+Requires=docker.service zeroclaw-image-pull.service
+After=docker.service zeroclaw-image-pull.service
+
+[Service]
+Type=simple
+User=zeroclaw-host
+Group=zeroclaw-host
+ExecStart=/bin/sh -c 'exec /usr/bin/docker run --name zeroclaw-%i --rm \
+  --user "$$(id -u zeroclaw-%i):$$(id -g zeroclaw-%i)" \
+  -v /var/lib/zeroclaw/%i:/var/lib/zeroclaw \
+  -v /etc/zeroclaw/%i:/etc/zeroclaw:ro \
+  -v /var/log/zeroclaw/%i:/var/log/zeroclaw \
+  --env-file /etc/zeroclaw/%i/env \
+  --read-only --tmpfs /tmp:size=64m \
+  --security-opt no-new-privileges \
+  ghcr.io/zeroclaw-labs/zeroclaw@@ZEROCLAW_IMAGE_DIGEST@ \
+  daemon --config /etc/zeroclaw/config.toml'
+ExecStop=/usr/bin/docker stop zeroclaw-%i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
