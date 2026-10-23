@@ -728,37 +728,36 @@ class TestReleaseDeployJob(unittest.TestCase):
     def test_deploy_depends_on_release(self):
         """The deploy job MUST depend on the release job.
 
-        Without `needs: release`, the deploy runs in parallel and
-        races the image build / Packer bake. The release job's AMI
-        publish to SSM must complete before the deploy's
-        `terraform apply` reads the parameter.
+        Without `needs: release`, the deploy runs in parallel and races
+        the image build / Packer bake. The release job's AMI publish to
+        SSM must complete before the deploy's `terraform apply` reads the
+        parameter.
+
+        It must depend on `release` and nothing else. While the
+        experimental scrummaster AMI bake existed, it briefly sat in this
+        `needs` list, which meant a failure there would fail the AWS
+        deploy. The bake is gated off and the coupling is gone.
         """
-        # Scope to the deploy: job body so a stray `needs:`
-        # elsewhere in the file (or in the release job's outputs)
-        # can't pass this test.
+        # Scope to the deploy job body so a stray `needs:` elsewhere in
+        # the file (or in the release job's outputs) can't pass this.
         m = re.search(
             r"(?ms)^  deploy:\s*\n(?P<body>(?:    .*\n)+)",
             self.text,
         )
         self.assertIsNotNone(m, "release.yml must have a `deploy:` job")
         body = m.group("body")
-        # Issue #134: the scrummaster AMI bake is a second, parallel job,
-        # so `needs` became a list. The deploy must still wait for the
-        # agent bake AND the scrummaster bake — its `terraform plan`
-        # reads /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu
-        # whenever enable_scrummaster is true.
-        needs = re.search(r"(?m)^\s+needs:\s*\[(?P<jobs>[^\]]*)\]\s*$", body)
-        self.assertIsNotNone(
-            needs,
-            "release.yml's deploy job must declare `needs: [release, "
-            "scrummaster-packer]` so it waits for both AMI bakes",
+        self.assertRegex(
+            body,
+            r"(?m)^\s+needs:\s*release\s*$",
+            "release.yml's deploy job must have `needs: release` "
+            "(so the deploy waits for the image build + Packer bake to complete)",
         )
-        declared = {j.strip() for j in needs.group("jobs").split(",")}
-        self.assertEqual(
-            declared,
-            {"release", "scrummaster-packer"},
-            "the deploy job must need exactly the release job and the "
-            "parallel scrummaster-packer job",
+        self.assertNotRegex(
+            body,
+            r"(?m)^\s+needs:.*scrummaster",
+            "the deploy job must not depend on the scrummaster AMI bake — "
+            "that is experimental and gated off, and coupling it would let "
+            "it fail the AWS deploy",
         )
 
     def test_deploy_runs_terraform_plan(self):

@@ -268,9 +268,17 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         run: mise run build
 
+      # `mise run build` writes to infra/aws/modules/core/build — the same
+      # directory `data "archive_file" "lambda_zip"` reads via
+      # `${path.module}/build` (infra/aws/modules/core/lambda.tf:4-7). It was
+      # `infra/build` before the per-cloud split (issue #126); that path is
+      # gone, so this zip was reading a directory nothing populated.
       - name: Zip Lambda bundle for release asset
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        run: (cd infra/build && zip -r ../blitzlog-lambda.zip .)
+        # 4 levels up from infra/aws/modules/core/build lands in infra/, which
+        # is where the upload step below expects the artifact (infra/blitzlog-lambda.zip).
+        working-directory: infra/aws/modules/core/build
+        run: zip -r ../../../../blitzlog-lambda.zip .
 
       # Build and push the agent image. The tag depends on the mode:
       #   pr-test  -> v{new_version}-pr{N}  (e.g. v0.1.1-pr107)
@@ -639,6 +647,21 @@ jobs:
     # before steps run), so it just says what it does; the env lands in
     # the logs and in the SSM parameter path.
     name: Bake scrummaster AMI (parallels release job)
+
+    # GATED OFF until the per-cloud structure (issue #126 / PR #155) is on
+    # main. Unset repo variable = never runs.
+    #
+    # To enable:
+    #   gh variable set ENABLE_SCRUMMASTER_BAKE --body true
+    #
+    # It is a separate job rather than extra steps in `release` because
+    # steps within a job are sequential — this is the only way to bake
+    # two AMIs at once.
+    #
+    # It is deliberately NOT in the `deploy` job's `needs` (see below).
+    # While this bake was in that list, a failure here would have failed
+    # the AWS deploy, which is the one thing that must not happen.
+    if: ${{ vars.ENABLE_SCRUMMASTER_BAKE == 'true' }}
     runs-on: ubuntu-26.04-arm
 
     permissions:
@@ -710,14 +733,19 @@ jobs:
 
   deploy:
     name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
-    # Needs BOTH bakes. The terraform plan reads
+    # Deliberately `needs: release` and NOT `[release, scrummaster-packer]`.
+    #
+    # The terraform plan reads
     # /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu whenever
-    # enable_scrummaster is true, so the deploy must not plan before the
-    # scrummaster AMI param exists. Today enable_scrummaster defaults to
-    # false in both envs, which makes the dependency belt-and-braces
-    # rather than load-bearing — keep it anyway so turning the flag on
-    # cannot produce a plan-time failure.
-    needs: [release, scrummaster-packer]
+    # enable_scrummaster is true, so once that flag is switched on this
+    # job WILL need the scrummaster bake to have finished. Add it back at
+    # the same time as the flag — not before.
+    #
+    # Keeping it out until then is what makes the guarantee real: the AWS
+    # deploy cannot fail because the (experimental, gated-off) scrummaster
+    # bake failed, and re-enabling the bake cannot reintroduce that coupling
+    # by accident. enable_scrummaster defaults to false in both envs.
+    needs: release
     # Default `needs.X.result` for `needs: release` is `success`,
     # so the deploy job does NOT run if the release job failed
     # (e.g. Packer bake errored or the image build couldn't push).
@@ -773,10 +801,19 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref_name }}
           fetch-depth: 0
 
-      # Issue #126: Alicloud provider pre-flight. The Packer step
-      # below is AWS-only; fail the job fast if BLITZLOG_PROVIDER is
-      # alicloud. The Alicloud tree itself is applied later in this
-      # job (the `terraform init/plan/apply` steps).
+      # Issue #126: Alicloud deploy pre-flight.
+      #
+      # The Alicloud tree (infra/alicloud/) ships, validates in CI, and is
+      # deliberately NOT deployable yet. It is gated here so the segmentation
+      # is visible to contributors — the tree, its tests, and its lint-matrix
+      # leg all exist — while the only thing that can reach a real cloud
+      # account remains the AWS path.
+      #
+      # This is a hard stop, not a warning: an operator who sets
+      # vars.BLITZLOG_PROVIDER=alicloud gets a loud, actionable message
+      # instead of a partial apply. Note that the deploy job would otherwise
+      # select infra/alicloud/<env>/ and the Packer bake above is AWS-only,
+      # so the two halves would disagree anyway.
       - name: Validate provider
         env:
           BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
@@ -785,7 +822,18 @@ jobs:
           case "${BLITZLOG_PROVIDER}" in
             aws) ;;
             alicloud)
-              echo "FATAL: BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step (Phase 5 follow-up). Set vars.BLITZLOG_PROVIDER=aws or unset it to apply AWS." >&2
+              echo "FATAL: Alicloud deploy is disabled by design." >&2
+              echo "" >&2
+              echo "  infra/alicloud/ ships and validates in CI, but no Alicloud" >&2
+              echo "  resource is applied by any workflow until the per-cloud" >&2
+              echo "  structure is on main." >&2
+              echo "" >&2
+              echo "  To apply AWS (the only supported path today):" >&2
+              echo "    unset vars.BLITZLOG_PROVIDER   (it defaults to 'aws')" >&2
+              echo "    gh variable delete BLITZLOG_PROVIDER" >&2
+              echo "" >&2
+              echo "  The AMI bake in the release job is also AWS-only, so this" >&2
+              echo "  is not a Phase 5 gap — it is a deliberate stop." >&2
               exit 1
               ;;
             *)

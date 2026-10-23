@@ -136,7 +136,7 @@ variable "spot_instance_types" {
 # ---------------------------------------------------------------------------
 
 variable "enable_scrummaster" {
-  description = "Create the long-lived Scrummaster advisor host in dev. Requires a Packer bake to have published /blitzlog/scrummaster/agent-ami-id-zeroclaw-ubuntu first (infra/aws/packer/scrummaster-zeroclaw-ubuntu.pkr.hcl)."
+  description = "Create the long-lived Scrummaster advisor host in dev. Env-scoped like the rest of the core module, so dev and prod each get their own host, IAM objects and AMI. Requires a Packer bake to have published /blitzlog/dev/agent-ami-id-zeroclaw-docker-ubuntu first (infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl; the release workflow does this in a gated-off job until the per-cloud structure is on main)."
   type        = bool
   default     = false
 }

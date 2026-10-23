@@ -688,6 +688,27 @@ class TestScrummasterPackerInRelease(unittest.TestCase):
             "the scrummaster job must NOT need `release` — that "
             "would serialise it instead of running in parallel",
         )
+        # Gated off until the per-cloud structure is on main. Unset repo
+        # variable = never runs. Without this the experimental bake would
+        # add ~5 min of wall-clock to every dispatch and bake a real AMI.
+        self.assertIn(
+            "if",
+            job,
+            "the scrummaster job must carry an `if:` gate so it does not "
+            "run before the per-cloud structure is on main",
+        )
+        self.assertIn(
+            "vars.ENABLE_SCRUMMASTER_BAKE",
+            str(job.get("if", "")),
+            "the gate must read the ENABLE_SCRUMMASTER_BAKE repo variable; "
+            "unset means off",
+        )
+        self.assertEqual(
+            str(job.get("if", "")).strip(),
+            "${{ vars.ENABLE_SCRUMMASTER_BAKE == 'true' }}",
+            "the gate must be an exact == 'true' comparison so an unset "
+            "variable defaults to disabled",
+        )
 
     def test_both_jobs_call_the_same_ref_gate(self):
         """Single source of truth for the ref -> env decision.
@@ -724,17 +745,55 @@ class TestScrummasterPackerInRelease(unittest.TestCase):
         self.assertIn("Refusing to run", body)
         self.assertIn("release/*)", body)
 
-    def test_deploy_waits_for_both_bakes(self):
+    def test_deploy_does_not_depend_on_the_scrummaster_bake(self):
+        """The AWS deploy must be structurally independent of the scrummaster.
+
+        While `deploy: needs: [release, scrummaster-packer]` stood, a
+        failure in the experimental scrummaster AMI bake would fail the
+        AWS deploy too — the one thing that must not happen while the
+        per-cloud structure is landing. The bake is gated off, and this
+        coupling is gone entirely, so the deploy is unaffected whether the
+        bake is disabled, broken, or does not exist.
+
+        Re-add the dependency at the same time as `enable_scrummaster =
+        true`, which is when the plan actually starts reading the
+        scrummaster AMI's SSM parameter.
+        """
         import yaml
 
         data = yaml.safe_load(self.wf)
         needs = data["jobs"]["deploy"]["needs"]
         self.assertEqual(
-            sorted(needs),
-            ["release", "scrummaster-packer"],
-            "deploy must wait for both AMI bakes: the terraform plan reads "
-            "the scrummaster AMI SSM param whenever enable_scrummaster is true",
+            needs,
+            "release",
+            "the deploy job must need `release` only. Depending on the "
+            "scrummaster bake would let an experimental AMI build fail the "
+            "AWS deploy.",
         )
+        self.assertNotIn(
+            "scrummaster-packer",
+            str(needs),
+            "the deploy job must not depend on the scrummaster bake while "
+            "enable_scrummaster defaults to false",
+        )
+
+    def test_enable_scrummaster_is_off_in_both_envs(self):
+        """The gate on the deploy coupling only holds while the flag is off.
+
+        `deploy: needs: release` is safe because `enable_scrummaster`
+        defaults to false, so the plan never reads the scrummaster AMI
+        parameter. If someone flips the default on, the coupling has to
+        come back in the same commit. Pin the invariant so the two can't
+        drift apart silently.
+        """
+        for label, path in (("dev", DEV_TFVARS_EXAMPLE), ("prod", PROD_TFVARS_EXAMPLE)):
+            self.assertRegex(
+                path.read_text(),
+                r"enable_scrummaster\s*=\s*false",
+                f"infra/aws/{label}/terraform.tfvars.example must keep "
+                f"enable_scrummaster = false, or the deploy must start "
+                f"needing the scrummaster bake",
+            )
 
     def test_packer_role_grants_the_scrummaster_param(self):
         """CI baking this AMI over OIDC needs write access to its SSM param."""

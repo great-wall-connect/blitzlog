@@ -790,24 +790,34 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "deploy job working-directory must use the provider prefix",
         )
 
-    def test_release_workflow_fails_loud_on_alicloud_without_phase5(self):
-        """The Packer step is AWS-only. The deploy job must fail
-        fast when `BLITZLOG_PROVIDER=alicloud` (until the Aliyun
-        image builder lands in Phase 5).
+    def test_release_workflow_refuses_alicloud_deploy(self):
+        """No workflow may apply Alicloud resources — deliberately, not by omission.
 
-        Without this guard, an operator setting
-        `vars.BLITZLOG_PROVIDER=alicloud` would have the Packer
-        step run against the AWS account (wrong image) before the
-        Alicloud terraform plan/apply ever runs.
+        The Alicloud tree ships and validates in CI so the aws/alicloud
+        segmentation is visible to contributors, but nothing may reach a
+        real Alicloud account until the per-cloud structure is on main. The
+        deploy job's `Validate provider` step is a hard stop: an operator who
+        sets `vars.BLITZLOG_PROVIDER=alicloud` gets a loud, actionable message
+        rather than a partial apply.
+
+        `terraform-apply-dev.yml` needs no such guard because it is
+        hardcoded to `infra/aws/dev` — it cannot reach an Alicloud stack at all.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
         body = text[deploy_idx:]
         self.assertIn(
-            "BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step",
+            "FATAL: Alicloud deploy is disabled by design.",
             body,
-            "deploy job must fail fast when BLITZLOG_PROVIDER=alicloud; "
-            "Packer is AWS-only until Phase 5.",
+            "the deploy job must refuse BLITZLOG_PROVIDER=alicloud with an "
+            "actionable message",
+        )
+        # The default must be aws, so an unset variable never lands here.
+        self.assertIn(
+            "BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}",
+            text,
+            "BLITZLOG_PROVIDER must default to 'aws' so the common path "
+            "never touches the guard",
         )
 
     def test_release_workflow_uses_per_provider_tfvars(self):

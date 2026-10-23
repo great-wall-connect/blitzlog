@@ -1349,10 +1349,19 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "env.BLITZLOG_PROVIDER",
         )
         # The case statement for alicloud must fail with a clear error.
+        # The wording was reworded when Alicloud deploy was gated off on
+        # purpose (rather than merely not-yet-supported): the message now
+        # tells the operator HOW to get back to a supported state.
         self.assertIn(
-            "BLITZLOG_PROVIDER=alicloud is not yet supported by the Packer step",
+            "FATAL: Alicloud deploy is disabled by design.",
             self.text,
             "release.yml must fail fast when BLITZLOG_PROVIDER=alicloud",
+        )
+        self.assertIn(
+            "unset vars.BLITZLOG_PROVIDER",
+            self.text,
+            "the alicloud guard must tell the operator how to return to a "
+            "supported state, not just that it failed",
         )
 
     def test_ssm_render_step_gated_to_aws(self):

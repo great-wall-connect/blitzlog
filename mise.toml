@@ -42,11 +42,13 @@ run = "python -m pip install -q -r requirements-dev.txt && ruff check . && black
 [tasks.build]
 description = "Package Lambda and init Terraform"
 run = """
-rm -rf infra/build infra/.build-venv
-mkdir -p infra/build
-cp -r lambda infra/build/
-mkdir -p infra/build/lambda/packages/whisper-stt-shim
-cp packages/whisper-stt-shim/server.py infra/build/lambda/packages/whisper-stt-shim/
+BUILD_DIR=infra/aws/modules/core/build
+VENV_DIR=infra/aws/modules/core/.build-venv
+rm -rf "$BUILD_DIR" "$VENV_DIR"
+mkdir -p "$BUILD_DIR"
+cp -r lambda "$BUILD_DIR"/
+mkdir -p "$BUILD_DIR"/lambda/packages/whisper-stt-shim
+cp packages/whisper-stt-shim/server.py "$BUILD_DIR"/lambda/packages/whisper-stt-shim/
 # Python-resolution ladder + `--without-pip` + get-pip.py bootstrap
 # mirror the local-exec in infra/aws/modules/core/lambda.tf so the
 # bundle build never depends on `ensurepip._bundled` (which can be
@@ -70,11 +72,13 @@ fi
 # run build`). Defaults to the slim AWS bundle so the alibaba SDKs
 # (oss2, alibabacloud_kms20160120, alibabacloud_ecs20140526) stay out
 # of the AWS Lambda zip.
-"$PYTHON_BIN" -m venv --without-pip infra/.build-venv
-curl -sS https://bootstrap.pypa.io/get-pip.py | infra/.build-venv/bin/python3
-infra/.build-venv/bin/pip install --no-cache-dir -r lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} -t infra/build/
-rm -rf infra/.build-venv
-cd infra && terraform init
+"$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
+curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR"/bin/python3
+"$VENV_DIR"/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
+rm -rf "$VENV_DIR"
+# Init the per-cloud dev stack (infra/ itself has had no .tf files since the
+# per-cloud split — issue #126). Override with BLITZLOG_PROVIDER / BLITZLOG_ENV.
+cd "infra/${BLITZLOG_PROVIDER:-aws}/${BLITZLOG_ENV:-dev}" && terraform init
 """
 
 [tasks."tf-plan"]
