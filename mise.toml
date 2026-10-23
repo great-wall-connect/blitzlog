@@ -40,7 +40,7 @@ description = "Lint Python code (ruff + black)"
 run = "python -m pip install -q -r requirements-dev.txt && ruff check . && black --check ."
 
 [tasks.build]
-description = "Package Lambda and init Terraform"
+description = "Package the AWS Lambda bundle into infra/aws/modules/core/build (the dir data.archive_file reads). Does not run terraform init — see the note in the script body."
 run = """
 BUILD_DIR=infra/aws/modules/core/build
 VENV_DIR=infra/aws/modules/core/.build-venv
@@ -76,9 +76,23 @@ fi
 curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR"/bin/python3
 "$VENV_DIR"/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
 rm -rf "$VENV_DIR"
-# Init the per-cloud dev stack (infra/ itself has had no .tf files since the
-# per-cloud split — issue #126). Override with BLITZLOG_PROVIDER / BLITZLOG_ENV.
-cd "infra/${BLITZLOG_PROVIDER:-aws}/${BLITZLOG_ENV:-dev}" && terraform init
+# Deliberately does NOT run `terraform init`. Every per-cloud stack ships
+# an empty `backend` block (bucket = "" key = "") on purpose — the real
+# values are operator-supplied via -backend-config, exactly as the README
+# and both CI workflows do:
+#
+#   terraform -chdir=infra/aws/dev init -backend-config=dev-backend.hcl
+#
+# A bare `terraform init` therefore fails with "Error: Invalid Value" on
+# the empty backend attributes. Before the per-cloud split this task ended
+# with `cd infra && terraform init`, which was a silent no-op (infra/ had
+# no .tf files); pointing it at a real stack turned that no-op into a hard
+# failure, so it is removed rather than "fixed".
+#
+# Override the target with BLITZLOG_PROVIDER / BLITZLOG_ENV if you want to
+# keep the paths honest in your own notes; the BUILD_DIR above is derived
+# from the AWS core module, which is the only stack the AWS Lambda bundle
+# is packaged for.
 """
 
 [tasks."tf-plan"]
