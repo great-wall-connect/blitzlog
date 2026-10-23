@@ -1364,6 +1364,68 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "supported state, not just that it failed",
         )
 
+    def test_detect_step_does_not_reference_gate_shell_vars(self):
+        """The Detect step must not emit `$MODE` / `$PR_NUMBER`.
+
+        Issue #126/#155 extracted the ref-gate into a composite action. That
+        removed the `case "$BUILD_REF"` block which was the only thing
+        assigning MODE and PR_NUMBER in the Detect step's shell, but the
+        trailing output-echoes of those two survived. The step runs under
+        `set -euo pipefail`, so `-u` turned the reference into "unbound
+        variable" and failed the whole release job — before any image or AMI
+        was built. Every CI check passed because CI lints the file but never
+        executes the job.
+
+        The gate writes mode / pr_number / blitzlog_env itself, so any
+        reference to those bare variables in the Detect step is a bug.
+
+        Parses the YAML rather than regexing indentation: a
+        `(?:          .*\n)+` capture runs past the step, because every
+        later line in the job is indented the same width.
+        """
+        import yaml
+
+        wf = yaml.safe_load(self.text)
+        detect = next(
+            st
+            for st in wf["jobs"]["release"]["steps"]
+            if st.get("name") == "Detect mode and bump type"
+        )
+        body = detect["run"]
+        # Strip comments: the note above the remaining echoes names the
+        # variables, and matching that would be a false positive.
+        body = "\n".join(
+            ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+        )
+
+        for var in ("MODE", "PR_NUMBER"):
+            # Both `$VAR` and `${VAR}` forms — the original regression was
+            # the bare `echo "mode=$MODE"` shape.
+            self.assertNotRegex(
+                body,
+                rf'echo\s+"[^"]*(?:\${{{var}}}\s*|\${var}\b)',
+                f"the Detect step must not emit ${{{var}}} — that shell "
+                f"variable no longer exists after the ref-gate extraction, "
+                f"and `set -u` turns the reference into a hard failure",
+            )
+            # Nor assign it: that would be a silent second source of truth
+            # competing with the gate.
+            self.assertNotRegex(
+                body,
+                rf"^\s*{var}=",
+                f"the Detect step must not assign {var} itself; the "
+                f"ref-gate action is the single source of truth",
+            )
+
+        # The gate's outputs must still be bound onto the right keys.
+        for out in ("mode", "pr_number", "blitzlog_env"):
+            self.assertIn(
+                f'echo "{out}=${{{{ steps.ref-gate.outputs.{out} }}}}"',
+                body,
+                f"the Detect step must re-bind the ref-gate's {out} output "
+                f"onto $GITHUB_OUTPUT",
+            )
+
     def test_ssm_render_step_gated_to_aws(self):
         """The 'Render TF_VAR_* env from SSM' step must be gated on
         `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the

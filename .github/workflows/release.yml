@@ -235,10 +235,16 @@ jobs:
           echo "Detected bump type: $BUMP"
           echo "Computed new version: $NEW_VERSION"
 
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          # NOTE: `mode`, `pr_number` and `blitzlog_env` are written to
+          # $GITHUB_OUTPUT by the ref-gate step above, not here. This shell
+          # never assigns MODE or PR_NUMBER, and `set -u` turns referencing
+          # an unset variable into a hard error — so do not re-emit them
+          # here. (Regression: a stray trailing echo of $MODE survived the
+          # ref-gate extraction and failed the whole release job with
+          # "unbound variable" before any image or AMI was built. CI lints
+          # this file but never executes the job, so nothing caught it.)
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Install mise
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
