@@ -1065,11 +1065,30 @@ jobs:
           # apply step consumes the exact same plan (no drift
           # between plan and apply). -no-color keeps the log
           # readable in the GH Actions UI.
+          #
+          # AWS: every variable arrives as TF_VAR_* from the "Render
+          # TF_VAR_* env from SSM" step above, so NO -var-file is needed
+          # or wanted — matching the pre-#126 behaviour byte for byte.
+          #
+          # Alicloud: there is no SSM fetch for that provider yet
+          # (Phase 5), so the operator's per-provider tfvars file IS the
+          # source of config and is required. The naming convention is
+          # `<provider>.tfvars`; the `.tfvars.example` beside it is the
+          # template.
+          #
+          # Regression: #126 made -var-file unconditional and FATAL'd when
+          # absent. `<provider>.tfvars` is gitignored, so it can never
+          # exist in a fresh CI checkout — that failed the AWS deploy with
+          # "FATAL: aws.tfvars not found" even though SSM had already
+          # supplied every variable.
           TFVARS_FILE="${BLITZLOG_PROVIDER}.tfvars"
-          if [ -f "${TFVARS_FILE}" ]; then
+          if [ "${BLITZLOG_PROVIDER}" = "aws" ]; then
+            terraform plan -no-color -input=false -out=tfplan
+          elif [ -f "${TFVARS_FILE}" ]; then
             terraform plan -no-color -input=false -var-file="${TFVARS_FILE}" -out=tfplan
           else
             echo "FATAL: ${TFVARS_FILE} not found in $(pwd). Copy the *.tfvars.example to ${TFVARS_FILE} and fill in the values." >&2
+            echo "  The Alicloud path has no SSM-backed TF_VAR_* render yet (Phase 5), so the tfvars file is required there." >&2
             exit 1
           fi
 

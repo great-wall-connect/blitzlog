@@ -820,12 +820,40 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "never touches the guard",
         )
 
-    def test_release_workflow_uses_per_provider_tfvars(self):
-        """The `terraform plan` step must pass `-var-file=${BLITZLOG_PROVIDER}.tfvars`.
+    def test_aws_plan_uses_ssm_env_not_a_tfvars_file(self):
+        """The AWS plan must NOT require a `-var-file`.
 
-        Without the per-provider tfvars file, the operator's
-        Alicloud-specific config (region, VSwitch ids, GitHub App
-        creds) would be missing and the plan would fail.
+        Every AWS variable arrives as `TF_VAR_*` from the "Render TF_VAR_*
+        env from SSM" step, so the plan needs no tfvars file. And
+        `<provider>.tfvars` is gitignored (see .gitignore's `*.tfvars`), so
+        it can never exist in a fresh CI checkout.
+
+        #126 made `-var-file` unconditional with a FATAL when absent, which
+        failed the AWS deploy with "FATAL: aws.tfvars not found" on the
+        first release run — even though SSM had already supplied every
+        variable. The AWS branch must call `terraform plan` bare, exactly
+        as the pre-#126 workflow did.
+        """
+        text = self.RELEASE_YML.read_text()
+        deploy_idx = text.find("deploy:\n")
+        body = text[deploy_idx:]
+
+        # The AWS branch must plan without -var-file.
+        self.assertRegex(
+            body,
+            r'if\s+\[\s*"\$\{BLITZLOG_PROVIDER\}"\s*=\s*"aws"\s*\];\s*then\s*\n\s*'
+            r"terraform plan -no-color -input=false -out=tfplan",
+            "the AWS branch of the plan step must run `terraform plan` with "
+            "no -var-file — the SSM render already supplied every variable",
+        )
+
+    def test_alicloud_plan_requires_its_tfvars_file(self):
+        """The Alicloud branch must still require `-var-file`.
+
+        There is no SSM-backed `TF_VAR_*` render for Alicloud yet (Phase 5),
+        so the operator's `alicloud.tfvars` is the source of config. Keeping
+        the FATAL there preserves that path's ergonomics without touching
+        the AWS one.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
@@ -833,7 +861,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         self.assertIn(
             "${BLITZLOG_PROVIDER}.tfvars",
             body,
-            "terraform plan step must pass -var-file=${BLITZLOG_PROVIDER}.tfvars",
+            "the plan step must still reference the per-provider tfvars file",
+        )
+        self.assertIn(
+            '-var-file="${TFVARS_FILE}"',
+            body,
+            "the non-AWS branch must pass -var-file",
+        )
+        self.assertRegex(
+            body,
+            r"elif\s+\[\s*-f\s+\"\$\{TFVARS_FILE\}\"\s*\]",
+            "the non-AWS branch must test for the tfvars file before using it",
         )
 
     def test_release_workflow_picks_oss_backend_for_alicloud(self):
