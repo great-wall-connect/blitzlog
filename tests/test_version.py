@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LAMBDA_INIT = REPO_ROOT / "lambda" / "__init__.py"
 LAMBDA_VERSION = REPO_ROOT / "lambda" / "_version.py"
 LAMBDA_VERSION_PY = REPO_ROOT / "lambda" / "version.py"
-LAMBDA_TF = REPO_ROOT / "infra" / "modules" / "core" / "lambda.tf"
+LAMBDA_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "lambda.tf"
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 

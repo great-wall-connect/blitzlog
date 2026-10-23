@@ -1,0 +1,188 @@
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/build"
+  output_path = "${path.module}/lambda_function.zip"
+
+  depends_on = [null_resource.lambda_build]
+}
+
+# The Lambda zip bundles the `lambda/` source directory as a package
+# at the zip task root. The runtime invokes `lambda.handler.lambda_handler`
+# (see `aws_lambda_function.handler` below); `lambda/` is a package whose
+# top-level layout is:
+#
+#     lambda/__init__.py            # not present; PEP 420 namespace package
+#     lambda/_env.py                # env-scoped SSM constants + shim source
+#     lambda/handler.py             # lambda_handler, extract_event_data
+#     lambda/auth.py                # GitHub App JWT + webhook signature
+#     lambda/bot_pool.py            # per-user bot pool + locks
+#     lambda/llm_guard.py           # IP safety guard for local LLM endpoints
+#     lambda/ec2.py                 # EC2 spot launch + helpers
+#     lambda/scripts/aws/_common.py     # shared prologue + install/config builders (AWS path)
+#     lambda/scripts/aws/autonomous.py  # build_autonomous_user_data
+#     lambda/scripts/aws/assisted.py    # build_assisted_user_data
+#     lambda/scripts/alicloud/...       # alicloud user-data scripts (Phase 5 — not invoked by the AWS deploy)
+#     lambda/scripts/__init__.py        # dispatcher: BLITZLOG_PROVIDER selects the per-cloud tree
+#
+# opencode plugins + tools (idle_watchdog, periodic_autosave,
+# session_archive, spot_watchdog, shutdown) live in
+# packages/images/agent/opencode/{plugins,tools}/ and are baked into
+# the container image by packages/images/agent/Dockerfile. They are
+# NOT loaded by the Lambda bootstrap — that path was removed when the
+# container took over plugin installation.
+#
+# The `filemd5` trigger below enumerates every source file so any edit to
+# the package forces a rebuild. Adding a new module means adding a new
+# `filemd5(...)` line here.
+resource "null_resource" "lambda_build" {
+  triggers = {
+    # Package entrypoint + modules
+    handler_py        = filemd5("${path.module}/../../../../lambda/handler.py")
+    init_py           = filemd5("${path.module}/../../../../lambda/__init__.py")
+    version_py        = filemd5("${path.module}/../../../../lambda/version.py")
+    lambda_version_py = filemd5("${path.module}/../../../../lambda/_version.py")
+    env_py            = filemd5("${path.module}/../../../../lambda/_env.py")
+    auth_py           = filemd5("${path.module}/../../../../lambda/auth.py")
+    bot_pool_py       = filemd5("${path.module}/../../../../lambda/bot_pool.py")
+    llm_guard_py      = filemd5("${path.module}/../../../../lambda/llm_guard.py")
+    ec2_py            = filemd5("${path.module}/../../../../lambda/ec2.py")
+
+    # scripts/ subpackage
+    scripts_common_py     = filemd5("${path.module}/../../../../lambda/scripts/aws/_common.py")
+    scripts_autonomous_py = filemd5("${path.module}/../../../../lambda/scripts/aws/autonomous.py")
+    scripts_assisted_py   = filemd5("${path.module}/../../../../lambda/scripts/aws/assisted.py")
+
+    # provider/ subpackage — Phase 1 of #83. The ABCs + AWS concrete
+    # impl + Alicloud stub live here. The build must rebuild the zip
+    # whenever any of them change.
+    provider_init_py     = filemd5("${path.module}/../../../../lambda/provider/__init__.py")
+    provider_base_py     = filemd5("${path.module}/../../../../lambda/provider/base.py")
+    provider_aws_py      = filemd5("${path.module}/../../../../lambda/provider/aws.py")
+    provider_alicloud_py = filemd5("${path.module}/../../../../lambda/provider/alicloud.py")
+
+    # Runtime deps + the embedded whisper-stt shim. var.lambda_requirements
+    # selects the per-cloud requirements file (default requirements-aws.txt;
+    # an alicloud-deploy PR would override to requirements-alicloud.txt).
+    requirements = filemd5("${path.module}/../../../../lambda/${var.lambda_requirements}")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      # The lambda runtime is python3.12 (see `runtime = "python3.12"` above).
+      # The build MUST use the same version — otherwise C extensions
+      # (e.g., cryptography's `_cffi_backend.cpython-312-*.so`) link against
+      # the wrong Python ABI and fail to import at lambda runtime.
+      #
+      # Python-resolution ladder: the project pins python = "3.12" in
+      # mise.toml, so the canonical interpreter is whatever mise
+      # installed at ~/.local/share/mise/installs/python/3.12.*. Prefer
+      # it over `command -v python3.12` because PATH is fragile — a bare
+      # `uv python install 3.12` (which produces a python without
+      # `ensurepip._bundled`) will shadow the mise interpreter and break
+      # `python -m venv`. Order:
+      #   1. mise-managed python 3.12 (project canonical pin).
+      #   2. system python3.12 (apt install python3.12 — last resort).
+      #   3. fail loudly.
+      PYTHON_BIN=""
+      if [ -d "$HOME/.local/share/mise/installs/python" ]; then
+        PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+      fi
+      if [ -z "$PYTHON_BIN" ]; then
+        PYTHON_BIN="$(command -v python3.12 || true)"
+      fi
+      if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+        echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
+        exit 1
+      fi
+      rm -rf ${path.module}/build ${path.module}/.build-venv
+      mkdir -p ${path.module}/build
+      # Copy the whole lambda/ source dir as a package; the AWS Lambda
+      # runtime imports the handler as `lambda.handler.lambda_handler`.
+      cp -r ${path.module}/../../../../lambda ${path.module}/build/
+      # The bootstrap heredoc reads packages/whisper-stt-shim/server.py
+      # via `lambda/_env.py::_load_shim_source()` which looks for the file
+      # at `lambda/packages/whisper-stt-shim/server.py` inside the zip.
+      mkdir -p ${path.module}/build/lambda/packages/whisper-stt-shim
+      cp ${path.module}/../../../../packages/whisper-stt-shim/server.py \
+         ${path.module}/build/lambda/packages/whisper-stt-shim/
+      # `--without-pip` skips ensurepip (which fails on bare pythons
+      # that don't ship the bundled wheel), then get-pip.py bootstraps
+      # pip from PyPI regardless of the interpreter's ensurepip state.
+      "$PYTHON_BIN" -m venv --without-pip ${path.module}/.build-venv
+      curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
+      ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/${var.lambda_requirements} -t ${path.module}/build/
+      rm -rf ${path.module}/.build-venv
+    EOT
+  }
+}
+
+resource "aws_lambda_function" "handler" {
+  function_name    = "blitzlog-${var.environment}-handler"
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  handler          = "lambda.handler.lambda_handler"
+  runtime          = "python3.12"
+  role             = aws_iam_role.lambda_role.arn
+  # 512 MB is enough headroom for the AWS boto3 + cryptography C
+  # extension on a warm start. The alibaba SDKs (oss2 +
+  # alibabacloud_kms20160120 + alibabacloud_ecs20140526) live in
+  # lambda/requirements-alicloud.txt and are NOT packaged into this
+  # AWS zip — the factory in lambda/provider/__init__.py lazy-imports
+  # the alicloud module behind `importlib.util.find_spec` /
+  # `importlib.import_module`, but with the per-cloud requirements
+  # split the AWS Lambda code never even sees those wheels on /tmp.
+  memory_size = 512
+  timeout     = 180
+  dead_letter_config {
+    target_arn = aws_sqs_queue.dlq.arn
+  }
+
+  environment {
+    variables = {
+      BLITZLOG_ENV = var.environment
+      # Cloud-provider key. Phase 1 of #83: only "aws" is implemented.
+      # Alicloud is a Phase 2/3 follow-up (#84, #124). The factory in
+      # lambda/provider/__init__.py reads this on cold start and dispatches
+      # to AwsCompute / AwsSecretStore / AwsObjectStore (or the Alicloud
+      # stubs, which raise NotImplementedError until #124 lands).
+      BLITZLOG_PROVIDER         = "aws"
+      VPC_ID                    = var.vpc_id
+      EC2_SUBNET_ID             = var.ec2_subnet_id
+      EC2_SECURITY_GROUP_ID     = aws_security_group.agent_sg.id
+      EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
+      OPENCODE_MODEL            = var.opencode_model
+      OPENCODE_AGENT_MAX_STEPS  = tostring(var.opencode_agent_max_steps)
+      S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
+      # JSON-encoded so a single env var can carry the ordered list; the Lambda
+      # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
+      SPOT_INSTANCE_TYPES_JSON = jsonencode(var.spot_instance_types)
+      # Requested GitHub App installation-token lifetime in hours. The Lambda
+      # reads this on every invocation and includes the matching `expires_at`
+      # when POSTing to /app/installations/<id>/access_tokens, so `git` and
+      # `gh` stay authed for the full agent run (see lambda/auth.py).
+      GITHUB_TOKEN_LIFETIME_HOURS = tostring(var.github_token_lifetime_hours)
+      # Issue #145: ARN of the role the EventBridge Scheduler assumes
+      # to invoke this Lambda. handler.py::schedule_next_refresh reads
+      # it on every chain step and embeds it in the `CreateSchedule`
+      # `Target.RoleArn` so the new event lands back on this same
+      # function.
+      SCHEDULER_ROLE_ARN = aws_iam_role.scheduler_role.arn
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy.lambda_policy,
+    aws_cloudwatch_log_group.lambda_log_group,
+    null_resource.lambda_build,
+  ]
+
+  lifecycle {
+    ignore_changes = [last_modified]
+  }
+}
+
+resource "aws_cloudwatch_log_group" "lambda_log_group" {
+  name              = "/aws/lambda/blitzlog-${var.environment}-handler"
+  retention_in_days = 14
+}

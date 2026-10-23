@@ -23,7 +23,7 @@ def _blitzlog_env() -> str:
 
 def _blitzlog_provider() -> str:
     """Cloud provider key. Set by Terraform as a Lambda env var
-    (`infra/modules/core/lambda.tf`). Drives the dispatch in
+    (`infra/aws/modules/core/lambda.tf`). Drives the dispatch in
     `lambda/provider/__init__.py`.
 
     Supported values:
@@ -93,7 +93,7 @@ def _ssm_root() -> str:
 
 
 # Environment name passed in by Terraform as a Lambda env var
-# (infra/modules/core/lambda.tf). Used to namespace all per-env SSM
+# (infra/aws/modules/core/lambda.tf). Used to namespace all per-env SSM
 # parameters under /blitzlog/<env>/... so prod and dev can coexist in
 # the same AWS account without collision.
 # Defaults to "prod" so tests / out-of-Lambda callers continue to work

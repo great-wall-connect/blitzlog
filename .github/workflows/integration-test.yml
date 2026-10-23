@@ -9,7 +9,7 @@ name: integration-test
 # `gh workflow run integration-test.yml`.
 #
 # Trust policy for the OIDC role assumed here is INTENTIONALLY
-# narrow (see infra/bootstrap/integration-test-role.tf): the
+# narrow (see infra/aws/bootstrap/integration-test-role.tf): the
 # `sub` claim must match
 # `repo:great-wall-connect/blitzlog:workflow:integration-test.yml:ref:refs/heads/*`
 # so the deploy / packer / release workflows cannot assume this
@@ -42,7 +42,7 @@ permissions:
   # The OIDC token is issued by GitHub's
   # `token.actions.githubusercontent.com` provider; the matching
   # `aws_iam_openid_connect_provider.github` lives in
-  # infra/bootstrap/github-oidc-provider.tf.
+  # infra/aws/bootstrap/github-oidc-provider.tf.
   id-token: write
 
 jobs:
@@ -72,7 +72,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6
         with:
           # OIDC into the role provisioned by
-          # infra/bootstrap/integration-test-role.tf. Trust
+          # infra/aws/bootstrap/integration-test-role.tf. Trust
           # policy narrows the `sub` claim to
           # `repo:great-wall-connect/blitzlog:workflow:integration-test.yml:ref:refs/heads/*`
           # so only this workflow can assume it.

@@ -43,6 +43,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+# Issue #134: the ref-gate moved out of release.yml into a composite
+# action so the parallel scrummaster-packer job applies the identical
+# rule. Tests that assert on the gate itself read this file.
+REF_GATE_ACTION = REPO_ROOT / ".github" / "actions" / "ref-gate" / "action.yml"
 DOCKER_IMAGES_YML = REPO_ROOT / ".github" / "workflows" / "docker-images.yml"
 
 
@@ -75,6 +79,7 @@ class TestReleaseWorkflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = RELEASE_YML.read_text()
+        cls.gate = REF_GATE_ACTION.read_text()
         cls.on_block = _section(cls.text, "on")
 
     def test_triggered_only_by_workflow_dispatch(self):
@@ -182,38 +187,48 @@ class TestReleaseWorkflow(unittest.TestCase):
         )
 
     def test_detect_mode_step_present(self):
-        """release.yml MUST have a step that detects mode (pr-test vs
-        release) from the ref's open-PR status.
+        """release.yml MUST have a Detect step producing mode / bump / new_version.
 
-        The Detect step's bash script must call `gh pr list` against
-        ``$BUILD_REF`` and set the `mode` output (and the `bump` and
-        `new_version` outputs) based on the result.
+        Since issue #134 the mode/pr_number half of that decision comes
+        from the shared ref-gate composite action (so the parallel
+        scrummaster-packer job applies the identical rule); the Detect
+        step re-binds those outputs and still computes the version bump
+        itself with git-cliff, which only the release job needs.
         """
-        # The Detect step is the canonical source of mode/bump/new_version.
         self.assertRegex(
             self.text,
             r"id:\s*detect",
             "release.yml must have a Detect step (id: detect)",
         )
+        self.assertIn(
+            "uses: ./.github/actions/ref-gate",
+            self.text,
+            "release.yml must invoke the shared ref-gate action",
+        )
+        for out in ("mode", "pr_number", "blitzlog_env"):
+            self.assertRegex(
+                self.text,
+                rf'echo "{out}=\$\{{\{{ steps\.ref-gate\.outputs\.{out} \}}\}}"',
+                f"the Detect step must re-bind the ref-gate's {out} output "
+                f"onto the same GITHUB_OUTPUT key the later steps read",
+            )
         self.assertRegex(
             self.text,
-            r"gh pr list",
-            "release.yml's Detect step must call `gh pr list` to detect the mode",
+            r'echo "bump=',
+            "release.yml's Detect step must emit `bump=` (git-cliff still "
+            "runs in the Detect step — the version bump is release-only)",
         )
         self.assertRegex(
             self.text,
-            r"echo \"mode=",
-            "release.yml's Detect step must echo `mode=pr-test|release` as an output",
+            r'echo "new_version=',
+            "release.yml's Detect step must emit `new_version=`",
         )
-        self.assertRegex(
+        self.assertNotIn(
+            "gh pr list",
             self.text,
-            r"echo \"bump=",
-            "release.yml's Detect step must echo `bump=patch|minor|major` as an output",
-        )
-        self.assertRegex(
-            self.text,
-            r"echo \"new_version=",
-            "release.yml's Detect step must echo `new_version=X.Y.Z` as an output",
+            "the `gh pr list` call must live in the ref-gate action, not be "
+            "re-inlined here — two copies of the gate is how the agent AMI "
+            "and the scrummaster AMI would drift onto different environments",
         )
 
     def test_detect_mode_pr_test_when_pr_exists(self):
@@ -221,7 +236,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         step must set MODE=pr-test.
         """
         self.assertRegex(
-            self.text,
+            self.gate,
             r"if \[ -n \"\$\{?PR_NUMBER\}?\" \]; then\s*\n\s*MODE=pr-test",
             "release.yml's Detect step must set MODE=pr-test when an open PR is found",
         )
@@ -772,7 +787,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         """The Bump step identifies the pool to read git-author
         params from via `vars.OWNER_LOGIN`. The deploy-role's
         SSMGitAuthorIdentityRead grant (in
-        infra/bootstrap/deploy-role.tf) targets the same
+        infra/aws/bootstrap/deploy-role.tf) targets the same
         /blitzlog/users/*/git-author/* subtree the packer role
         needs to read. OWNER_LOGIN is the only new repo variable
         the operator must set — terraform-apply-dev.yml doesn't
@@ -934,15 +949,15 @@ class TestReleaseWorkflow(unittest.TestCase):
         # equivalent shell-switch) that explicitly enumerates
         # `main` -> release.
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
         # The case statement must be present.
         self.assertRegex(
             body,
-            r'case\s+"?\$\{\{\s*env\.BUILD_REF\s*\}\}"?\s+in',
+            r'case\s+"\$BUILD_REF"\s+in',
             "Detect step must dispatch on BUILD_REF via a `case` "
             "statement (the ref-gate is the primary safety mechanism).",
         )
@@ -965,8 +980,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         via the new `case` statement).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -988,8 +1003,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         creates these branches).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1009,8 +1024,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         (no prod apply, no tag, no version bump).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1032,8 +1047,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         PR silently fell into release mode and deployed to prod).
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1082,8 +1097,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         is pinned by `test_pr_list_pipes_to_jq_not_uses_gh_arg`.
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1114,9 +1129,9 @@ class TestReleaseWorkflow(unittest.TestCase):
         )
         # The broken `--head` filter must be GONE.
         self.assertNotIn(
-            '--head "${{ env.BUILD_REF }}"',
+            '--head "$BUILD_REF"',
             body,
-            'Detect step must NOT use `gh pr list --head "${{ env.BUILD_REF }}"` '
+            'Detect step must NOT use `gh pr list --head "$BUILD_REF"` '
             "anymore — that filter has a known prefix-collision failure "
             "mode (issue #131).",
         )
@@ -1126,7 +1141,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertNotRegex(
             body,
             r"--head\s+\"\$\{\{\s*env\.BUILD_REF\s*\}\}\"",
-            'Detect step must not use any `--head "${{ env.BUILD_REF }}"` '
+            'Detect step must not use any `--head "$BUILD_REF"` '
             "form (exact-string match is the only safe contract).",
         )
 
@@ -1150,8 +1165,8 @@ class TestReleaseWorkflow(unittest.TestCase):
         `gh`/`jq` flag-routing bug.
         """
         m = re.search(
-            r"(?ms)- name: Detect mode and bump type.*?run: \|\n(?P<body>(?:          .*\n)+)",
-            self.text,
+            r"(?ms)id: gate.*?run: \|\n(?P<body>(?:        .*\n)+)",
+            self.gate,
         )
         self.assertIsNotNone(m)
         body = m.group("body")
@@ -1296,6 +1311,188 @@ class TestDockerImagesWorkflow(unittest.TestCase):
             r"\s+if: github\.event_name != 'pull_request'\s*\n"
             r"\s+uses: docker/login-action@v\d+",
             "docker-images.yml must log into GHCR on the non-PR path (workflow_dispatch / push)",
+        )
+
+
+class TestAlicloudProviderDispatch(unittest.TestCase):
+    """Regression guards for the BLITZLOG_PROVIDER dispatch in
+    ``release.yml`` (issue #126).
+
+    Most of the dispatch shape is asserted in
+    ``test_terraform_env_isolation.py::TestAlicloudProviderDispatch``
+    (where the cross-file invariants live). This class covers the
+    additional shape that lives specifically in release.yml:
+
+    - the `Validate provider` step explicitly fails fast when
+      BLITZLOG_PROVIDER=alicloud (Packer is AWS-only in this PR).
+    - the `Render TF_VAR_* env from SSM` step is gated on
+      `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the
+      Alicloud path.
+    - the `terraform plan` step uses `${BLITZLOG_PROVIDER}.tfvars`
+      so the per-provider tfvars file is passed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RELEASE_YML.read_text()
+
+    def test_validate_provider_step_present(self):
+        """The deploy job must include a Validate provider step
+        that fails fast on alicloud.
+        """
+        self.assertRegex(
+            self.text,
+            r"(?ms)^\s+- name: Validate provider\s*\n"
+            r"\s+env:\s*\n"
+            r"\s+BLITZLOG_PROVIDER:.*\$\{\{ env\.BLITZLOG_PROVIDER \}\}",
+            "release.yml must include a 'Validate provider' step that reads "
+            "env.BLITZLOG_PROVIDER",
+        )
+        # The case statement for alicloud must fail with a clear error.
+        # The wording was reworded when Alicloud deploy was gated off on
+        # purpose (rather than merely not-yet-supported): the message now
+        # tells the operator HOW to get back to a supported state.
+        self.assertIn(
+            "FATAL: Alicloud deploy is disabled by design.",
+            self.text,
+            "release.yml must fail fast when BLITZLOG_PROVIDER=alicloud",
+        )
+        self.assertIn(
+            "unset vars.BLITZLOG_PROVIDER",
+            self.text,
+            "the alicloud guard must tell the operator how to return to a "
+            "supported state, not just that it failed",
+        )
+
+    def test_detect_step_does_not_reference_gate_shell_vars(self):
+        """The Detect step must not emit `$MODE` / `$PR_NUMBER`.
+
+        Issue #126/#155 extracted the ref-gate into a composite action. That
+        removed the `case "$BUILD_REF"` block which was the only thing
+        assigning MODE and PR_NUMBER in the Detect step's shell, but the
+        trailing output-echoes of those two survived. The step runs under
+        `set -euo pipefail`, so `-u` turned the reference into "unbound
+        variable" and failed the whole release job — before any image or AMI
+        was built. Every CI check passed because CI lints the file but never
+        executes the job.
+
+        The gate writes mode / pr_number / blitzlog_env itself, so any
+        reference to those bare variables in the Detect step is a bug.
+
+        Parses the YAML rather than regexing indentation: a
+        `(?:          .*\n)+` capture runs past the step, because every
+        later line in the job is indented the same width.
+        """
+        import yaml
+
+        wf = yaml.safe_load(self.text)
+        detect = next(
+            st
+            for st in wf["jobs"]["release"]["steps"]
+            if st.get("name") == "Detect mode and bump type"
+        )
+        body = detect["run"]
+        # Strip comments: the note above the remaining echoes names the
+        # variables, and matching that would be a false positive.
+        body = "\n".join(
+            ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+        )
+
+        for var in ("MODE", "PR_NUMBER"):
+            # Both `$VAR` and `${VAR}` forms — the original regression was
+            # the bare `echo "mode=$MODE"` shape.
+            self.assertNotRegex(
+                body,
+                rf'echo\s+"[^"]*(?:\${{{var}}}\s*|\${var}\b)',
+                f"the Detect step must not emit ${{{var}}} — that shell "
+                f"variable no longer exists after the ref-gate extraction, "
+                f"and `set -u` turns the reference into a hard failure",
+            )
+            # Nor assign it: that would be a silent second source of truth
+            # competing with the gate.
+            self.assertNotRegex(
+                body,
+                rf"^\s*{var}=",
+                f"the Detect step must not assign {var} itself; the "
+                f"ref-gate action is the single source of truth",
+            )
+
+        # The gate's outputs must still be bound onto the right keys.
+        for out in ("mode", "pr_number", "blitzlog_env"):
+            self.assertIn(
+                f'echo "{out}=${{{{ steps.ref-gate.outputs.{out} }}}}"',
+                body,
+                f"the Detect step must re-bind the ref-gate's {out} output "
+                f"onto $GITHUB_OUTPUT",
+            )
+
+    def test_ssm_render_step_gated_to_aws(self):
+        """The 'Render TF_VAR_* env from SSM' step must be gated on
+        `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the
+        Alicloud path.
+        """
+        # Find the step's `if:` clause by looking at the line right
+        # after the step name. We accept either a same-line
+        # `if:` or a block-style `if:` on the next line.
+        self.assertRegex(
+            self.text,
+            r"(?ms)Render TF_VAR_\* env from SSM\s*\n"
+            r"\s+if: env\.BLITZLOG_PROVIDER == 'aws'",
+            "release.yml must gate 'Render TF_VAR_* env from SSM' on "
+            "BLITZLOG_PROVIDER == 'aws' so the step doesn't run for Alicloud",
+        )
+
+    def test_terraform_plan_uses_per_provider_tfvars(self):
+        """The `terraform plan` step must pass
+        `-var-file=${BLITZLOG_PROVIDER}.tfvars` so the per-provider
+        tfvars file is used.
+        """
+        # The plan step body contains the `TFVARS_FILE=...` line
+        # and the `-var-file=...` reference. We just check both
+        # are present; a finer-grained regex was brittle against
+        # the YAML whitespace/indentation.
+        plan_block_match = re.search(
+            r"(?ms)- name: terraform plan\b.*?(?=\n\s*-\s|\Z)", self.text
+        )
+        self.assertIsNotNone(
+            plan_block_match,
+            "release.yml must have a 'terraform plan' step",
+        )
+        plan_block = plan_block_match.group(0)
+        self.assertIn(
+            "TFVARS_FILE=",
+            plan_block,
+            "terraform plan step must derive TFVARS_FILE from BLITZLOG_PROVIDER",
+        )
+        self.assertIn(
+            "${BLITZLOG_PROVIDER}.tfvars",
+            plan_block,
+            "terraform plan step must use ${BLITZLOG_PROVIDER}.tfvars "
+            "as the -var-file argument",
+        )
+
+    def test_terraform_init_switches_backend_by_provider(self):
+        """The `terraform init` step must switch between S3 (AWS)
+        and OSS (Alicloud) backends based on BLITZLOG_PROVIDER.
+        """
+        self.assertIn(
+            "TF_BACKEND_BUCKET_OSS",
+            self.text,
+            "release.yml terraform init must reference TF_BACKEND_BUCKET_OSS "
+            "for the Alicloud path",
+        )
+        # The init step has both branches. We don't regex-match the
+        # full step body (the heredoc-style commands make that
+        # brittle); we just check the two key flags are referenced.
+        self.assertIn(
+            "region=ap-east-1",
+            self.text,
+            "release.yml terraform init must use region=ap-east-1 for the AWS S3 backend",
+        )
+        self.assertIn(
+            "region=cn-hangzhou",
+            self.text,
+            "release.yml terraform init must use region=cn-hangzhou for the Alicloud OSS backend",
         )
 
 

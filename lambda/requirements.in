@@ -1,16 +1,23 @@
-# Lambda runtime dependencies (compiled to requirements.txt by pip-compile).
-# Edit this file to add or upgrade runtime packages.
+# Lambda runtime dependencies shared across providers. Compiled into
+# requirements-{aws,alicloud}.txt by pip-compile; per-cloud .in files
+# (lambda/requirements-aws.in, lambda/requirements-alicloud.in) chain
+# this file via `-r requirements.in` and add the cloud-specific SDKs.
 #
-# Alicloud SDKs are pulled in for Phase 2 (#84): the provider factory
-# dispatches `BLITZLOG_PROVIDER=alicloud` through `provider.alicloud.*`,
-# which talks to KMS / OSS / ECS. The OSS package is published as the
-# short `oss2` (the legacy `alibabacloud_oss2` namespace does not exist
-# on PyPI; `oss2` re-exports under both). KMS / ECS use Alibaba's
-# per-product SDK naming.
-boto3
+# This split exists because PR #84 added the alibaba SDKs
+# (oss2 / alibabacloud_kms20160120 / alibabacloud_ecs20140526) for the
+# BLITZLOG_PROVIDER=alicloud path. The factory in lambda/provider/
+# __init__.py lazy-imports the alicloud provider, so an AWS cold start
+# never loads the alibaba wheels — but `terraform apply` of
+# infra/aws/dev was still bundling all of them into the AWS Lambda
+# zip. PyJWT / cryptography / requests are used by both providers'
+# code, so they stay here.
+#
+# Adding a dep:
+#   * Used by every provider     -> add here.
+#   * Used only by AWS           -> add to requirements-aws.in.
+#   * Used only by alicloud      -> add to requirements-alicloud.in.
+# Then run `mise run lock` (or the explicit pip-compile invocations
+# documented in mise.toml) to regenerate both per-cloud .txt files.
 PyJWT
 cryptography
 requests
-alibabacloud_kms20160120
-alibabacloud_ecs20140526
-oss2

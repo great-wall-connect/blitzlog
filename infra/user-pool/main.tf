@@ -94,7 +94,7 @@ resource "aws_ssm_parameter" "local_llm" {
 # under /blitzlog/users/<owner>/git-author/{name,email} so both the
 # EC2 agent runtime (existing /blitzlog/users/* grant on the EC2
 # role) and the GHA worker (new narrow grant in
-# infra/bootstrap/deploy-role.tf) can fetch them with a single
+# infra/aws/bootstrap/deploy-role.tf) can fetch them with a single
 # GetParameter call.
 #
 # Parameters are typed String (not SecureString) because the

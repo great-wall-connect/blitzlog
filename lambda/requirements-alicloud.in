@@ -1,0 +1,16 @@
+# Alicloud Function Compute bundle — shared deps + the alibaba SDKs.
+# Compiled to requirements-alicloud.txt. Nothing on the current branch
+# reads this file (the alicloud deploy is a Phase 5 follow-up), but the
+# dependency surface lives here so a future alicloud-deploy PR only has
+# to flip LAMBDA_REQUIREMENTS_FILE / var.lambda_requirements to
+# "requirements-alicloud.txt" without re-figuring-out which SDKs we
+# depend on.
+#
+# `oss2` re-exports under both `oss2` and `alibabacloud_oss2`
+# namespaces (the legacy short name is the only PyPI package). KMS /
+# ECS use Alibaba's per-product SDK naming.
+-r requirements.in
+
+oss2
+alibabacloud_kms20160120
+alibabacloud_ecs20140526

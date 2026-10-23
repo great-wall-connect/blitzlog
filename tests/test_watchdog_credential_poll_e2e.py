@@ -99,8 +99,8 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WATCHDOG = REPO_ROOT / "infra/packer/scripts-docker-ubuntu/watchdog.sh"
-POLL_LIB = REPO_ROOT / "infra/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
+WATCHDOG = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/watchdog.sh"
+POLL_LIB = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
 
 # Issue #145: the GitHub App token in the bind-mounted credential
 # file is read by `git credential-store` (for `git push`) and by the
@@ -698,7 +698,7 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
 # `ssm:DeleteParameter` on
 # `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-*`.
 # The new `blitzlog-integration-test-role` in
-# `infra/bootstrap/integration-test-role.tf` grants exactly this.
+# `infra/aws/bootstrap/integration-test-role.tf` grants exactly this.
 #
 # Each test run uses a unique param name (`<uuid8>`) so concurrent
 # runs (or a re-run after a crashed previous run that left a

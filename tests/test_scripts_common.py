@@ -6,7 +6,8 @@ entrypoint.sh now (since the docker refactor)."""
 
 import unittest
 
-from _common import (
+from _env import BLITZLOG_ENV
+from scripts.aws._common import (
     _decode_api_errors_script,
     _git_identity_env_block,
     _git_identity_ssm_block,
@@ -14,7 +15,6 @@ from _common import (
     _read_secrets_from_ssm_script,
     script_header,
 )
-from _env import BLITZLOG_ENV
 
 
 class TestSSMSecretsScript(unittest.TestCase):
@@ -83,7 +83,7 @@ class TestDecodeApiErrorsScript(unittest.TestCase):
         # /usr/local/bin/watchdog.sh) runs the API-error decoder after the
         # container exits — the container has no AWS creds and can't
         # interpret log lines itself.
-        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+        with open("infra/aws/packer/scripts-docker-ubuntu/watchdog.sh") as f:
             watchdog = f.read()
         self.assertIn("ACTIONABLE", watchdog)
         self.assertIn("insufficient_balance", watchdog)
@@ -291,7 +291,7 @@ class TestWatchdogForwardsGitIdentityToContainer(unittest.TestCase):
     """
 
     def test_watchdog_rewrites_env_with_git_author(self):
-        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+        with open("infra/aws/packer/scripts-docker-ubuntu/watchdog.sh") as f:
             watchdog = f.read()
         # /etc/blitzlog.env heredoc must include both vars
         env_block_idx = watchdog.find("cat > /etc/blitzlog.env")
@@ -301,7 +301,7 @@ class TestWatchdogForwardsGitIdentityToContainer(unittest.TestCase):
         self.assertIn("GIT_AUTHOR_EMAIL=", env_block)
 
     def test_watchdog_passes_git_author_to_container(self):
-        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+        with open("infra/aws/packer/scripts-docker-ubuntu/watchdog.sh") as f:
             watchdog = f.read()
         self.assertIn('-e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"', watchdog)
         self.assertIn('-e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"', watchdog)
@@ -312,7 +312,7 @@ class TestWatchdogForwardsGitIdentityToContainer(unittest.TestCase):
         # so the host env, container env, and git config all
         # share one namespace. Assert no stale references
         # remain in the watchdog.
-        with open("infra/packer/scripts-docker-ubuntu/watchdog.sh") as f:
+        with open("infra/aws/packer/scripts-docker-ubuntu/watchdog.sh") as f:
             watchdog = f.read()
         self.assertNotIn("GIT_USER_NAME", watchdog)
         self.assertNotIn("GIT_USER_EMAIL", watchdog)

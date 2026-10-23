@@ -1,0 +1,13 @@
+# Alicloud bootstrap tfvars — copy to terraform.tfvars and fill in.
+#
+# This is the one-time bootstrap stack. Apply it once before any
+# per-env stack. The shared buckets it creates are referenced by
+# infra/alicloud/{dev,prod}/alicloud.tfvars.
+#
+# AWS analogue: infra/aws/bootstrap/terraform.tfvars.example.
+
+alicloud_region = "cn-hangzhou"
+
+# Globally unique OSS bucket names (same constraint as S3).
+agent_logs_bucket_name = "blitzlog-bootstrap-agent-logs"
+stt_models_bucket_name = "blitzlog-bootstrap-stt-models"

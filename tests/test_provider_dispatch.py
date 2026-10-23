@@ -10,7 +10,7 @@ of `oss2` / `alibabacloud_ecs20140526` /
 `alibabacloud_kms20160120` / `alibabacloud_tea_openapi` /
 `provider.azure`, blowing the 128 MB memory budget that the
 follow-up `memory_size = 512` bump in
-`infra/modules/core/lambda.tf` is meant to absorb.
+`infra/aws/modules/core/lambda.tf` is meant to absorb.
 
 These tests pin the lazy-import contract:
 
@@ -119,7 +119,7 @@ class TestAwsColdStartImports(unittest.TestCase):
     """The AWS cold start must not eagerly import the Alicloud
     or Azure provider modules / SDKs. Otherwise the Lambda hits
     the 128 MB memory ceiling on cold start (issue surfaced by
-    PR #133; see `infra/modules/core/lambda.tf` for the
+    PR #133; see `infra/aws/modules/core/lambda.tf` for the
     follow-up `memory_size` bump).
     """
 

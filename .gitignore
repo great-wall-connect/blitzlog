@@ -33,6 +33,6 @@ packages/images/agent/.env.autonomous.test
 typescript
 
 # Packer local-build artifacts
-infra/packer/.env
-infra/packer/manifest.json
+infra/aws/packer/.env
+infra/aws/packer/manifest.json
 typescript.*

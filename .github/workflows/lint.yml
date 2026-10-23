@@ -60,22 +60,49 @@ jobs:
   terraform:
     name: Validate Terraform
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
+    # Issue #126: every per-cloud stack (aws/dev, aws/prod,
+    # aws/bootstrap, alicloud/dev, alicloud/prod, alicloud/bootstrap)
+    # gets `terraform init -backend=false && terraform validate`. The
+    # matrix enumerates them all so a future cloud (e.g. Azure) just
+    # adds an entry.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: infra/aws/dev
+            provider: aws
+          - dir: infra/aws/prod
+            provider: aws
+          - dir: infra/aws/bootstrap
+            provider: aws
+          # Legacy standalone scrummaster stack (issue #135). Its resources
+          # now also live in infra/aws/modules/core/scrummaster.tf, so this
+          # leg is covered by the infra/aws/dev + infra/aws/prod legs. This
+          # entry is removed once the stack's state is migrated into the dev
+          # stack and infra/scrummaster/ is deleted.
+          - dir: infra/scrummaster
+            provider: aws
+          - dir: infra/alicloud/dev
+            provider: alicloud
+          - dir: infra/alicloud/prod
+            provider: alicloud
+          - dir: infra/alicloud/bootstrap
+            provider: alicloud
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.8
+          terraform_version: 1.16.6
 
-      - name: terraform fmt
+      - name: terraform fmt (recursive)
         run: terraform fmt -check -recursive
 
-      - name: terraform init (backend disabled)
+      - name: terraform init (backend disabled, ${{ matrix.dir }})
+        working-directory: ${{ matrix.dir }}
         run: terraform init -backend=false
 
-      - name: terraform validate
+      - name: terraform validate (${{ matrix.dir }})
+        working-directory: ${{ matrix.dir }}
         run: terraform validate

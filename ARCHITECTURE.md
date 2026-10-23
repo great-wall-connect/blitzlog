@@ -37,13 +37,13 @@ three shutdown paths terminate via the same mechanism.
 - `handler.py` — webhook entrypoint. Mints a GitHub App installation token
   (default 8 h, lifetime configurable via the `GITHUB_TOKEN_LIFETIME_HOURS`
   Lambda env var — see `lambda/auth.py` for the `expires_at` request body
-  and `infra/modules/core/lambda.tf` for the Terraform wiring), acquires a
+  and `infra/aws/modules/core/lambda.tf` for the Terraform wiring), acquires a
   free bot from the user's pool (assisted mode), launches an EC2 spot
   instance.
 - `scripts/assisted.py` / `scripts/autonomous.py` — user-data builders.
 - `scripts/_common.py` — shared bootstrap helpers.
 
-### EC2 host (`infra/packer/scripts-docker-ubuntu/`)
+### EC2 host (`infra/aws/packer/scripts-docker-ubuntu/`)
 Packer-baked Ubuntu 26.04 with two systemd services:
 
 - **`blitzlog-agent.service`** runs `watchdog.sh`, which:

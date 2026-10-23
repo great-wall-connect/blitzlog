@@ -102,6 +102,9 @@ jobs:
       mode: ${{ steps.detect.outputs.mode }}
       pr_number: ${{ steps.detect.outputs.pr_number }}
       new_version: ${{ steps.detect.outputs.new_version }}
+      # dev for pr-test, prod for release. Single-sourced from the
+      # ref-gate action rather than re-derived per step.
+      blitzlog_env: ${{ steps.detect.outputs.blitzlog_env }}
 
     env:
       IMAGE_NAME: blitzlog-agent
@@ -125,6 +128,17 @@ jobs:
       # refs. The bump type is auto-detected from the conventional
       # commits in the diff (last release tag -> $BUILD_REF) via
       # git-cliff (a battle-hardened conventional-commits parser).
+      # Issue #131: decide release (prod) vs pr-test (dev) from the ref
+      # alone, refusing anything that is neither a release ref nor a ref
+      # with an open PR. Extracted into a composite action so the
+      # scrummaster-packer job — which runs in parallel with this one —
+      # applies the identical gate. Do not inline it here.
+      - name: Ref gate
+        id: ref-gate
+        uses: ./.github/actions/ref-gate
+        with:
+          build-ref: ${{ env.BUILD_REF }}
+
       - name: Detect mode and bump type
         id: detect
         env:
@@ -161,77 +175,16 @@ jobs:
             | tar -xz --strip-components=1 -C /usr/local/bin
           git-cliff --version
 
-          # Ref-gate (issue #131). The primary safety mechanism: only
-          # `main` and `release/*` are eligible for the canonical
-          # release path. Any other ref must have an open PR (pr-test
-          # path) or it is refused outright. This is the regression
-          # guard for release #32 (where dispatching on a feature
-          # branch without an open PR produced a prod v0.4.0
-          # release because the previous "no PR -> release" gate
-          # treated any feature branch as a release candidate).
-          #
-          # Match the BUILD_REF exactly. The earlier `--head "$ref"`
-          # form had a known prefix-collision failure mode (Gemini
-          # analysis, 2026-10-12): if a ref like `feature/foo` is
-          # queried, branches like `feature/foo-bar` and `feature/foobar`
-          # all match because the filter is a `startsWith` style match.
-          # The pipe-to-jq form below does an exact-string match
-          # on `headRefName` and is the safe replacement for the
-          # broken `gh pr list --head "$ref"` form (which is
-          # startsWith-style and silently returns empty for fork
-          # PRs — release #32 regressed on this; see issue #131).
-          #
-          # Why the pipe shape, NOT the broken form (passing the
-          # `jq` flag `--arg r VALUE` to `gh` as a positional arg):
-          # `gh` doesn't accept `--arg` and errors with
-          # `unknown arguments ["r" VALUE EXPR]` (regression caught
-          # by run #38261612554 on 2026-10-12 14:15 UTC). Pushing
-          # the expression to a real `jq` invocation via a pipe
-          # lets `--arg` route correctly. Pinned by
-          # `test_pr_list_pipes_to_jq_not_uses_gh_arg` (the
-          # matching regression-guard test).
-          PR_NUMBER=$(gh pr list --state open --json number,headRefName \
-            | jq --arg r "${{ env.BUILD_REF }}" \
-                 '.[] | select(.headRefName == $r) | .number' \
-            | head -1 || true)
-          case "${{ env.BUILD_REF }}" in
-            main)
-              # Canonical release path. If a PR is open against
-              # main, the operator is running a pr-test against the
-              # main tip — downgrade to pr-test.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                MODE=release
-              fi
-              ;;
-            release/*)
-              # Fallback release branch path. PRs against a
-              # release/* branch are also pr-test.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                MODE=release
-              fi
-              ;;
-            *)
-              # Any other ref. Must have an open PR to qualify
-              # as pr-test. Without one, refuse with a clear
-              # operator-actionable message — the previous gate
-              # silently fell into release mode and deployed
-              # to prod.
-              if [ -n "$PR_NUMBER" ]; then
-                MODE=pr-test
-              else
-                echo "FATAL: BUILD_REF='${{ env.BUILD_REF }}' is not a release ref and has no open PR." >&2
-                echo "  Allowed release refs: 'main' (canonical) or 'release/*' (fallback branch path)." >&2
-                echo "  For a PR-test image, open a PR with '${{ env.BUILD_REF }}' as the head first." >&2
-                echo "  For a production release, dispatch on 'main' (or merge this branch to main and dispatch from there)." >&2
-                echo "  Refusing to run so a feature-branch dispatch cannot accidentally deploy to prod (issue #131)." >&2
-                exit 1
-              fi
-              ;;
-          esac
+          # Ref-gate (issue #131). Single source of truth lives in
+          # .github/actions/ref-gate/action.yml — the scrummaster-packer
+          # job calls the same action so the two AMI bakes can never
+          # disagree about which environment they are building for.
+          # Re-bind its outputs onto the names the remaining steps in
+          # this job already reference (mode, pr_number, blitzlog_env)
+          # so nothing downstream had to change.
+          echo "mode=${{ steps.ref-gate.outputs.mode }}"                 >> "$GITHUB_OUTPUT"
+          echo "pr_number=${{ steps.ref-gate.outputs.pr_number }}"       >> "$GITHUB_OUTPUT"
+          echo "blitzlog_env=${{ steps.ref-gate.outputs.blitzlog_env }}" >> "$GITHUB_OUTPUT"
 
           # Bump type: ask git-cliff. It reads the conventional commits
           # since the last v* tag and outputs the next SemVer on stdout.
@@ -282,10 +235,16 @@ jobs:
           echo "Detected bump type: $BUMP"
           echo "Computed new version: $NEW_VERSION"
 
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          # NOTE: `mode`, `pr_number` and `blitzlog_env` are written to
+          # $GITHUB_OUTPUT by the ref-gate step above, not here. This shell
+          # never assigns MODE or PR_NUMBER, and `set -u` turns referencing
+          # an unset variable into a hard error — so do not re-emit them
+          # here. (Regression: a stray trailing echo of $MODE survived the
+          # ref-gate extraction and failed the whole release job with
+          # "unbound variable" before any image or AMI was built. CI lints
+          # this file but never executes the job, so nothing caught it.)
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Install mise
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
@@ -315,9 +274,17 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         run: mise run build
 
+      # `mise run build` writes to infra/aws/modules/core/build — the same
+      # directory `data "archive_file" "lambda_zip"` reads via
+      # `${path.module}/build` (infra/aws/modules/core/lambda.tf:4-7). It was
+      # `infra/build` before the per-cloud split (issue #126); that path is
+      # gone, so this zip was reading a directory nothing populated.
       - name: Zip Lambda bundle for release asset
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        run: (cd infra/build && zip -r ../blitzlog-lambda.zip .)
+        # 4 levels up from infra/aws/modules/core/build lands in infra/, which
+        # is where the upload step below expects the artifact (infra/blitzlog-lambda.zip).
+        working-directory: infra/aws/modules/core/build
+        run: zip -r ../../../../blitzlog-lambda.zip .
 
       # Build and push the agent image. The tag depends on the mode:
       #   pr-test  -> v{new_version}-pr{N}  (e.g. v0.1.1-pr107)
@@ -355,7 +322,7 @@ jobs:
       # ----------------------------------------------------------------
       # Bake the AMI from the image we just pushed (issue #91).
       #
-      # The Packer pipeline (infra/packer/agent-docker-ubuntu.pkr.hcl)
+      # The Packer pipeline (infra/aws/packer/agent-docker-ubuntu.pkr.hcl)
       # already publishes the AMI id to /blitzlog/<env>/agent-ami-id-
       # docker-ubuntu via its shell-local post-processor; we just need
       # to map mode -> Packer `environment`:
@@ -381,7 +348,7 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # OIDC into the role that infra/bootstrap/packer-role.tf
+          # OIDC into the role that infra/aws/bootstrap/packer-role.tf
           # provisions. Trust policy already covers any branch of
           # great-wall-connect/blitzlog. vars.AWS_ACCOUNT_ID must
           # be set at the repo or org level before this runs.
@@ -393,24 +360,33 @@ jobs:
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
         env:
           MODE: ${{ steps.detect.outputs.mode }}
+          BLITZLOG_ENV: ${{ steps.detect.outputs.blitzlog_env }}
           NEW_VERSION: ${{ steps.detect.outputs.new_version }}
           PR_NUMBER: ${{ steps.detect.outputs.pr_number }}
         run: |
           set -euo pipefail
-          if [ "$MODE" = "pr-test" ]; then
-            # PR mode -> dev env (PR images get baked into the dev AMI;
-            # last-writer-wins on /blitzlog/dev/agent-ami-id-docker-ubuntu).
-            BLITZLOG_ENV=dev
-            STT_BUCKET=gwc-blitzlog-stt-models
-            AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
-            SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
-          else
-            # release mode -> prod env
-            BLITZLOG_ENV=prod
-            STT_BUCKET=gwc-blitzlog-stt-models
-            AGENT_IMAGE_TAG="v${NEW_VERSION}"
-            SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
-          fi
+          # BLITZLOG_ENV (dev / prod) comes from the ref-gate action via
+          # the detect step — NOT re-derived here. The scrummaster-packer
+          # job reads the same output, so the two AMI bakes cannot drift
+          # onto different environments.
+          #
+          #   dev  <- pr-test:  last-writer-wins on /blitzlog/dev/...
+          #   prod <- release: /blitzlog/prod/...
+          case "$BLITZLOG_ENV" in
+            dev)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
+              SSM_PATH="/blitzlog/dev/agent-ami-id-docker-ubuntu"
+              ;;
+            prod)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}"
+              SSM_PATH="/blitzlog/prod/agent-ami-id-docker-ubuntu"
+              ;;
+            *)
+              echo "FATAL: ref-gate returned BLITZLOG_ENV='$BLITZLOG_ENV' (mode=$MODE); expected dev or prod." >&2
+              exit 1
+              ;;
+          esac
+          STT_BUCKET=gwc-blitzlog-stt-models
           echo "blitzlog_env=$BLITZLOG_ENV"      >> "$GITHUB_OUTPUT"
           echo "stt_bucket=$STT_BUCKET"          >> "$GITHUB_OUTPUT"
           echo "agent_image_tag=$AGENT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
@@ -418,13 +394,13 @@ jobs:
 
       - name: Packer init
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        working-directory: infra/packer
+        working-directory: infra/aws/packer
         run: packer init agent-docker-ubuntu.pkr.hcl
 
       - name: Packer build (bake AMI, publish id to SSM)
         id: packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        working-directory: infra/packer
+        working-directory: infra/aws/packer
         env:
           BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
           STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}
@@ -520,7 +496,7 @@ jobs:
           # whose /blitzlog/users/<OWNER>/git-author/{name,email}
           # SSM params hold the commit author identity. The
           # deploy-role's SSMGitAuthorIdentityRead grant (see
-          # infra/bootstrap/deploy-role.tf) lets the worker fetch
+          # infra/aws/bootstrap/deploy-role.tf) lets the worker fetch
           # them. Optional: when unset, the Bump step falls back
           # to the historical `release-bot` identity (issue #119
           # legacy carve-out) so the canonical release pipeline
@@ -645,16 +621,16 @@ jobs:
   #   release -> apply infra/prod
   #
   # OIDC role: blitzlog-deploy-role, provisioned by
-  # infra/bootstrap/deploy-role.tf. Trust policy mirrors the
+  # infra/aws/bootstrap/deploy-role.tf. Trust policy mirrors the
   # Packer role's OIDC block (any branch of great-wall-connect/
   # blitzlog) but drops the EC2 service-principal statement — the
-  # local-exec in infra/modules/core/lambda.tf:35-92 runs on the
+  # local-exec in infra/aws/modules/core/lambda.tf:35-92 runs on the
   # runner, not on an EC2 instance.
   #
   # Per-env concurrency serializes CI runs (cancel-in-progress:
   # false) so a long apply blocks the next one rather than racing
   # it. Local-vs-CI races remain possible (the project chose no
-  # DynamoDB lock table; see infra/prod/main.tf:4-9 and
+  # DynamoDB lock table; see infra/aws/prod/main.tf:4-9 and
   # README.md:295-307).
   #
   # Prod gate: when the mode is `release` (prod), the job would
@@ -666,8 +642,115 @@ jobs:
   # the deploy step on PRs. Re-add the `environment:` block once
   # the Environment is configured to allow the merged ref.
   # ----------------------------------------------------------------
+  # The scrummaster AMI bake (epic #134). Runs as a SEPARATE JOB so it
+  # executes concurrently with `release` rather than after it — the two
+  # AMIs are independent, and serially baking them doubles wall-clock on
+  # every dispatch. It applies the SAME ref-gate composite action as
+  # `release`, so the agent AMI and the scrummaster AMI can never be
+  # published under different environments.
+  scrummaster-packer:
+    # The name can't interpolate a step output (job `name:` is evaluated
+    # before steps run), so it just says what it does; the env lands in
+    # the logs and in the SSM parameter path.
+    name: Bake scrummaster AMI (parallels release job)
+
+    # GATED OFF until the per-cloud structure (issue #126 / PR #155) is on
+    # main. Unset repo variable = never runs.
+    #
+    # To enable:
+    #   gh variable set ENABLE_SCRUMMASTER_BAKE --body true
+    #
+    # It is a separate job rather than extra steps in `release` because
+    # steps within a job are sequential — this is the only way to bake
+    # two AMIs at once.
+    #
+    # It is deliberately NOT in the `deploy` job's `needs` (see below).
+    # While this bake was in that list, a failure here would have failed
+    # the AWS deploy, which is the one thing that must not happen.
+    if: ${{ vars.ENABLE_SCRUMMASTER_BAKE == 'true' }}
+    runs-on: ubuntu-26.04-arm
+
+    permissions:
+      contents: read
+      packages: read
+      # Required for OIDC into blitzlog-packer-build-role.
+      id-token: write
+
+    env:
+      BUILD_REF: ${{ inputs.ref || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 1
+
+      # Same gate, same action, same decision. `mode` is always one of
+      # release / pr-test here — a refused ref fails this step, which
+      # fails the job, exactly as it fails `release`.
+      - name: Ref gate
+        id: ref-gate
+        uses: ./.github/actions/ref-gate
+        with:
+          build-ref: ${{ env.BUILD_REF }}
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v2
+        with:
+          version: 1.16.1
+
+      - name: Configure AWS credentials (OIDC) for Packer
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-packer-build-role
+          aws-region: ap-east-1
+
+      - name: Packer init
+        working-directory: infra/aws/packer
+        run: packer init scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
+
+      - name: Packer build (bake scrummaster AMI, publish id to SSM)
+        env:
+          BLITZLOG_ENV: ${{ steps.ref-gate.outputs.blitzlog_env }}
+        run: |
+          set -euo pipefail
+          # No GHCR token: the bake pulls the PUBLIC
+          # ghcr.io/zeroclaw-labs/zeroclaw image by digest. It does not
+          # bake any of our own images, so it needs neither
+          # `github_token` nor `agent_image_tag`.
+          packer build -force \
+              -var "environment=${BLITZLOG_ENV}" \
+              scrummaster-zeroclaw-docker-ubuntu.pkr.hcl
+
+          SSM_PARAM="/blitzlog/${BLITZLOG_ENV}/agent-ami-id-zeroclaw-docker-ubuntu"
+          if [ ! -r manifest.json ]; then
+            echo "FATAL: Packer did not write manifest.json (build may have failed before the post-processor ran)" >&2
+            exit 1
+          fi
+          AMI_ID=$(jq -r '.builds[-1].artifact_id' manifest.json | awk -F: '{print $2}')
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "null" ]; then
+            echo "FATAL: could not extract AMI id from manifest.json:" >&2
+            jq . manifest.json | sed 's/^/    /' >&2
+            exit 1
+          fi
+          echo "Baked scrummaster AMI: $AMI_ID -> $SSM_PARAM"
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
+    # Deliberately `needs: release` and NOT `[release, scrummaster-packer]`.
+    #
+    # The terraform plan reads
+    # /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu whenever
+    # enable_scrummaster is true, so once that flag is switched on this
+    # job WILL need the scrummaster bake to have finished. Add it back at
+    # the same time as the flag — not before.
+    #
+    # Keeping it out until then is what makes the guarantee real: the AWS
+    # deploy cannot fail because the (experimental, gated-off) scrummaster
+    # bake failed, and re-enabling the bake cannot reintroduce that coupling
+    # by accident. enable_scrummaster defaults to false in both envs.
     needs: release
     # Default `needs.X.result` for `needs: release` is `success`,
     # so the deploy job does NOT run if the release job failed
@@ -682,7 +765,7 @@ jobs:
     runs-on: ubuntu-26.04
     # 20 min covers a typical plan + apply + local-exec (Python 3.12
     # venv + pip install for the lambda bundle, see
-    # infra/modules/core/lambda.tf:35-92). The Packer bake has
+    # infra/aws/modules/core/lambda.tf:35-92). The Packer bake has
     # already published the AMI id to SSM, so the deploy is
     # strictly a terraform run — no AMI build.
     timeout-minutes: 20
@@ -700,6 +783,13 @@ jobs:
       cancel-in-progress: false
     env:
       BLITZLOG_ENV: ${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }}
+      # Issue #126: BLITZLOG_PROVIDER selects the per-cloud tree
+      # (infra/aws/{dev,prod}/ for AWS, infra/alicloud/{dev,prod}/
+      # for Alicloud). Default "aws" preserves the pre-#126
+      # behaviour. The Packer step below fails fast when this is
+      # set to "alicloud" because the AMI bake is AWS-only in
+      # this PR; the Aliyun image builder is Phase 5.
+      BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}
       STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate' }}
       AWS_REGION: ap-east-1
 
@@ -717,22 +807,63 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref_name }}
           fetch-depth: 0
 
+      # Issue #126: Alicloud deploy pre-flight.
+      #
+      # The Alicloud tree (infra/alicloud/) ships, validates in CI, and is
+      # deliberately NOT deployable yet. It is gated here so the segmentation
+      # is visible to contributors — the tree, its tests, and its lint-matrix
+      # leg all exist — while the only thing that can reach a real cloud
+      # account remains the AWS path.
+      #
+      # This is a hard stop, not a warning: an operator who sets
+      # vars.BLITZLOG_PROVIDER=alicloud gets a loud, actionable message
+      # instead of a partial apply. Note that the deploy job would otherwise
+      # select infra/alicloud/<env>/ and the Packer bake above is AWS-only,
+      # so the two halves would disagree anyway.
+      - name: Validate provider
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+        run: |
+          set -euo pipefail
+          case "${BLITZLOG_PROVIDER}" in
+            aws) ;;
+            alicloud)
+              echo "FATAL: Alicloud deploy is disabled by design." >&2
+              echo "" >&2
+              echo "  infra/alicloud/ ships and validates in CI, but no Alicloud" >&2
+              echo "  resource is applied by any workflow until the per-cloud" >&2
+              echo "  structure is on main." >&2
+              echo "" >&2
+              echo "  To apply AWS (the only supported path today):" >&2
+              echo "    unset vars.BLITZLOG_PROVIDER   (it defaults to 'aws')" >&2
+              echo "    gh variable delete BLITZLOG_PROVIDER" >&2
+              echo "" >&2
+              echo "  The AMI bake in the release job is also AWS-only, so this" >&2
+              echo "  is not a Phase 5 gap — it is a deliberate stop." >&2
+              exit 1
+              ;;
+            *)
+              echo "FATAL: BLITZLOG_PROVIDER=${BLITZLOG_PROVIDER} is not a recognised provider. Use 'aws' or 'alicloud'." >&2
+              exit 1
+              ;;
+          esac
+
       - name: Install mise
         uses: jdx/mise-action@v4
 
       - name: Install Python toolchain
         # The local-exec in null_resource.lambda_build resolves
         # Python 3.12 from `~/.local/share/mise/installs/python/...`
-        # (see infra/modules/core/lambda.tf:65-75). mise.toml pins
+        # (see infra/aws/modules/core/lambda.tf:65-75). mise.toml pins
         # python = "3.12", so `mise install` puts it there.
         run: mise install
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.8
+          terraform_version: 1.16.6
 
-      # Build the Lambda bundle into `infra/modules/core/build/`
+      # Build the Lambda bundle into `infra/aws/modules/core/build/`
       # BEFORE `terraform plan` runs. The data source
       # `module.core.data.archive_file.lambda_zip` (lambda.tf:1-7)
       # reads that directory at plan time to compute
@@ -742,46 +873,57 @@ jobs:
       # runs on `terraform apply`, so the dir doesn't exist on a
       # fresh runner by the time plan runs. The release job above
       # builds into `infra/build/` (the release asset path), not
-      # `infra/modules/core/build/`, so we can't share artifacts
+      # `infra/aws/modules/core/build/`, so we can't share artifacts
       # between the two jobs.
       #
       # This command mirrors the local-exec in
-      # `infra/modules/core/lambda.tf:57-92` and uses the same
-      # Python-resolution ladder (system python3.12 → mise →
-      # fail loudly).
+      # `infra/aws/modules/core/lambda.tf` and uses the same
+      # Python-resolution ladder (mise → system python3.12 → fail
+      # loudly) plus the same `--without-pip` + get-pip.py bootstrap
+      # so the build never depends on `ensurepip._bundled`. See the
+      # lambda.tf `local-exec` comment block for the rationale.
       - name: Pre-build Lambda bundle
         run: |
           set -euo pipefail
-          PYTHON_BIN="$(command -v python3.12 || true)"
-          if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+          PYTHON_BIN=""
+          if [ -d "$HOME/.local/share/mise/installs/python" ]; then
             PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
           fi
+          if [ -z "$PYTHON_BIN" ]; then
+            PYTHON_BIN="$(command -v python3.12 || true)"
+          fi
           if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
-            echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
+            echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
             exit 1
           fi
-          BUILD_DIR=infra/modules/core/build
-          rm -rf "$BUILD_DIR" infra/modules/core/.build-venv
+          BUILD_DIR=infra/aws/modules/core/build
+          rm -rf "$BUILD_DIR" infra/aws/modules/core/.build-venv
           mkdir -p "$BUILD_DIR"
           cp -r lambda "$BUILD_DIR"/
           mkdir -p "$BUILD_DIR/lambda/packages/whisper-stt-shim"
           cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
-          "$PYTHON_BIN" -m venv infra/modules/core/.build-venv
-          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/modules/core/.build-venv/bin/python3
-          infra/modules/core/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t "$BUILD_DIR"
-          rm -rf infra/modules/core/.build-venv
+          "$PYTHON_BIN" -m venv --without-pip infra/aws/modules/core/.build-venv
+          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/aws/modules/core/.build-venv/bin/python3
+          # ${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} lets a future
+          # alicloud terraform-apply-dev job flip this to
+          # requirements-alicloud.txt without touching the script body.
+          # The alibaba SDKs (oss2, alibabacloud_kms20160120,
+          # alibabacloud_ecs20140526) belong to requirements-alicloud.txt
+          # and are NOT shipped to the AWS deploy.
+          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
+          rm -rf infra/aws/modules/core/.build-venv
 
       - name: Configure AWS credentials (OIDC) for terraform
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # OIDC into the role provisioned by infra/bootstrap/
+          # OIDC into the role provisioned by infra/aws/bootstrap/
           # deploy-role.tf. The same repo variable (`AWS_ACCOUNT_ID`)
           # is used by the Packer workflow above.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
 
       # Fetch per-env deploy config + secrets from SSM Parameter
-      # Store. The deploy role (infra/bootstrap/deploy-role.tf)
+      # Store. The deploy role (infra/aws/bootstrap/deploy-role.tf)
       # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the
       # OIDC session can read these. We fetch the entire env
       # subtree in one round trip (cheaper + atomic) and map
@@ -795,7 +937,7 @@ jobs:
       # forks on this public repo can't read them).
       #
       # Placeholder detection: every parameter was provisioned
-      # by infra/bootstrap/secrets.tf with
+      # by infra/aws/bootstrap/secrets.tf with
       # value=PLACEHOLDER_SET_VIA_AWS_CLI; the bootstrap
       # `lifecycle.ignore_changes=[value]` keeps the operator's
       # real value intact across subsequent applies. The sanity
@@ -804,7 +946,16 @@ jobs:
       # one-time-setup error rather than a confusing
       # "GitHub App auth failed" deep inside the Lambda at
       # runtime.
+      #
+      # Issue #126: this step is AWS-only. The Alicloud path
+      # uses the operator's `alicloud.tfvars` (gitignored, copied
+      # from `alicloud.tfvars.example`) directly via -var-file
+      # in the `terraform plan` step above. The Phase 5
+      # follow-up will add a KMS Secrets fetch (mirroring this
+      # step) once the Aliyun OIDC role is provisioned in
+      # infra/alicloud/bootstrap/deploy-role.tf.
       - name: Render TF_VAR_* env from SSM
+        if: env.BLITZLOG_PROVIDER == 'aws'
         env:
           BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
         run: |
@@ -867,37 +1018,85 @@ jobs:
       # state buckets), the key is per-env
       # (<env>/blitzlog.tfstate), the region is hard-coded
       # ap-east-1 (matches the bootstrap role's trust policy).
+      #
+      # Issue #126: when BLITZLOG_PROVIDER=alicloud, the backend
+      # switches from AWS S3 to Alicloud OSS. The state bucket
+      # name comes from vars.TF_BACKEND_BUCKET_OSS (default
+      # `gwc-infra-tfstate` so the standard install needs no
+      # operator action), the region is hard-coded cn-hangzhou to
+      # match the bootstrap role's trust policy.
       - name: terraform init
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         env:
           TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tfstate' }}
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
-          terraform init -input=false \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${{ env.STATE_KEY }}" \
-            -backend-config="region=ap-east-1"
+          if [ "${BLITZLOG_PROVIDER}" = "alicloud" ]; then
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="region=cn-hangzhou"
+          else
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="region=ap-east-1"
+          fi
 
       - name: terraform validate
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         run: terraform validate -no-color
 
+      # Issue #126: pass the per-provider tfvars file. The naming
+      # convention is `<provider>.tfvars` (e.g. `aws.tfvars` for the
+      # AWS path, `alicloud.tfvars` for the Alicloud path). The
+      # files are gitignored operator-side; the example file in the
+      # same directory is the template.
       - name: terraform plan
         id: plan
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
           # -out=tfplan serialises the plan to a file so the
           # apply step consumes the exact same plan (no drift
           # between plan and apply). -no-color keeps the log
           # readable in the GH Actions UI.
-          terraform plan -no-color -input=false -out=tfplan
+          #
+          # AWS: every variable arrives as TF_VAR_* from the "Render
+          # TF_VAR_* env from SSM" step above, so NO -var-file is needed
+          # or wanted — matching the pre-#126 behaviour byte for byte.
+          #
+          # Alicloud: there is no SSM fetch for that provider yet
+          # (Phase 5), so the operator's per-provider tfvars file IS the
+          # source of config and is required. The naming convention is
+          # `<provider>.tfvars`; the `.tfvars.example` beside it is the
+          # template.
+          #
+          # Regression: #126 made -var-file unconditional and FATAL'd when
+          # absent. `<provider>.tfvars` is gitignored, so it can never
+          # exist in a fresh CI checkout — that failed the AWS deploy with
+          # "FATAL: aws.tfvars not found" even though SSM had already
+          # supplied every variable.
+          TFVARS_FILE="${BLITZLOG_PROVIDER}.tfvars"
+          if [ "${BLITZLOG_PROVIDER}" = "aws" ]; then
+            terraform plan -no-color -input=false -out=tfplan
+          elif [ -f "${TFVARS_FILE}" ]; then
+            terraform plan -no-color -input=false -var-file="${TFVARS_FILE}" -out=tfplan
+          else
+            echo "FATAL: ${TFVARS_FILE} not found in $(pwd). Copy the *.tfvars.example to ${TFVARS_FILE} and fill in the values." >&2
+            echo "  The Alicloud path has no SSM-backed TF_VAR_* render yet (Phase 5), so the tfvars file is required there." >&2
+            exit 1
+          fi
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-${{ env.BLITZLOG_ENV }}
-          path: infra/${{ env.BLITZLOG_ENV }}/tfplan
+          name: tfplan-${{ env.BLITZLOG_PROVIDER }}-${{ env.BLITZLOG_ENV }}
+          path: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}/tfplan
           # 14-day retention matches the issue body's plan
           # reusability goal (the plan is a snapshot, not a
           # long-lived artifact).
@@ -905,7 +1104,7 @@ jobs:
 
       - name: terraform apply
         id: apply
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         # Always consumes the plan from the previous step; never
         # re-plans in-band. Keeps plan↔apply symmetric so a
         # reviewer looking at the artifact can be sure the apply
@@ -914,7 +1113,7 @@ jobs:
 
       - name: Capture terraform output
         if: steps.apply.outcome == 'success'
-        working-directory: infra/${{ env.BLITZLOG_ENV }}
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         # `webhook_url` is the only output the operator needs
         # after a successful apply (it's the URL the GitHub App
         # webhook should target). Capture the full -json output

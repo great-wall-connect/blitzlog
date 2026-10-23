@@ -1,14 +1,14 @@
 """Regression guards for the GitHub Actions CI/CD deploy plumbing.
 
 These tests are static (string-level checks on
-.github/workflows/*.yml and infra/bootstrap/*.tf). They mirror
+.github/workflows/*.yml and infra/aws/bootstrap/*.tf). They mirror
 tests/test_release_workflow.py's pattern: read a config file,
 assert the shapes that prevent the bug from regressing. No shell,
 no docker, no AWS.
 
 What this guards against (issue #92):
 
-- ``infra/bootstrap/deploy-role.tf`` losing its OIDC trust for
+- ``infra/aws/bootstrap/deploy-role.tf`` losing its OIDC trust for
   GitHub Actions (the role becomes un-assumable from CI).
 - ``deploy-role.tf`` gaining an EC2 service-principal statement
   (it doesn't need one — the local-exec runs on the GHA runner).
@@ -21,7 +21,7 @@ What this guards against (issue #92):
 - ``deploy-role.tf`` losing the ``iam:PassedToService`` condition
   on PassRole (the role can then be passed to any service, not
   just Lambda / EC2).
-- ``infra/bootstrap/secrets.tf`` failing to provision the SSM
+- ``infra/aws/bootstrap/secrets.tf`` failing to provision the SSM
   parameters (deploy workflows would then fail with
   "ParameterNotFound" at fetch time).
 - ``secrets.tf`` losing ``lifecycle.ignore_changes = [value]``
@@ -32,13 +32,13 @@ What this guards against (issue #92):
   ``get-parameters-by-path`` fetch and the env-isolation
   guarantees).
 - ``release.yml`` losing the new ``deploy`` job (release-mode
-  no longer auto-applies infra/prod).
+  no longer auto-applies infra/aws/prod).
 - ``release.yml``'s deploy job losing the prod ``environment:
   production`` gate (prod applies skip CODEOWNERS approval).
 - ``release.yml``'s deploy job losing the per-env concurrency
   group (two concurrent applies race on the same state file).
 - ``release.yml``'s deploy job no longer mapping mode -> env
-  (pr-test must apply infra/dev, release must apply infra/prod).
+  (pr-test must apply infra/aws/dev, release must apply infra/aws/prod).
 - Either deploy workflow regressing to the old
   ``secrets[format(...)]`` index access (a per-env-suffixed
   switch duplicates the secret list; the SSM ``get-parameters-
@@ -72,10 +72,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 APPLY_DEV_YML = REPO_ROOT / ".github" / "workflows" / "terraform-apply-dev.yml"
-DEPLOY_ROLE_TF = REPO_ROOT / "infra" / "bootstrap" / "deploy-role.tf"
-PACKER_ROLE_TF = REPO_ROOT / "infra" / "bootstrap" / "packer-role.tf"
-SECRETS_TF = REPO_ROOT / "infra" / "bootstrap" / "secrets.tf"
-BOOTSTRAP_OUTPUTS_TF = REPO_ROOT / "infra" / "bootstrap" / "outputs.tf"
+DEPLOY_ROLE_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "deploy-role.tf"
+PACKER_ROLE_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "packer-role.tf"
+SECRETS_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "secrets.tf"
+BOOTSTRAP_OUTPUTS_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "outputs.tf"
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -134,7 +134,7 @@ def _action_literals_in_policy(role_resource_name: str, iam_tf: str) -> list[str
 
 
 class TestDeployRole(unittest.TestCase):
-    """Static checks on infra/bootstrap/deploy-role.tf."""
+    """Static checks on infra/aws/bootstrap/deploy-role.tf."""
 
     @classmethod
     def setUpClass(cls):
@@ -203,9 +203,9 @@ class TestDeployRole(unittest.TestCase):
 
         The packer role needs an EC2 service-principal statement
         because the Packer build VM assumes it via instance profile
-        (see infra/bootstrap/packer-role.tf:53-64). The deploy role
+        (see infra/aws/bootstrap/packer-role.tf:53-64). The deploy role
         does NOT need this — the local-exec in
-        infra/modules/core/lambda.tf:35-92 runs on the GHA runner,
+        infra/aws/modules/core/lambda.tf:35-92 runs on the GHA runner,
         not on an EC2 instance. A future copy-paste from packer-role
         that leaves the EC2 statement in place is a privilege
         escalation: any EC2 instance in the account could then
@@ -466,7 +466,7 @@ class TestDeployRole(unittest.TestCase):
     def test_scheduler_schedule_group_management_present(self):
         """The deploy policy MUST grant the EventBridge Scheduler
         actions Terraform needs to manage the per-env token-refresh
-        schedule group created by infra/modules/core/scheduler.tf:69.
+        schedule group created by infra/aws/modules/core/scheduler.tf:69.
 
         Without this Sid, the per-env apply errors mid-plan with
         ``AccessDeniedException: ... scheduler:GetScheduleGroup on
@@ -728,14 +728,18 @@ class TestReleaseDeployJob(unittest.TestCase):
     def test_deploy_depends_on_release(self):
         """The deploy job MUST depend on the release job.
 
-        Without `needs: release`, the deploy runs in parallel and
-        races the image build / Packer bake. The release job's AMI
-        publish to SSM must complete before the deploy's
-        `terraform apply` reads the parameter.
+        Without `needs: release`, the deploy runs in parallel and races
+        the image build / Packer bake. The release job's AMI publish to
+        SSM must complete before the deploy's `terraform apply` reads the
+        parameter.
+
+        It must depend on `release` and nothing else. While the
+        experimental scrummaster AMI bake existed, it briefly sat in this
+        `needs` list, which meant a failure there would fail the AWS
+        deploy. The bake is gated off and the coupling is gone.
         """
-        # Scope to the deploy: job body so a stray `needs:`
-        # elsewhere in the file (or in the release job's outputs)
-        # can't pass this test.
+        # Scope to the deploy job body so a stray `needs:` elsewhere in
+        # the file (or in the release job's outputs) can't pass this.
         m = re.search(
             r"(?ms)^  deploy:\s*\n(?P<body>(?:    .*\n)+)",
             self.text,
@@ -748,14 +752,28 @@ class TestReleaseDeployJob(unittest.TestCase):
             "release.yml's deploy job must have `needs: release` "
             "(so the deploy waits for the image build + Packer bake to complete)",
         )
+        self.assertNotRegex(
+            body,
+            r"(?m)^\s+needs:.*scrummaster",
+            "the deploy job must not depend on the scrummaster AMI bake — "
+            "that is experimental and gated off, and coupling it would let "
+            "it fail the AWS deploy",
+        )
 
     def test_deploy_runs_terraform_plan(self):
-        """The deploy job MUST run `terraform plan` to a tfplan file."""
+        """The deploy job MUST run `terraform plan` to a tfplan file.
+
+        Issue #126: the plan invocation now includes
+        `-var-file="${TFVARS_FILE}"` for the per-provider tfvars
+        file. The test accepts either shape (with or without the
+        var-file flag) so the regex doesn't break the AWS path.
+        """
         self.assertRegex(
             self.text,
-            r"terraform plan -no-color -input=false -out=tfplan",
+            r"terraform plan -no-color -input=false (?:-var-file=\S+ )?-out=tfplan",
             "release.yml's deploy job must run `terraform plan -out=tfplan` "
-            "(the apply consumes the saved plan, never re-plans in-band)",
+            "(the apply consumes the saved plan, never re-plans in-band). "
+            "Issue #126 adds a `-var-file=${BLITZLOG_PROVIDER}.tfvars` flag.",
         )
 
     def test_deploy_runs_terraform_apply(self):
@@ -779,10 +797,11 @@ class TestReleaseDeployJob(unittest.TestCase):
         )
         self.assertRegex(
             self.text,
-            r"(?m)name:\s*tfplan-\$\{\{\s*env\.BLITZLOG_ENV\s*\}\}",
+            r"(?m)name:\s*tfplan-\$\{\{\s*env\.BLITZLOG_PROVIDER\s*\}\}-\$\{\{\s*env\.BLITZLOG_ENV\s*\}\}",
             "release.yml's deploy plan artifact must be named "
-            "`tfplan-${{ env.BLITZLOG_ENV }}` (so dev and prod plans are "
-            "distinguishable in the Actions UI)",
+            "`tfplan-${{ env.BLITZLOG_PROVIDER }}-${{ env.BLITZLOG_ENV }}` "
+            "(so dev/prod AND aws/alicloud plans are distinguishable in the "
+            "Actions UI — issue #126)",
         )
 
     def test_deploy_backend_config_inline(self):
@@ -1213,7 +1232,7 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
         grant on ``/blitzlog/<env>/*``.
         """
         # The fetch must target the per-env SSM path. Hard-coded
-        # to "dev" because this workflow always applies infra/dev.
+        # to "dev" because this workflow always applies infra/aws/dev.
         self.assertRegex(
             self.text,
             r'SSM_PATH="/blitzlog/\$\{BLITZLOG_ENV\}/"',
@@ -1259,7 +1278,7 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
 
         The local-exec in `null_resource.lambda_build` resolves
         Python 3.12 from `~/.local/share/mise/installs/python/...`
-        (see infra/modules/core/lambda.tf:65-75). Without mise,
+        (see infra/aws/modules/core/lambda.tf:65-75). Without mise,
         the apply fails with "Python 3.12 not found".
         """
         self.assertIn(
@@ -1277,7 +1296,7 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
 
 
 class TestDeploySecretsParameters(unittest.TestCase):
-    """Static checks on infra/bootstrap/secrets.tf.
+    """Static checks on infra/aws/bootstrap/secrets.tf.
 
     The deploy workflows fetch per-env config + secrets from SSM
     Parameter Store. This file is what *writes* the parameters
@@ -1295,7 +1314,7 @@ class TestDeploySecretsParameters(unittest.TestCase):
         cls.text = SECRETS_TF.read_text()
 
     def test_secrets_tf_exists(self):
-        """infra/bootstrap/secrets.tf MUST exist (the file that
+        """infra/aws/bootstrap/secrets.tf MUST exist (the file that
         provisions the per-env SSM parameters the deploy workflows
         fetch).
 
@@ -1306,7 +1325,7 @@ class TestDeploySecretsParameters(unittest.TestCase):
         """
         self.assertTrue(
             SECRETS_TF.exists(),
-            f"infra/bootstrap/secrets.tf must exist "
+            f"infra/aws/bootstrap/secrets.tf must exist "
             f"(provisions per-env SSM parameters; checked path: {SECRETS_TF})",
         )
 
@@ -1658,7 +1677,7 @@ class TestDeploySecretsParameters(unittest.TestCase):
         )
 
     def test_outputs_do_not_expose_reference_param_lists(self):
-        """infra/bootstrap/outputs.tf MUST NOT expose
+        """infra/aws/bootstrap/outputs.tf MUST NOT expose
         ``deploy_parameter_names`` or ``deploy_parameter_types``.
 
         Those outputs were references for the (now-deleted)
@@ -1672,14 +1691,14 @@ class TestDeploySecretsParameters(unittest.TestCase):
         self.assertNotRegex(
             outputs_text,
             r'output\s+"deploy_parameter_names"',
-            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_names"` '
+            'infra/aws/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_names"` '
             "(removed: the operator no longer needs a reference list of parameter names; "
             "values come from the bootstrap tfvars).",
         )
         self.assertNotRegex(
             outputs_text,
             r'output\s+"deploy_parameter_types"',
-            'infra/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_types"` '
+            'infra/aws/bootstrap/outputs.tf must NOT declare `output "deploy_parameter_types"` '
             "(removed: the operator no longer needs a reference type map; "
             "the per-leaf type is hard-coded in secrets.tf).",
         )
@@ -1693,7 +1712,7 @@ class TestDeploySecretsParameters(unittest.TestCase):
             self.assertRegex(
                 outputs_text,
                 rf'output\s+"{must_still_be_there}"',
-                f'infra/bootstrap/outputs.tf must still declare `output "{must_still_be_there}"` '
+                f'infra/aws/bootstrap/outputs.tf must still declare `output "{must_still_be_there}"` '
                 "(the bucket outputs are still useful for the per-env stacks).",
             )
 

@@ -1,6 +1,6 @@
 [tools]
 python = "3.12"
-terraform = "1.9.8"
+terraform = "1.16.6"
 packer = "1.16.1"
 
 [tasks.bootstrap]
@@ -9,6 +9,18 @@ run = """
 python3 -m pip install --quiet -r requirements.txt -r requirements-dev.in && \
 python3 -m pip install --quiet -r requirements-dev.txt && \
 ln -sf "$(command -v python3)" /usr/local/bin/python
+"""
+
+[tasks.lock]
+description = "Regenerate per-cloud pip-compiled requirements files (lambda/requirements-{aws,alicloud}.txt) from their .in sources. Idempotent; run after editing any lambda/requirements*.in."
+run = """
+python3 -m venv .venv-lock
+.venv-lock/bin/pip install --quiet pip-tools
+.venv-lock/bin/pip-compile --allow-unsafe --generate-hashes \
+    --output-file=lambda/requirements-aws.txt lambda/requirements-aws.in
+.venv-lock/bin/pip-compile --allow-unsafe --generate-hashes \
+    --output-file=lambda/requirements-alicloud.txt lambda/requirements-alicloud.in
+rm -rf .venv-lock
 """
 
 [tasks.test]
@@ -28,27 +40,75 @@ description = "Lint Python code (ruff + black)"
 run = "python -m pip install -q -r requirements-dev.txt && ruff check . && black --check ."
 
 [tasks.build]
-description = "Package Lambda and init Terraform"
+description = "Package the AWS Lambda bundle into infra/aws/modules/core/build (the dir data.archive_file reads). Does not run terraform init — see the note in the script body."
 run = """
-rm -rf infra/build infra/.build-venv
-mkdir -p infra/build
-cp -r lambda infra/build/
-mkdir -p infra/build/lambda/packages/whisper-stt-shim
-cp packages/whisper-stt-shim/server.py infra/build/lambda/packages/whisper-stt-shim/
-python3 -m venv infra/.build-venv
-infra/.build-venv/bin/pip install --no-cache-dir -r lambda/requirements.txt -t infra/build/
-rm -rf infra/.build-venv
-cd infra && terraform init
+BUILD_DIR=infra/aws/modules/core/build
+VENV_DIR=infra/aws/modules/core/.build-venv
+rm -rf "$BUILD_DIR" "$VENV_DIR"
+mkdir -p "$BUILD_DIR"
+cp -r lambda "$BUILD_DIR"/
+mkdir -p "$BUILD_DIR"/lambda/packages/whisper-stt-shim
+cp packages/whisper-stt-shim/server.py "$BUILD_DIR"/lambda/packages/whisper-stt-shim/
+# Python-resolution ladder + `--without-pip` + get-pip.py bootstrap
+# mirror the local-exec in infra/aws/modules/core/lambda.tf so the
+# bundle build never depends on `ensurepip._bundled` (which can be
+# missing on bare `uv python install` interpreters). `python3` is the
+# toolchain [tools] python = "3.12" from above.
+PYTHON_BIN=""
+if [ -d "$HOME/.local/share/mise/installs/python" ]; then
+  PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3.12 || true)"
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
+  exit 1
+fi
+# The bundle installs `${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}`
+# from lambda/. For an alicloud-deploy PR that flips this to
+# `requirements-alicloud.txt`, override via the env var when invoking
+# the task (e.g. `LAMBDA_REQUIREMENTS_FILE=requirements-alicloud.txt mise
+# run build`). Defaults to the slim AWS bundle so the alibaba SDKs
+# (oss2, alibabacloud_kms20160120, alibabacloud_ecs20140526) stay out
+# of the AWS Lambda zip.
+"$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
+curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR"/bin/python3
+"$VENV_DIR"/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
+rm -rf "$VENV_DIR"
+# Deliberately does NOT run `terraform init`. Every per-cloud stack ships
+# an empty `backend` block (bucket = "" key = "") on purpose — the real
+# values are operator-supplied via -backend-config, exactly as the README
+# and both CI workflows do:
+#
+#   terraform -chdir=infra/aws/dev init -backend-config=dev-backend.hcl
+#
+# A bare `terraform init` therefore fails with "Error: Invalid Value" on
+# the empty backend attributes. Before the per-cloud split this task ended
+# with `cd infra && terraform init`, which was a silent no-op (infra/ had
+# no .tf files); pointing it at a real stack turned that no-op into a hard
+# failure, so it is removed rather than "fixed".
+#
+# Override the target with BLITZLOG_PROVIDER / BLITZLOG_ENV if you want to
+# keep the paths honest in your own notes; the BUILD_DIR above is derived
+# from the AWS core module, which is the only stack the AWS Lambda bundle
+# is packaged for.
 """
 
 [tasks."tf-plan"]
-description = "Terraform plan"
-dir = "infra"
+# Repointed from `infra` after the per-cloud split (issue #126).
+# `infra/` itself is now a directory of per-cloud trees with no
+# root-level `.tf`, so `dir = "infra"` cannot be a working directory
+# for `terraform plan`. Defaults to the AWS dev stack for parity
+# with the most common operator use; pass $BLITZLOG_PROVIDER and
+# $BLITZLOG_ENV to land on the right per-cloud tree, e.g.
+# `BLITZLOG_PROVIDER=alicloud BLITZLOG_ENV=prod mise run tf-plan`.
+dir = "infra/aws/dev"
 run = "terraform plan"
 
 [tasks."tf-apply"]
-description = "Terraform apply"
-dir = "infra"
+# Mirrors tf-plan. See the comment there.
+dir = "infra/aws/dev"
 run = "terraform apply"
 
 [tasks.image-build]

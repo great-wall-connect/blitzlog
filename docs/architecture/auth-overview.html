@@ -427,7 +427,7 @@
           <li><code>scheduler:ListScheduleGroups</code></li>
           <li><code>scheduler:ListTagsForResource</code> + <code>:TagResource</code> + <code>:UntagResource</code></li>
           <li>Resource: <code>schedule-group/blitzlog-*-token-refresh</code></li>
-          <li>Where: <code>infra/bootstrap/deploy-role.tf</code> · Sid <code>SchedulerScheduleGroupManagement</code> (PR #154 commit a8115ff)</li>
+          <li>Where: <code>infra/aws/bootstrap/deploy-role.tf</code> · Sid <code>SchedulerScheduleGroupManagement</code> (PR #154 commit a8115ff)</li>
         </ul>
       </div>
       <div>
@@ -436,7 +436,7 @@
           <li><code>scheduler:CreateSchedule</code> + <code>:DeleteSchedule</code></li>
           <li><code>ssm:PutParameter</code> on the ephemeral namespace</li>
           <li>Resource: <code>schedule/&lt;group&gt;/*</code></li>
-          <li>Where: <code>infra/modules/core/iam.tf</code> · pre-existing from PR #146</li>
+          <li>Where: <code>infra/aws/modules/core/iam.tf</code> · pre-existing from PR #146</li>
         </ul>
       </div>
       <div>
@@ -444,7 +444,7 @@
         <ul>
           <li><code>iam:PassRole</code> on <code>blitzlog-&lt;env&gt;-scheduler-role</code></li>
           <li>Condition: <code>iam:PassedToService = scheduler.amazonaws.com</code></li>
-          <li>Where: <code>infra/modules/core/iam.tf</code> · Sid <code>SchedulerRolePassRole</code> (PR #154 commit b8152e2)</li>
+          <li>Where: <code>infra/aws/modules/core/iam.tf</code> · Sid <code>SchedulerRolePassRole</code> (PR #154 commit b8152e2)</li>
           <li>Without this grant, the very first <code>schedule_next_refresh</code> call errors with <code>AccessDeniedException: iam:PassRole</code> and the chain dies at iteration 0. This was the regression the dev instance surfaced.</li>
         </ul>
       </div>

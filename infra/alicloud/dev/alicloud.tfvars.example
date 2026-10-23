@@ -1,0 +1,48 @@
+# Alicloud dev tfvars — copy to alicloud.tfvars and fill in.
+#
+# This is the dev env, NOT prod. Use a dedicated 'Blitzlog Dev' GitHub
+# App + a sandbox repo. See infra/aws/dev/terraform.tfvars.example for
+# the AWS-side analogue.
+
+alicloud_region = "cn-hangzhou"
+
+# VPC and VSwitches: leave vpc_id empty to let the module create a new
+# VPC; supply pre-existing ids to reuse a VPC from another stack. Same
+# for vswitch_ids — if the list is empty, the module creates one
+# VSwitch per AZ.
+vpc_id         = ""
+vswitch_ids    = []
+
+# SSH ingress: empty = no SSH ingress. Add your home/office CIDR here
+# only if you need to debug a stuck ECS instance.
+ssh_allowed_cidrs = []
+
+# GitHub App: use the dedicated dev app (distinct from prod).
+github_app_id              = "REPLACE_ME_dev_app_id"
+github_app_private_key     = "REPLACE_ME_dev_app_private_key_base64"
+github_app_installation_id = "REPLACE_ME_dev_installation_id"
+github_webhook_secret      = "REPLACE_ME_dev_webhook_secret"
+
+# Cloud Monitor alarm email: empty = no email subscription.
+alert_email = ""
+
+# OpenCode: same model as prod is fine, but use a separate API key.
+opencode_model            = "minimax-coding-plan/MiniMax-M3"
+opencode_agent_max_steps  = 500
+opencode_api_key          = "REPLACE_ME_dev_opencode_api_key"
+
+# OSS bucket name for dev agent logs. Must be globally unique across
+# OSS (same constraint as S3). Leave empty to default to
+# blitzlog-dev-agent-logs.
+agent_logs_bucket_name = "blitzlog-dev-agent-logs"
+
+# Whisper STT config.
+stt_api_url            = "http://127.0.0.1:7878/v1"
+stt_api_key            = "placeholder-not-used-by-localhost-shim"
+stt_model              = "base.en"
+stt_language           = "en"
+stt_models_bucket_name = "blitzlog-dev-stt-models"
+
+# ECS preemptible spot instance types. Defaults match the AWS-side
+# `t4g.*` defaults. Override for regions without these instance types.
+spot_instance_types = ["ecs.t6-c1m2.large", "ecs.t6-c1m4.large", "ecs.t6-c1m4.xlarge"]

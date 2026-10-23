@@ -32,7 +32,7 @@ from provider import (
 from provider.aws import AwsCompute
 
 # Fallback used when SPOT_INSTANCE_TYPES_JSON is unset or unparseable. Kept
-# in sync with the default of `var.spot_instance_types` in infra/modules/core
+# in sync with the default of `var.spot_instance_types` in infra/aws/modules/core
 # /variables.tf — Terraform is the source of truth at deploy time; this only
 # protects unit tests and out-of-Lambda callers from a hard failure.
 _DEFAULT_SPOT_INSTANCE_TYPES = AwsCompute._default_spot_instance_types()
@@ -75,7 +75,7 @@ def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
     """Read /blitzlog/<env>/<suffix>; validate; fall back via fallback_getter().
 
     The custom agent AMI is published by the Packer pipelines in
-    infra/packer/ to this SSM parameter. We validate the id is still
+    infra/aws/packer/ to this SSM parameter. We validate the id is still
     launchable via compute.describe_image so a retired/deregistered AMI
     doesn't silently turn every webhook into a 500.
 
@@ -126,7 +126,7 @@ def get_agent_ami() -> str:
     """Read the Packer-built Ubuntu 26.04 arm64 agent AMI id from SSM.
 
     Packer publishes the AMI id to /blitzlog/<env>/agent-ami-id-docker-ubuntu
-    via infra/packer/agent-docker-ubuntu.pkr.hcl. If the SSM param is
+    via infra/aws/packer/agent-docker-ubuntu.pkr.hcl. If the SSM param is
     missing or the AMI is retired, fall back to the Canonical-published
     Ubuntu 26.04 LTS arm64 minimal AMI (the same one Packer uses as
     source_ami_filter).

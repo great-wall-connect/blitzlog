@@ -52,8 +52,12 @@ from bot_pool import (
 from botocore.exceptions import ClientError
 from ec2 import launch_ec2_spot_instance
 from provider import get_secrets
-from scripts.assisted import build_assisted_user_data
-from scripts.autonomous import build_autonomous_user_data
+
+# Issue #126: scripts.{assisted,autonomous} now live under
+# `scripts.{aws,alicloud}/` and are dispatched by `scripts/__init__.py`
+# on the `BLITZLOG_PROVIDER` env var. `from scripts import ...` resolves
+# to the right cloud's `build_*_user_data` at function cold start.
+from scripts import build_assisted_user_data, build_autonomous_user_data
 
 logger.info("blitzlog-agent %s", get_version())
 
@@ -414,7 +418,7 @@ def schedule_next_refresh(
     if not scheduler_role_arn:
         raise RuntimeError(
             "SCHEDULER_ROLE_ARN is not set; cannot build EventBridge "
-            "Scheduler target. Set it in infra/modules/core/lambda.tf."
+            "Scheduler target. Set it in infra/aws/modules/core/lambda.tf."
         )
 
     region = os.environ.get("AWS_REGION") or os.environ.get(

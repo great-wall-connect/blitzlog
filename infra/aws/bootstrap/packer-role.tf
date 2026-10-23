@@ -1,0 +1,200 @@
+# Packer build role for blitzlog AMIs. Both Packer pipelines
+# (infra/aws/packer/agent-docker-ubuntu.pkr.hcl and
+# infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl) run in
+# GitHub Actions via OIDC and assume this role to:
+#   1. Read the source AMI (Canonical Ubuntu 26.04 LTS arm64)
+#   2. Create the AMI (ec2:CreateImage)
+#   3. Write the resulting AMI id to /blitzlog/<env>/agent-ami-id-*
+#   4. Read STT model files from the shared S3 bucket during image baking
+#
+# Trust policy: GitHub Actions OIDC for the great-wall-connect/blitzlog
+# repo. The `sub` claim is matched with StringLike rather than
+# workflow_file_ref + ref constraints, so no workflow path is pinned
+# here — see the trust statement below.
+#
+# The shared `aws_caller_identity.current` and
+# `aws_iam_role.admin_sso` data sources live in
+# infra/aws/bootstrap/data-sources.tf so the deploy role (next door)
+# can reuse them without duplicating the lookup.
+
+locals {
+  github_repo = "great-wall-connect/blitzlog"
+  github_org  = "great-wall-connect"
+}
+
+resource "aws_iam_role" "packer_build" {
+  name        = "blitzlog-packer-build-role"
+  description = "Packer build role for blitzlog agent AMIs (assumed via GitHub OIDC)"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
+          }
+        }
+      },
+      {
+        # Allow the Packer-launched EC2 build VM to assume this role via
+        # its instance profile (infra/aws/packer/agent-docker-ubuntu.pkr.hcl
+        # sets iam_instance_profile = "blitzlog-packer-build-instance-profile").
+        # Without this, the build VM has no AWS credentials and the
+        # `aws s3 cp` of the whisper model fails with
+        # "Unable to locate credentials".
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      },
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = data.aws_iam_role.admin_sso.arn
+        }
+        Action = "sts:AssumeRole"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion" = "ap-east-1"
+          }
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "packer_build" {
+  name = "blitzlog-packer-build-policy"
+  role = aws_iam_role.packer_build.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowEC2ImageCreation"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateImage",
+          "ec2:CopyImage",
+          "ec2:DescribeImages",
+          "ec2:DescribeInstances",
+          "ec2:DescribeSnapshots",
+          "ec2:DescribeRegions",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVolumes",
+          "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
+          "ec2:CreateTags",
+          "ec2:DeleteTags",
+          "ec2:RegisterImage",
+          "ec2:DeregisterImage",
+          "ec2:ModifyImageAttribute",
+          "ec2:CreateSnapshot",
+          "ec2:DeleteSnapshot",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowPassRoleForPackerInstance"
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole",
+        ]
+        Resource = aws_iam_role.packer_build.arn
+      },
+      {
+        Sid    = "AllowReadPackerInstanceProfile"
+        Effect = "Allow"
+        Action = [
+          "iam:GetInstanceProfile",
+        ]
+        Resource = aws_iam_instance_profile.packer_build.arn
+      },
+      {
+        Sid    = "AllowSSMPublishForBothFamilies"
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:DeleteParameter",
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-docker-ubuntu",
+          # Scrummaster AMI (infra/aws/packer/scrummaster-zeroclaw-docker-ubuntu.pkr.hcl),
+          # published by scripts-scrummaster-docker-ubuntu/02-publish-ami-id.sh to
+          # /blitzlog/<env>/agent-ami-id-zeroclaw-docker-ubuntu. Same env-scoped
+          # shape as the agent AMI above, so the existing wildcard pattern would
+          # almost have covered it — the suffix differs, so it needs its own entry.
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/*/agent-ami-id-zeroclaw-docker-ubuntu",
+          # Git author identity (issue #119) for the release.yml
+          # Bump step. The Bump step reads the per-pool
+          # /blitzlog/users/<owner>/git-author/{name,email} params
+          # at commit time so the worker doesn't land commits
+          # under the runner hostname. Same narrow pattern as
+          # the deploy-role's SSMGitAuthorIdentityRead grant in
+          # infra/aws/bootstrap/deploy-role.tf; the packer role needs
+          # it too because the Bump step and the Packer build
+          # share the same OIDC session (single
+          # aws-actions/configure-aws-credentials step). The
+          # params are non-secret String types; the existing
+          # LocalLLM / telegram-token grants under /blitzlog/users/*
+          # are intentionally NOT extended.
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/users/*/git-author/*",
+        ]
+      },
+      {
+        Sid    = "AllowReadingSTTModels"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+        ]
+        Resource = [
+          "${aws_s3_bucket.stt_models.arn}/models/*",
+        ]
+      },
+      {
+        Sid    = "AllowEC2RunInstancesForPacker"
+        Effect = "Allow"
+        Action = [
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:StopInstances",
+          "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "packer_build" {
+  # Instance profile the Packer build VM assumes at launch. Provides
+  # the S3 + SSM credentials that the bake-images.sh and publish.sh
+  # provisioners need (instance role credentials via IMDS).
+  # terraform fmt will realign `name`/`role` to the same column.
+  name = "blitzlog-packer-build-instance-profile"
+  role = aws_iam_role.packer_build.name
+}
+
+output "packer_build_role_arn" {
+  description = "ARN of the blitzlog-packer-build-role. Configure the GitHub OIDC trust in the actions workflow with this ARN."
+  value       = aws_iam_role.packer_build.arn
+}
+
+output "packer_build_instance_profile_arn" {
+  description = "ARN of the blitzlog-packer-build-instance-profile. Packer sources reference this by name (iam_instance_profile)."
+  value       = aws_iam_instance_profile.packer_build.arn
+}

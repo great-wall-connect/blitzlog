@@ -1,2 +1,3 @@
--r lambda/requirements.txt
+-r lambda/requirements-aws.txt
+-r lambda/requirements-alicloud.txt
 -r requirements-dev.txt

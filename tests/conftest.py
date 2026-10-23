@@ -2,10 +2,10 @@
 
 Adds `lambda/` and `lambda/scripts/` to `sys.path` so the package's
 absolute imports (e.g. `from auth import get_github_app_token`,
-`from scripts.autonomous import build_autonomous_user_data`) resolve
-correctly without per-test boilerplate. This matches the layout the
-AWS Lambda runtime uses after Terraform bundles `lambda/` as a
-directory under the zip task root.
+`from scripts.aws.autonomous import build_autonomous_user_data`)
+resolve correctly without per-test boilerplate. This matches the
+layout the AWS Lambda runtime uses after Terraform bundles
+`lambda/` as a directory under the zip task root.
 
 Also pins `BLITZLOG_PROVIDER=aws` so the factory in
 `lambda/provider/__init__.py` loads the AWS implementations by

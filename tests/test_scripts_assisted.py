@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scripts.assisted import build_assisted_user_data
+from scripts.aws.assisted import build_assisted_user_data
 
 
 def _with_env(fn):
@@ -190,7 +190,7 @@ def _extract_blitzlog_env_heredoc(script: str) -> str:
 class TestAssistedEnvFileQuoting(unittest.TestCase):
     """Regression: the heredoc that writes /etc/blitzlog.env is consumed
     by `bash source /etc/blitzlog.env` in the host's watchdog
-    (`infra/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
+    (`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh:26`), BEFORE the
     watchdog rewrites it with a properly-quoted copy. In assisted mode
     the prompt is empty (Telegram supplies it at runtime), but
     `OPENCODE_RESUMED_TITLE` carries the issue's title on a resumed

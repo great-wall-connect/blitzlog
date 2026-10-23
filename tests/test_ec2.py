@@ -240,7 +240,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.autonomous import build_autonomous_user_data
+        from scripts.aws.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -287,7 +287,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.autonomous import build_autonomous_user_data
+        from scripts.aws.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -333,7 +333,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.assisted import build_assisted_user_data
+        from scripts.aws.assisted import build_assisted_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -382,7 +382,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.autonomous import build_autonomous_user_data
+        from scripts.aws.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo",
@@ -427,7 +427,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.autonomous import build_autonomous_user_data
+        from scripts.aws.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data
@@ -456,7 +456,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
     def test_instance_has_environment_tag(self, mock_boto3_client):
         """EC2 instances must carry an `Environment` tag matching the
         Lambda's BLITZLOG_ENV. The ec2_agent_role's `ec2:TerminateInstances`
-        IAM condition (infra/modules/core/iam.tf:178-190) keys on
+        IAM condition (infra/aws/modules/core/iam.tf:178-190) keys on
         `ec2:ResourceTag/Environment = var.environment`; without this tag
         the watchdog's `aws ec2 terminate-instances` fails with
         `UnauthorizedOperation` and the instance waits the full 2-hour EC2
@@ -476,7 +476,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
         mock_s3.put_object.return_value = {}
 
         from ec2 import launch_ec2_spot_instance
-        from scripts.autonomous import build_autonomous_user_data
+        from scripts.aws.autonomous import build_autonomous_user_data
 
         launch_ec2_spot_instance(
             "org/repo", 42, "ghp_testtoken", "autonomous", build_autonomous_user_data
@@ -494,7 +494,7 @@ class TestLaunchEc2SpotInstance(unittest.TestCase):
             env_tag["Value"],
             "prod",
             "Environment tag value must equal BLITZLOG_ENV (set in the Lambda "
-            "env by infra/modules/core/lambda.tf:95) so prod and dev resources "
+            "env by infra/aws/modules/core/lambda.tf:95) so prod and dev resources "
             "are isolated in IAM conditions.",
         )
 

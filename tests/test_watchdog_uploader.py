@@ -1,5 +1,5 @@
 """Behavioural tests for
-``infra/packer/scripts-docker-ubuntu/blitzlog_uploader.sh``.
+``infra/aws/packer/scripts-docker-ubuntu/blitzlog_uploader.sh``.
 
 Issue #123 introduces this library as the single source of truth for
 every host-side S3 verb (watchdog.sh, 03-bake-images.sh, and the
@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIB = REPO_ROOT / "infra/packer/scripts-docker-ubuntu/blitzlog_uploader.sh"
+LIB = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/blitzlog_uploader.sh"
 
 
 # --- the fake aws shim -------------------------------------------------
@@ -355,14 +355,14 @@ def test_library_passes_bash_n() -> None:
 def test_no_aws_s3_calls_outside_the_library() -> None:
     """Acceptance criterion from issue #123:
 
-    > grep -nE '\\baws s3 (cp|rm|ls)\\b' infra/packer/scripts-docker-ubuntu/ lambda/scripts/
+    > grep -nE '\\baws s3 (cp|rm|ls)\\b' infra/aws/packer/scripts-docker-ubuntu/ lambda/scripts/
     > returns no hits outside the new library.
 
     Pinned here so a future contributor adding a stray ``aws s3 cp``
     somewhere fails CI before review.
     """
     targets = [
-        REPO_ROOT / "infra/packer/scripts-docker-ubuntu",
+        REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu",
         REPO_ROOT / "lambda" / "scripts",
     ]
     pattern = re.compile(r"\baws s3 (cp|rm|ls)\b")
