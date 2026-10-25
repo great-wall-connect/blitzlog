@@ -224,6 +224,11 @@ COMMON_ARGS=(
     # inspect` and every same-uid process could read it).
     -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
     -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
+    # Issue #165: the container has no AWS credentials BY DESIGN. This
+    # makes the AWS SDK refuse the instance metadata service as well,
+    # on top of the host-side iptables rule that drops IMDS traffic
+    # from the container's network.
+    -e "AWS_EC2_METADATA_DISABLED=true"
 )
 
 # Mode-specific env vars. We don't reference these outside the
@@ -331,19 +336,62 @@ rm -f /workspace/.shutdown
 # of letting errexit kill the watchdog; the cleanup path runs either
 # way and the script exits with the container's code at the very end.
 CONTAINER_EXIT=0
-sudo docker run --name blitzlog-agent \
-    "${HARDENING_ARGS[@]}" \
-    "${TMPFS_ARGS[@]}" \
-    "${TUNNEL_FLAGS[@]}" \
-    "${COMMON_ARGS[@]}" \
-    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
-    -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro" \
-    -v /workspace:/workspace \
-    -v /var/log/blitzlog:/var/log/blitzlog \
-    "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}" \
-    || CONTAINER_EXIT=$?
 
+# Defense in depth (issue #175): block the instance metadata service
+# from the CONTAINER's network.
+#
+# The container runs as root on the docker bridge, so it can reach
+# 169.254.169.254 and assume the EC2 instance role. That role can
+# read SSM parameters the container must never see — the GitHub App's
+# private key and the webhook secret among them (issue #175) — so
+# "the container has no AWS credentials" is only true while it cannot
+# reach IMDS.
+#
+# DOCKER-USER is only traversed by FORWARDED container traffic, so the
+# HOST's own IMDS access (the watchdog's token + region fetches above)
+# is unaffected.
+#
+# This is FAIL-CLOSED. The first version of this rule was best-effort:
+# it logged a warning and started the agent anyway, so a boundary that
+# was not actually in force looked exactly like one that was — and the
+# gap went unnoticed for a release cycle (issue #175). If the rule
+# cannot be installed, the agent does not start; the cleanup path below
+# still runs, so the instance is not stranded.
+block_imds_from_container() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        log "ERROR: iptables is not available — cannot block IMDS from the container network"
+        return 1
+    fi
+    if iptables -C DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! iptables -I DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1; then
+        log "ERROR: could not install the DOCKER-USER rule that blocks IMDS from the container network"
+        return 1
+    fi
+    return 0
+}
+
+run_agent_container() {
+    sudo docker run --name blitzlog-agent \
+        "${HARDENING_ARGS[@]}" \
+        "${TMPFS_ARGS[@]}" \
+        "${TUNNEL_FLAGS[@]}" \
+        "${COMMON_ARGS[@]}" \
+        -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
+        -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
+        -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro" \
+        -v /workspace:/workspace \
+        -v /var/log/blitzlog:/var/log/blitzlog \
+        "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
+}
+
+if block_imds_from_container; then
+    run_agent_container || CONTAINER_EXIT=$?
+else
+    log "ERROR: refusing to start the agent container — without the IMDS block it could assume the instance role and read SSM parameters it must not see (issue #175)"
+    CONTAINER_EXIT=1
+fi
 # The watcher auto-exits once it sends SIGTERM (the while loop ends
 # when .shutdown appears). If .shutdown was never touched (autonomous
 # mode finished, agent ran to completion), the watcher is still

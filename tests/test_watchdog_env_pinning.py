@@ -220,6 +220,44 @@ class TestWatchdogEnvPinning(unittest.TestCase):
             "assisted-only branch instead.",
         )
 
+    def test_container_cannot_reach_the_instance_metadata_service(self):
+        """Issue #165: the EC2 agent role can now read ANY user's
+        per-user inference credential (/blitzlog/users/*/opencode/*).
+        The container runs as root on the docker bridge and could
+        otherwise reach IMDS and assume that role.
+
+        The watchdog drops IMDS traffic from the container's network
+        (the DOCKER-USER chain only sees FORWARDED container traffic,
+        so the host's own IMDS access is unaffected) and sets
+        AWS_EC2_METADATA_DISABLED for the container as a second layer.
+        """
+        self.assertIn(
+            "169.254.169.254",
+            self.watchdog_src,
+            "watchdog.sh must block the instance metadata service from "
+            "the container's network (issue #165)",
+        )
+        self.assertIn(
+            "DOCKER-USER",
+            self.watchdog_src,
+            "the IMDS block must be installed in the DOCKER-USER chain",
+        )
+        self.assertIn(
+            "AWS_EC2_METADATA_DISABLED=true",
+            self.watchdog_src,
+            "the container must be told that the AWS SDK may not use IMDS",
+        )
+
+    def test_model_selection_vars_reach_the_container(self):
+        """The resolved base URL and the credential path must survive
+        the /etc/blitzlog.env -> docker run -e hop."""
+        for var in ("OPENCODE_BASE_URL", "OPENCODE_API_KEY_SSM_PARAM"):
+            self.assertIn(
+                var,
+                self.unconditional,
+                f"{var} must be passed to the container by the watchdog",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
