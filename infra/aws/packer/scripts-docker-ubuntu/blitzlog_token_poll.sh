@@ -8,8 +8,10 @@
 # EventBridge Scheduler events that re-mint the token every 50 min and
 # overwrite the SecureString at /blitzlog/<env>/ephemeral/github-token-<N>.
 # The chain keeps the token fresh, but the agent in the container is
-# still using the *old* value in /root/.git-credentials.d/github and
-# /root/.config/gh/hosts.yml (both bind-mounted from the host).
+# still using the *old* value in the host's credential files —
+# /root/.git-credentials.d/github and /root/gh-config/<instance>/
+# hosts.yml (both bind-mounted read-only into the container at
+# $HOME/.git-credentials.d/ and $HOME/.config/gh/).
 #
 # This library is sourced by watchdog.sh. The poll loop:
 #   * re-reads the SSM parameter every 5 min

@@ -247,7 +247,7 @@
         <p>At line 109, <code>watchdog.sh</code> reads SSM once:</p>
         <ul>
           <li><code>aws ssm get-parameter --with-decryption</code></li>
-          <li>Writes the token to <code>/root/.git-credentials.d/github</code> (git) and <code>/root/gh-config/&lt;instance&gt;/hosts.yml</code> (gh CLI)</li>
+          <li>Writes the token to <code>/root/.git-credentials.d/github</code> (git) and <code>/root/gh-config/&lt;instance&gt;/hosts.yml</code> (gh CLI) &mdash; the host is the only writer</li>
           <li>Forks the poll loop (Layer 4) into a subshell</li>
         </ul>
       </article>
@@ -262,12 +262,14 @@
           Container
         </div>
         <h3>Bind-mounted credentials</h3>
-        <p>Both files are bind-mounted into the container:</p>
+        <p>Both files are bind-mounted <strong>read-only</strong> into the
+        container, under the agent's unprivileged <code>HOME</code>:</p>
         <ul>
-          <li><code>-v /root/.git-credentials.d:/root/.git-credentials.d</code></li>
-          <li><code>-v /root/gh-config/&lt;instance&gt;:/root/.config/gh</code></li>
+          <li><code>-v /root/.git-credentials.d:$HOME/.git-credentials.d:ro</code></li>
+          <li><code>-v /root/gh-config/&lt;instance&gt;:$HOME/.config/gh:ro</code></li>
         </ul>
-        <p>git and gh read these on every invocation. No restart needed.</p>
+        <p>git and gh read these on every invocation. No restart needed. The
+        agent cannot write them &mdash; the host owns the token.</p>
       </article>
     </div>
   </section>

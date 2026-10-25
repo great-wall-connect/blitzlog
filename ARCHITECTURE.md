@@ -63,9 +63,14 @@ Packer-baked Ubuntu 26.04 with two systemd services:
 
 ### Container (`packages/images/agent/`)
 - **`Dockerfile`** — bakes plugins, tools, and `lib/` helpers into
-  `/root/.config/opencode/{plugins,tools,lib}/`.
-- **`entrypoint.sh`** — configures git credentials, runs `gh auth login` (uses
-  the `GITHUB_TOKEN` env), renders `opencode.json`, boots services.
+  `/opt/blitzlog/opencode/{plugins,tools,lib}/`, creates the
+  unprivileged `blitzlog` user (uid 1000) and declares `USER blitzlog`.
+- **`install-opencode-plugins.sh`** — copies the baked components into the
+  agent's `HOME` (`$HOME/.config/opencode/`) on boot. The HOME is a
+  tmpfs (the rootfs is read-only), so anything baked under `$HOME`
+  would be shadowed.
+- **`entrypoint.sh`** — points git and `gh` at the host's read-only
+  credential mounts, renders `opencode.json`, boots services.
 - **`opencode/plugins/`**:
   - `idle_watchdog` — 5-min autosave, 35-min Telegram ping, 3-h hard shutdown
   - `periodic_autosave` — every 5 min, force-push to
@@ -102,10 +107,11 @@ by the container are visible to the host (and vice versa):
    distinguishes them.
 3. **Single shutdown mechanism** — three flows converge on
    `/workspace/.shutdown`. No parallel SIGTERM paths.
-4. **Git credentials via host-side helper**, not env var. The container
-   inherits `/root/.git-credentials.d/github` from the host's Packer setup;
-   `GITHUB_TOKEN` is set in env only long enough for `gh auth login` to
-   consume, then unset.
+4. **Git credentials via host-side helper**, not env var. The host owns
+   the credential files and bind-mounts them **read-only** into the
+   container at `$HOME/.git-credentials.d/github` and
+   `$HOME/.config/gh/hosts.yml`; the token is not passed to the container
+   as an env var at all.
 
 ## Rebuilding the diagram
 

@@ -848,7 +848,7 @@ When local is configured, the bootstrap script:
 - **Does not** render the `minimax-coding-plan` provider block in `opencode.json`. There is no cloud provider to address.
 - **Defensively** unsets `OPENCODE_API_KEY`, `HTTPS_PROXY`, and `HTTP_PROXY` at startup. A root-level agent can re-introduce these, but the path of least resistance is closed.
 
-> **Residual risk**: an agent with root on the EC2 instance can rewrite `~/.config/opencode/opencode.json` and re-introduce a cloud provider block. This PR reduces the attack surface but does not eliminate it. A follow-up issue adds an `nftables` egress lockdown to close the remaining network path.
+> **Residual risk**: an agent could rewrite its own `opencode.json` and re-introduce a cloud provider block. Since issue #164 the agent runs as an unprivileged uid (`blitzlog`, 1000) inside a container with a read-only rootfs, so it can no longer rewrite the binaries it runs and can only write to an explicit list of paths (see `docs/DOCKER.md`). The remaining network path is closed separately by the `nftables` egress lockdown tracked in [#38](https://github.com/great-wall-connect/blitzlog/issues/38).
 
 ### Transports — keep the tunnel up all the time
 
@@ -1256,7 +1256,7 @@ sudo tail -50 /var/log/whisper-stt-shim.log
 
 ## OpenCode configuration
 
-The agent writes an `opencode.json` to `~/.config/opencode/opencode.json` on the EC2 instance, configuring the inference provider and model. Supply via `terraform.tfvars`:
+The agent writes an `opencode.json` to `$HOME/.config/opencode/opencode.json` inside the container (`$HOME` is `/home/blitzlog` — the agent runs as an unprivileged user, see `docs/DOCKER.md`), configuring the inference provider and model. Supply via `terraform.tfvars`:
 
 ```hcl
 opencode_model   = "<provider>/<model>"
