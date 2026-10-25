@@ -321,6 +321,20 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
           # Per-user local LLM config is env-independent — same Mac mini, same
           # endpoint, used by both prod and dev EC2 instances.
           "arn:aws:ssm:*:*:parameter/blitzlog/users/*/local-llm/*",
+          # Per-user OpenCode model + credential (issue #165). The
+          # instance reads the buyer's own inference credential from
+          # here when they supplied one — that is the whole point of
+          # the BYOK story.
+          #
+          # TRUST NOTE: the grant is `users/*`, not per-run, so an
+          # instance running one user's task can read ANY user's
+          # opencode credential. That is the same posture as the
+          # local-llm grant above, and it is why the agent process
+          # must not be able to reach the instance metadata service
+          # (the watchdog blocks IMDS from the container's bridge) and
+          # why issue #164 (non-root container, dropped capabilities,
+          # read-only rootfs) is the containment mechanism.
+          "arn:aws:ssm:*:*:parameter/blitzlog/users/*/opencode/*",
           # Per-user git author identity (issue #119). Same broad
           # `users/*/git-author/*` shape as the local-llm grant
           # above — narrow enough to exclude the telegram bot

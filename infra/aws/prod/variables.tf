@@ -56,6 +56,28 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "opencode_api_key_provider" {
+  description = "The provider the OpenCode inference credential belongs to (e.g. anthropic). Defaults to the provider prefix of opencode_model. Issue #165: a credential is only ever used with a model whose provider matches it."
+  type        = string
+  default     = ""
+}
+
+variable "opencode_model_profiles" {
+  description = "Alias -> model profile, selectable per task via the 'model:<alias>' issue label (issue #165). Only register aliases you are happy to expose to anyone who can label an issue."
+  type = map(object({
+    model    = string
+    base_url = optional(string)
+    provider = optional(string)
+  }))
+  default = {}
+}
+
+variable "opencode_allowed_providers" {
+  description = "Providers a raw 'model:<provider>/<model>' label value may name (issue #165). Empty means raw labels are rejected and only operator-registered aliases are selectable."
+  type        = list(string)
+  default     = []
+}
+
 variable "opencode_agent_max_steps" {
   description = "Max agentic iterations per opencode session for prod agents. Same semantics as the module-level variable — when hit, opencode forces summarization."
   type        = number

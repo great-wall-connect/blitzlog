@@ -153,6 +153,16 @@ resource "aws_lambda_function" "handler" {
       EC2_INSTANCE_PROFILE_NAME = aws_iam_instance_profile.ec2_agent_profile.name
       OPENCODE_MODEL            = var.opencode_model
       OPENCODE_AGENT_MAX_STEPS  = tostring(var.opencode_agent_max_steps)
+      # Issue #165: the provider the org credential belongs to. A
+      # credential is only ever used with a model whose provider
+      # matches it. Empty -> the provider prefix of OPENCODE_MODEL.
+      OPENCODE_API_KEY_PROVIDER = var.opencode_api_key_provider
+      # Issue #165: the operator's model-profile allowlist and the
+      # approved-provider list for raw 'model:<provider>/<model>'
+      # labels. JSON-encoded so a single env var can carry them (the
+      # same shape as SPOT_INSTANCE_TYPES_JSON below).
+      OPENCODE_MODEL_PROFILES    = jsonencode(var.opencode_model_profiles)
+      OPENCODE_ALLOWED_PROVIDERS = jsonencode(var.opencode_allowed_providers)
       S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
       # JSON-encoded so a single env var can carry the ordered list; the Lambda
       # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
