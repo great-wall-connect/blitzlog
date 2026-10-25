@@ -48,6 +48,15 @@ sudo chmod 0755 /usr/local/bin/blitzlog_uploader.sh
 sudo cp /tmp/blitzlog-token-poll.sh /usr/local/bin/blitzlog_token_poll.sh
 sudo chmod 0755 /usr/local/bin/blitzlog_token_poll.sh
 
+# Install the canonical container-hardening contract (issue #164).
+# Sourced by watchdog.sh at boot so the container it launches carries
+# the hardening flags (--security-opt=no-new-privileges:true,
+# --cap-drop=ALL, --pids-limit, --init) and the one documented
+# Tailscale capability exemption. The file is plain KEY=value data, so
+# 0644 is enough — the watchdog runs as root and reads it.
+sudo cp /tmp/blitzlog-container-hardening.env /usr/local/bin/container-hardening.env
+sudo chmod 0644 /usr/local/bin/container-hardening.env
+
 # systemd unit that runs the watchdog on instance start. The watchdog
 # runs the blitzlog-agent container, waits for it to exit, then does
 # all AWS cleanup (S3 upload + EC2 terminate + bot-lock release).

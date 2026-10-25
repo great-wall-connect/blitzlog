@@ -34,10 +34,29 @@ source /usr/local/bin/blitzlog_uploader.sh
 # initial token write below so the same `_bl_tokenpoll_write_*`
 # helpers are used at startup and on every subsequent refresh.
 source /usr/local/bin/blitzlog_token_poll.sh
+# Issue #164: the canonical container-hardening contract (dropped
+# capabilities, no-new-privileges, pids-limit, init, and the one
+# documented Tailscale capability exemption). Sourced from the AMI —
+# the Packer `file` provisioner uploads it and 02-systemd.sh copies it
+# to /usr/local/bin/. The contract file itself is POSIX (no arrays, no
+# bashisms) so the mise dev tasks can source it under /bin/sh too.
+#
+# `set -euo pipefail` is already in effect: if the contract file is
+# missing from the AMI, this `source` fails and the watchdog aborts
+# BEFORE the container starts. Fail-closed and loud — a container that
+# silently ran without its hardening flags would be far worse.
+source /usr/local/bin/container-hardening.env
 export HOME=/root
 
 LOG_FILE="/var/log/backend-bootstrap.log"
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"; }
+
+# Issue #164: expand the hardening contract into bash arrays we can
+# splat into `docker run`. `read -r -a` is a bashism, which is fine —
+# the watchdog is #!/bin/bash. (The contract FILE stays POSIX so the
+# mise dev tasks can source it under /bin/sh.)
+read -r -a HARDENING_ARGS <<<"$BLITZLOG_HARDENING_FLAGS"
+read -r -a TAILSCALE_ARGS <<<"$BLITZLOG_TAILSCALE_FLAGS"
 
 # Load the baked agent image
 sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
@@ -187,14 +206,30 @@ if [ "$MODE" = "assisted" ]; then
     )
 fi
 
-# Tailscale needs CAP_NET_ADMIN (to write iptables rules) and a TUN
-# device (for the wireguard tunnel). Both are only needed when
-# TAILSCALE_AUTH_KEY is set, since tailscaled only runs in that case.
-# Build a conditional array — least privilege means we don't grant
-# capabilities the container doesn't use.
+# Tailscale needs CAP_NET_ADMIN (to create and configure the WireGuard
+# interface), CAP_NET_RAW (for `tailscale ping`'s ICMP probes) and the
+# /dev/net/tun character device (for the tunnel itself).
+#
+# This is the ONE and ONLY relaxation of --cap-drop=ALL in the whole
+# project, and it is granted ONLY when TAILSCALE_AUTH_KEY is set —
+# i.e. only on runs that actually enrol in a Tailnet. Every other run
+# gets --cap-drop=ALL and nothing else.
+#
+# The flags come from the canonical contract
+# (packages/images/agent/container-hardening.env) so the dev tasks in
+# mise.toml grant exactly the same exemption.
+#
+# Passing --device /dev/net/tun is what makes the in-container join
+# actually work. Before issue #164 the capability flags were passed
+# WITHOUT the device and `tailscaled` was started without
+# --tun=userspace-networking, so the join could never establish a
+# tunnel — it logged "WARNING: tailscale up failed" and the local-LLM
+# preflight failed over to cloud. The host-side counterpart is
+# 01-system.sh, which loads the `tun` module and creates
+# /dev/net/tun on the AMI.
 TUNNEL_FLAGS=()
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
-    TUNNEL_FLAGS=(--cap-add=NET_ADMIN --cap-add=NET_RAW)
+    TUNNEL_FLAGS=("${TAILSCALE_ARGS[@]}")
 fi
 
 # Host-side .shutdown watcher. Mirrors the local mise.toml
@@ -247,6 +282,7 @@ fi
 rm -f /workspace/.shutdown
 
 sudo docker run --name blitzlog-agent \
+    "${HARDENING_ARGS[@]}" \
     "${TUNNEL_FLAGS[@]}" \
     "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
