@@ -38,10 +38,50 @@ echo "==> checking entrypoint syntax"
 # the regression caught in PR #89.
 sh -n /usr/local/bin/entrypoint.sh
 bash -n /usr/local/bin/entrypoint.sh
+sh -n /usr/local/bin/install-opencode-plugins.sh
+
+echo "==> checking the container does NOT run as root"
+# Issue #164: the agent container runs as an unprivileged uid. The
+# image's USER directive sets it to `blitzlog` (uid 1000); this
+# assertion is the runtime proof, so a Dockerfile that loses its USER
+# directive fails here rather than silently running the agent as root.
+AGENT_UID=$(id -u)
+if [ "$AGENT_UID" = "0" ]; then
+  echo "FAIL: the container is running as root (uid 0)"
+  exit 1
+fi
+echo "running as uid $AGENT_UID ($(id -un))"
+
+echo "==> checking the agent's HOME is writable"
+# HOME is a tmpfs (the rootfs is read-only), so the agent can write
+# its global git config, mise's toolchain, the npm cache and opencode's
+# config + state — and nothing else.
+test -w "$HOME" \
+  || { echo "FAIL: HOME ($HOME) is not writable"; exit 1; }
+echo "HOME=$HOME is writable"
+
+echo "==> checking the baked opencode components land in HOME"
+# The components are baked into /opt/blitzlog/opencode (NOT under
+# $HOME — HOME is a tmpfs and would shadow them) and copied into
+# $HOME/.config/opencode by install-opencode-plugins.sh, which the
+# entrypoint also calls. Running it here proves the copy works for an
+# unprivileged user.
+for d in plugins tools lib; do
+  test -d "/opt/blitzlog/opencode/$d" \
+    || { echo "missing baked component /opt/blitzlog/opencode/$d"; exit 1; }
+done
+/usr/local/bin/install-opencode-plugins.sh
+for d in plugins tools lib; do
+  test -d "$HOME/.config/opencode/$d" \
+    || { echo "missing $HOME/.config/opencode/$d"; exit 1; }
+done
 
 echo "==> checking expected dirs"
-for d in /opt/whisper-stt/models /opt/blitzlog/plugins /workspace /var/log; do
-  mkdir -p "$d"
+# Assert existence — do NOT mkdir. The container's rootfs is read-only,
+# so creating a missing directory here would fail with EROFS; a missing
+# directory is the bug we want to report, not paper over.
+for d in /opt/whisper-stt/models /opt/blitzlog/opencode /workspace /var/log; do
+  test -d "$d" || { echo "missing dir: $d"; exit 1; }
 done
 
 echo "smoke-test: all checks passed"

@@ -57,6 +57,7 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FI
 # mise dev tasks can source it under /bin/sh.)
 read -r -a HARDENING_ARGS <<<"$BLITZLOG_HARDENING_FLAGS"
 read -r -a TAILSCALE_ARGS <<<"$BLITZLOG_TAILSCALE_FLAGS"
+read -r -a TMPFS_ARGS <<<"$BLITZLOG_TMPFS_MOUNTS"
 
 # Load the baked agent image
 sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
@@ -69,6 +70,17 @@ sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
 # own exit-detection logic.
 mkdir -p /workspace/.blitzlog
 touch /workspace/.idle
+
+# Issue #164: the container runs as an unprivileged uid
+# (BLITZLOG_CONTAINER_UID, see the hardening contract). A bind mount
+# preserves the SOURCE's ownership, so the host paths the container
+# writes to must be owned by that uid — otherwise the agent's first
+# write fails with EACCES and the entrypoint aborts under `set -e`.
+#
+# The chown covers /workspace itself (the container clones the repo
+# there) plus the pre-created markers above (the container re-touches
+# /workspace/.idle on every start).
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /workspace
 
 # Compute IMDSv2 token + region + instance id (host AWS creds via role)
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' \
@@ -132,14 +144,18 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
         --output text \
         --region "$REGION" 2>/dev/null || echo "")
     if [ -n "$GITHUB_TOKEN" ]; then
-        # Issue #145: pre-create the per-instance /root/.config/gh
+        # Issue #145: pre-create the per-instance gh-config
         # bind-mount point so the path exists when docker starts
         # (the bind mount's host side must exist or docker creates
         # it as root and the container's `gh auth login` writes
-        # cannot be made world-readable). The container's
-        # `gh auth login --with-token` (entrypoint.sh:85-86) still
-        # does the initial write here — the watchdog's poll loop
-        # overwrites this file on every subsequent refresh.
+        # cannot be made world-readable).
+        #
+        # Issue #164: the HOST is now the only writer of these two
+        # files. They are mounted READ-ONLY into the container, so
+        # the agent cannot tamper with the host's copy, and the
+        # watchdog's poll loop overwrites them on every subsequent
+        # refresh. The container-side `gh auth login` is therefore
+        # only a local-dev fallback (see entrypoint.sh).
         mkdir -p "/root/gh-config/${INSTANCE_ID}"
         mkdir -p /root/.git-credentials.d
         # The library helpers are the single source of truth for
@@ -152,6 +168,14 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
             "/root/gh-config/${INSTANCE_ID}/hosts.yml"
         git config --global credential.helper \
             'store --file /root/.git-credentials.d/github'
+        # Issue #164: hand the credential files to the container's
+        # unprivileged uid. A bind mount preserves the source's
+        # ownership, so a root-owned 0600 file would be unreadable
+        # from inside the container. The poll loop's rewrites
+        # truncate these files in place, so the ownership survives
+        # every refresh.
+        chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \
+            /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"
     fi
 fi
 
@@ -165,6 +189,13 @@ echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> /etc/blitzlog.env
 # accessible to the watchdog after the container exits.
 mkdir -p /var/log/blitzlog
 mkdir -p /workspace
+
+# Issue #164: the container runs as an unprivileged uid and its rootfs
+# is read-only, so every host path it writes to has to be owned by
+# that uid. /var/log/blitzlog holds the container's logs (the watchdog
+# uploads them to S3 after the run). /workspace was already chowned
+# above, right after its marker files were created.
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /var/log/blitzlog
 
 # Common env vars (passed to every container launch).
 COMMON_ARGS=(
@@ -186,7 +217,11 @@ COMMON_ARGS=(
     -e "SESSION_ARCHIVE_BUCKET=$SESSION_ARCHIVE_BUCKET"
     -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
     -e "S3_LOG_PREFIX=$S3_LOG_PREFIX"
-    -e "GITHUB_TOKEN=$GITHUB_TOKEN"
+    # Issue #164: GITHUB_TOKEN is deliberately NOT passed to the
+    # container. The host owns the credential files and mounts them
+    # READ-ONLY, so the agent gets its credentials without the token
+    # ever appearing in the container's environment (where `docker
+    # inspect` and every same-uid process could read it).
     -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
     -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
 )
@@ -281,13 +316,20 @@ fi
 # tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
 rm -f /workspace/.shutdown
 
+# Issue #164: the credential files are owned by the HOST and mounted
+# READ-ONLY (see the comment on the chown above). The container's uid
+# can read them but cannot write them, so the agent cannot tamper with
+# the host's copy of the token. The container's HOME is a tmpfs (see
+# TMPFS_ARGS above), so the two credential paths are bind-mounted
+# INSIDE it.
 sudo docker run --name blitzlog-agent \
     "${HARDENING_ARGS[@]}" \
+    "${TMPFS_ARGS[@]}" \
     "${TUNNEL_FLAGS[@]}" \
     "${COMMON_ARGS[@]}" \
     -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v /root/.git-credentials.d:/root/.git-credentials.d \
-    -v "/root/gh-config/${INSTANCE_ID}:/root/.config/gh" \
+    -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
+    -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro" \
     -v /workspace:/workspace \
     -v /var/log/blitzlog:/var/log/blitzlog \
     "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"

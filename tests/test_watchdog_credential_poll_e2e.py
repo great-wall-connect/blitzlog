@@ -260,11 +260,11 @@ def test_watchdog_poll_loop_start_args_match_container_bind_mounts() -> None:
               initial token to)
       arg 2 — region (the same one IMDS returned at line 59-62)
       arg 3 — git-credential file path (matches `-v
-              /root/.git-credentials.d:/root/.git-credentials.d`
-              at watchdog.sh:253)
+              /root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/
+              .git-credentials.d:ro`)
       arg 4 — gh hosts.yml path on the host (matches `-v
-              /root/gh-config/${INSTANCE_ID}:/root/.config/gh`
-              at watchdog.sh:254)
+              /root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}
+              /.config/gh:ro`)
       arg 5 — poll interval, defaulted via
               ``${BLITZLOG_TOKEN_POLL_INTERVAL:-300}``
 
@@ -298,31 +298,38 @@ def test_watchdog_poll_loop_start_args_match_container_bind_mounts() -> None:
 
 
 def test_watchdog_bind_mount_gh_config_source_matches_write_path() -> None:
-    """The host-side ``-v /root/gh-config/${INSTANCE_ID}:/root/.config/gh``
-    bind mount at ``watchdog.sh:254`` is the bridge between
-    ``_bl_tokenpoll_write_gh_hosts_yml`` (which writes to
-    ``/root/gh-config/${INSTANCE_ID}/hosts.yml``) and the
-    container's ``gh auth login`` (which writes to
-    ``/root/.config/gh/hosts.yml``). If the source ever stops
-    matching the write path, the poll loop will rewrite a file
-    the container never reads.
+    """The host-side ``-v /root/gh-config/${INSTANCE_ID}:
+    ${BLITZLOG_CONTAINER_HOME}/.config/gh:ro`` bind mount is the bridge
+    between ``_bl_tokenpoll_write_gh_hosts_yml`` (which writes to
+    ``/root/gh-config/${INSTANCE_ID}/hosts.yml``) and the container's
+    gh CLI (which reads ``$HOME/.config/gh/hosts.yml``). If the source
+    ever stops matching the write path, the poll loop will rewrite a
+    file the container never reads.
 
-    The git-credential bind mount at line 253 is the same shape
-    (host path = container path), so it's self-consistent by
-    construction — no drift surface to test.
+    Issue #164 changed the container-side half of the mount: the
+    container no longer runs as root, so its HOME moved to
+    ``$BLITZLOG_CONTAINER_HOME`` (``/home/blitzlog``). The HOST-side
+    half is unchanged — it is still the host's ``/root/gh-config``.
+
+    The mount is also READ-ONLY now: the host is the only writer of
+    the credential files, so the agent cannot tamper with the host's
+    copy of the token.
     """
     src = _strip_comments_and_continuations(_read(WATCHDOG))
 
     # The bind mount is the one with `gh-config` in the source
-    # half of the `:`. The container-side `/root/.config/gh`
-    # must be the dest.
-    pattern = r'-v\s*"/root/gh-config/\$\{INSTANCE_ID\}:/root/\.config/gh"'
+    # half of the `:`. The container-side `${BLITZLOG_CONTAINER_HOME}
+    # /.config/gh` must be the dest, and the mount must be `:ro`.
+    pattern = (
+        r'-v\s*"/root/gh-config/\$\{INSTANCE_ID\}'
+        r':\$\{BLITZLOG_CONTAINER_HOME\}/\.config/gh:ro"'
+    )
     assert re.search(pattern, src), (
         "watchdog.sh's gh-config bind mount does not map "
         "/root/gh-config/${INSTANCE_ID} (host) onto "
-        "/root/.config/gh (container). The poll loop's "
-        "rewrites of hosts.yml would land on a path the "
-        "container never reads."
+        "${BLITZLOG_CONTAINER_HOME}/.config/gh (container), read-only. "
+        "The poll loop's rewrites of hosts.yml would land on a path "
+        "the container never reads."
     )
 
 

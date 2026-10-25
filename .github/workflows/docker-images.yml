@@ -36,6 +36,12 @@ jobs:
       OWNER: great-wall-connect
       # Default to "latest" for dispatch; PR runs don't reference this.
       IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+      # The tag the image was actually built under. The PR build pushes
+      # no image but still loads one locally under a `pr-N` tag; the
+      # dispatch build pushes under IMAGE_TAG. The smoke-test step
+      # below needs the real tag, and step-level `env` does not
+      # propagate between steps — hence job level.
+      BUILT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || format('pr-{0}', github.event.pull_request.number) }}
 
     steps:
       - name: Checkout
@@ -87,3 +93,20 @@ jobs:
           docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}' \
             | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 2.0) { print "REJECTED (too big): " $0; exit 1 } }'
           echo "Image size OK"
+
+      # Issue #164: the image must boot as a non-root user, with a
+      # read-only rootfs and only the documented writable paths. The
+      # smoke test asserts the runtime uid and that the baked opencode
+      # components land in the agent's HOME — a static test cannot
+      # prove either, so the container is actually run here.
+      #
+      # The flags come from the canonical hardening contract, so CI
+      # exercises exactly the posture production uses.
+      - name: Smoke test under the hardening flags
+        run: |
+          . packages/images/agent/container-hardening.env
+          docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS \
+            --entrypoint="" \
+            -v "$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro" \
+            "${REGISTRY}/${OWNER}/${IMAGE_NAME}:${BUILT_TAG}" \
+            sh /smoke-test.sh
