@@ -12,6 +12,7 @@ second network fetch from inside the EC2 instance.
 
 import logging
 import os
+import re
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -136,6 +137,39 @@ def ephemeral_token_ssm_param(repo: str, issue: int) -> str:
 # has one Telegram bot pool and one local LLM endpoint, not one per env.
 # Both prod and dev Lambda instances read from this single namespace.
 BOT_POOL_SSM_PATH = "/blitzlog/users"
+
+# A GitHub login is `[A-Za-z0-9-]`, 39 characters max. The login is
+# interpolated into secret-store paths AND into the EC2 user-data bash
+# script (the `TELEGRAM_SENDER_LOGIN` / git-author blocks), so it is
+# validated before it reaches either. GitHub only ever sends valid
+# logins; this is defence in depth against a forged webhook payload.
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+
+
+def is_valid_login(login: str) -> bool:
+    """True when `login` is shaped like a GitHub login and is safe to
+    interpolate into a secret-store path or a shell script.
+    """
+    return bool(login) and bool(_LOGIN_RE.match(login))
+
+
+def opencode_api_key_param(login: str = "") -> str:
+    """Server-derived path of the OpenCode API-key parameter.
+
+    The path is NEVER user-supplied text: it is built from the
+    validated login (or from the env-scoped org root when no login is
+    given). The Lambda resolves this path and hands it to the EC2
+    host, which fetches the key — the Lambda never holds key
+    material.
+
+    `login` empty -> the org credential, `/blitzlog/<env>/opencode/api-key`.
+    `login` set   -> the per-user credential, `/blitzlog/users/<login>/opencode/api-key`.
+    """
+    if login:
+        if not is_valid_login(login):
+            raise ValueError(f"invalid login for a secret path: {login!r}")
+        return f"{BOT_POOL_SSM_PATH}/{login}/opencode/api-key"
+    return f"{SSM_PATH}/opencode/api-key"
 
 
 def _load_shim_source() -> str:

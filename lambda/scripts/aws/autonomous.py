@@ -51,6 +51,9 @@ def build_autonomous_user_data(
     sender_login: str = "",
     sender_id: str = "",
     local_llm: dict | None = None,
+    opencode_model: str | None = None,
+    opencode_base_url: str = "",
+    opencode_api_key_ssm_param: str = "",
 ) -> str:
     prompt = (
         f"Work on GitHub issue #{issue_number}. Follow AGENTS.md for branch naming, "
@@ -62,7 +65,11 @@ def build_autonomous_user_data(
     base_opencode_model = os.environ.get(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
-    opencode_model = local_llm["model"] if local_llm else base_opencode_model
+    # `opencode_model` is the RESOLVED model (issue #165): the task
+    # label, the per-user default, or the org default — whichever won.
+    # `local_llm["model"]` still wins over all three (the local LLM
+    # keeps its top precedence).
+    opencode_model = local_llm["model"] if local_llm else (opencode_model or base_opencode_model)
     env = _blitzlog_env()
     s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
     s3_log_prefix = s3_archive_prefix
@@ -94,9 +101,11 @@ def build_autonomous_user_data(
         git_identity_env=git_identity_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=prompt,
+        opencode_base_url=opencode_base_url,
+        opencode_api_key_ssm_param=opencode_api_key_ssm_param,
     )
 
-    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_ssm_script(sender_login)}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm), api_key_ssm_param=opencode_api_key_ssm_param)}{_read_git_identity_ssm_script(sender_login)}
 
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
@@ -138,8 +147,18 @@ S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 S3_LOG_PREFIX="{s3_log_prefix}"
-OPENCODE_API_KEY="${{OPENCODE_API_KEY}}"
+# The credential itself is resolved by the HOST from the path below
+# (issue #165). The `:-` default keeps the heredoc safe under
+# `set -u` when a local LLM is configured and no cloud key is fetched.
+OPENCODE_API_KEY="${{OPENCODE_API_KEY:-}}"
 OPENCODE_MODEL="${{OPENCODE_MODEL}}"
+# The resolved base URL of a BYO / self-hosted endpoint (empty for a
+# built-in provider). The container renders it as the provider's
+# `options.baseURL` together with a `models` map.
+OPENCODE_BASE_URL="${{OPENCODE_BASE_URL:-}}"
+# The server-derived secret-store path the host reads the API key
+# from. Never user-supplied text.
+OPENCODE_API_KEY_SSM_PARAM="${{OPENCODE_API_KEY_SSM_PARAM:-}}"
 OPENCODE_PROMPT="${{OPENCODE_PROMPT:-}}"
 LOCAL_LLM_ENDPOINT="${{LOCAL_LLM_ENDPOINT:-}}"
 LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"

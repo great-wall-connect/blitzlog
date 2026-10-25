@@ -36,7 +36,13 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import boto3
-from _env import ephemeral_token_ssm_param, logger
+from _env import (
+    _blitzlog_provider,
+    ephemeral_token_ssm_param,
+    is_valid_login,
+    logger,
+    opencode_api_key_param,
+)
 from _version import get_version
 from auth import (
     get_github_app_token,
@@ -47,10 +53,17 @@ from bot_pool import (
     _update_lock_instance_id,
     acquire_bot_token,
     get_local_llm_config,
+    get_opencode_profile,
     get_telegram_user_id,
 )
 from botocore.exceptions import ClientError
 from ec2 import launch_ec2_spot_instance
+from model_select import (
+    ModelSelectionError,
+    load_allowed_providers,
+    load_model_profiles,
+    resolve_selection,
+)
 from provider import get_secrets
 
 # Issue #126: scripts.{assisted,autonomous} now live under
@@ -201,6 +214,17 @@ def lambda_handler(event, context):
     sender_login = event_data.get("sender_login", "")
     sender_id = event_data.get("sender_id", "")
 
+    # The login is interpolated into secret-store paths and into the
+    # EC2 user-data bash script, so it is validated before it reaches
+    # either. GitHub only sends valid logins; this is defence in
+    # depth against a forged webhook payload.
+    if sender_login and not is_valid_login(sender_login):
+        logger.error("Rejecting request: invalid sender login %r", sender_login)
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": "Invalid sender login"}),
+        }
+
     try:
         github_token = get_github_app_token(repo_full_name)
     except Exception as e:  # noqa: BLE001
@@ -264,7 +288,75 @@ def lambda_handler(event, context):
             )
             local_llm = None
 
+    # --- Model + credential resolution (issue #165) -----------------------
+    #
+    # Three levels of model selection (task label > per-user default >
+    # org default) and two levels of credential (per-user > org), bound
+    # by the rule that a credential is only ever used with a model
+    # whose provider matches.
+    #
+    # The local LLM keeps its current TOP precedence — it wins outright
+    # and the chain below does not apply, so existing local-LLM users
+    # see no behaviour change.
+    #
+    # A resolution failure is a CONFIGURATION failure, not a transient
+    # one: fail the webhook fast with an explicit message and launch
+    # nothing. A spot instance that boots with a mismatched
+    # model/credential pair would burn money to deliver the same
+    # message from inside the container.
+    selection = None
+    if _blitzlog_provider() == "aws" and not local_llm:
+        user_profile = None
+        if sender_login:
+            try:
+                user_profile = get_opencode_profile(sender_login)
+            except (ClientError, ValueError, OSError) as e:
+                logger.warning(
+                    "Failed to read the opencode profile for %s: %s", sender_login, e
+                )
+                user_profile = None
+        try:
+            selection = resolve_selection(
+                labels=labels,
+                org_model=os.environ.get(
+                    "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
+                ),
+                org_credential_provider=os.environ.get("OPENCODE_API_KEY_PROVIDER", ""),
+                org_credential_path=opencode_api_key_param(),
+                user_profile=user_profile,
+                user_credential_path=opencode_api_key_param(sender_login),
+                profiles=load_model_profiles(),
+                allowed_providers=load_allowed_providers(),
+                user_login=sender_login,
+            )
+        except ModelSelectionError as e:
+            logger.error(
+                "Model/credential resolution failed for %s#%s: %s",
+                repo_full_name,
+                issue_number,
+                e,
+            )
+            return {
+                "statusCode": 422,
+                "body": json.dumps({"error": str(e)}),
+            }
+        for warning in selection.warnings:
+            logger.warning("Model selection: %s", warning)
+        logger.info(
+            "Resolved model=%s provider=%s source=%s credential=%s",
+            selection.model,
+            selection.provider,
+            selection.source,
+            selection.credential_path,
+        )
+
     def _builder(repo, issue_number, sender_login="", sender_id=""):
+        kwargs = {
+            "local_llm": local_llm,
+            "opencode_model": selection.model if selection else None,
+            "opencode_base_url": selection.base_url if selection else "",
+            "opencode_api_key_ssm_param": selection.credential_path if selection else "",
+        }
         if mode == "assisted":
             return builder(
                 repo,
@@ -274,9 +366,9 @@ def lambda_handler(event, context):
                 bot_name=bot_name,
                 bot_token=bot_token,
                 telegram_user_id=telegram_user_id,
-                local_llm=local_llm,
+                **kwargs,
             )
-        return builder(repo, issue_number, sender_login, sender_id, local_llm=local_llm)
+        return builder(repo, issue_number, sender_login, sender_id, **kwargs)
 
     try:
         instance_id = launch_ec2_spot_instance(
