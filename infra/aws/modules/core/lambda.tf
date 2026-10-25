@@ -176,10 +176,6 @@ resource "aws_lambda_function" "handler" {
     aws_cloudwatch_log_group.lambda_log_group,
     null_resource.lambda_build,
   ]
-
-  lifecycle {
-    ignore_changes = [last_modified]
-  }
 }
 
 resource "aws_cloudwatch_log_group" "lambda_log_group" {
