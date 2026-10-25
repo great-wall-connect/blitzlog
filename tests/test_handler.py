@@ -892,5 +892,208 @@ class TestRefreshWireIntegration(unittest.TestCase):
         mock_schedule.assert_called_once()
 
 
+class TestModelSelectionWebhook(unittest.TestCase):
+    """Issue #165: the webhook resolves the model + credential per
+    run and fails fast (422) when the combination cannot be honoured
+    safely — before any EC2 instance is launched.
+    """
+
+    def _event(self, labels):
+        return {
+            "body": json.dumps(
+                {
+                    "action": "labeled",
+                    "issue": {
+                        "number": 165,
+                        "labels": [{"name": name} for name in labels],
+                    },
+                    "repository": {"full_name": "octocat/Hello-World"},
+                    "sender": {"login": "octocat", "id": "1"},
+                }
+            ),
+            "headers": {"x-hub-signature-256": "sha256=abc"},
+        }
+
+    def _run(self, labels, user_profile=None, env=None):
+        """Run the handler with the model-selection plumbing mocked
+        out. Returns (result, mock_launch, mock_get_profile)."""
+        from handler import lambda_handler
+
+        patches = [
+            patch("handler.schedule_next_refresh"),
+            patch("handler.launch_ec2_spot_instance", return_value="i-abc"),
+            patch("handler.get_github_app_token", return_value="ghp_test"),
+            patch("handler.verify_github_signature", return_value=True),
+            patch("handler.get_ssm_param", return_value="secret"),
+            patch("handler.get_local_llm_config", return_value=None),
+            patch("handler.get_opencode_profile", return_value=user_profile),
+        ]
+        started = [p.start() for p in patches]
+        try:
+            with patch.dict(os.environ, env or {}):
+                result = lambda_handler(self._event(labels), None)
+        finally:
+            for p in patches:
+                p.stop()
+        return result, started[1], started[6]
+
+    def test_org_default_when_nothing_is_configured(self):
+        result, mock_launch, _ = self._run(["autonomous"])
+        self.assertEqual(result["statusCode"], 200)
+        mock_launch.assert_called_once()
+
+    def test_model_label_selects_the_model(self):
+        env = {
+            "OPENCODE_MODEL_PROFILES": json.dumps(
+                {"cheap": {"model": "minimax-coding-plan/MiniMax-M2"}}
+            ),
+            "OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3",
+        }
+        result, mock_launch, _ = self._run(["autonomous", "model:cheap"], env=env)
+        self.assertEqual(result["statusCode"], 200)
+        mock_launch.assert_called_once()
+        # The RESOLVED model reaches the rendered user-data.
+        builder = mock_launch.call_args[0][4]
+        user_data = builder("octocat/Hello-World", 165)
+        self.assertIn('OPENCODE_MODEL="minimax-coding-plan/MiniMax-M2"', user_data)
+        self.assertNotIn('OPENCODE_MODEL="minimax-coding-plan/MiniMax-M3"', user_data)
+
+    def test_org_credential_path_is_the_default(self):
+        """With no per-user credential, the org path is used — the
+        deployment behaves exactly as it did before issue #165."""
+        env = {"BLITZLOG_ENV": "prod"}
+        result, mock_launch, _ = self._run(["autonomous"], env=env)
+        self.assertEqual(result["statusCode"], 200)
+        builder = mock_launch.call_args[0][4]
+        user_data = builder("octocat/Hello-World", 165)
+        self.assertIn(
+            'OPENCODE_API_KEY_SSM_PARAM="/blitzlog/prod/opencode/api-key"', user_data
+        )
+
+    def test_user_credential_path_reaches_the_user_data(self):
+        from model_select import UserOpencodeProfile
+
+        user = UserOpencodeProfile(
+            model="minimax-coding-plan/MiniMax-M3",
+            has_api_key=True,
+            provider="minimax-coding-plan",
+        )
+        env = {"BLITZLOG_ENV": "prod"}
+        result, mock_launch, _ = self._run(["autonomous"], user_profile=user, env=env)
+        self.assertEqual(result["statusCode"], 200)
+        builder = mock_launch.call_args[0][4]
+        user_data = builder("octocat/Hello-World", 165)
+        self.assertIn(
+            'OPENCODE_API_KEY_SSM_PARAM="/blitzlog/users/octocat/opencode/api-key"',
+            user_data,
+        )
+
+    def test_binding_mismatch_returns_422_and_launches_nothing(self):
+        """A user's Anthropic key with the org's MiniMax default
+        model must fail fast — the key is never sent to the wrong
+        provider, and no instance is launched."""
+        from model_select import UserOpencodeProfile
+
+        user = UserOpencodeProfile(has_api_key=True, provider="anthropic")
+        result, mock_launch, _ = self._run(["autonomous"], user_profile=user)
+        self.assertEqual(result["statusCode"], 422)
+        self.assertIn("mismatch", result["body"])
+        mock_launch.assert_not_called()
+
+    def test_raw_label_without_a_user_credential_returns_422(self):
+        env = {"OPENCODE_ALLOWED_PROVIDERS": json.dumps(["minimax-coding-plan"])}
+        result, mock_launch, _ = self._run(
+            ["autonomous", "model:minimax-coding-plan/MiniMax-M2"], env=env
+        )
+        self.assertEqual(result["statusCode"], 422)
+        self.assertIn("per-user credential", result["body"])
+        mock_launch.assert_not_called()
+
+    def test_rejected_label_value_falls_through_to_the_org_default(self):
+        """A label value that is not a valid `provider/model` is
+        ignored (with a warning) — the run continues on the org
+        default."""
+        env = {"OPENCODE_MODEL": "minimax-coding-plan/MiniMax-M3"}
+        result, mock_launch, _ = self._run(
+            ["autonomous", 'model:evil/x"; rm -rf / #'], env=env
+        )
+        self.assertEqual(result["statusCode"], 200)
+        mock_launch.assert_called_once()
+
+    def test_local_llm_short_circuits_the_resolution(self):
+        """The local LLM keeps its top precedence — the chain does not
+        apply at all."""
+        from handler import lambda_handler
+
+        with (
+            patch("handler.schedule_next_refresh"),
+            patch("handler.launch_ec2_spot_instance", return_value="i-abc"),
+            patch("handler.get_github_app_token", return_value="ghp_test"),
+            patch("handler.verify_github_signature", return_value=True),
+            patch("handler.get_ssm_param", return_value="secret"),
+            patch(
+                "handler.get_local_llm_config",
+                return_value={
+                    "endpoint": "http://100.64.0.5:11434",
+                    "model": "qwen2.5-coder:32b",
+                    "api_key": "",
+                    "allow_private": True,
+                    "fallback": "closed",
+                },
+            ),
+            patch("handler.get_opencode_profile") as mock_profile,
+        ):
+            result = lambda_handler(self._event(["autonomous"]), None)
+        self.assertEqual(result["statusCode"], 200)
+        mock_profile.assert_not_called()
+
+    def test_invalid_sender_login_is_rejected(self):
+        """The login is interpolated into a secret path and a bash
+        script, so it is validated first."""
+        from handler import lambda_handler
+
+        event = self._event(["autonomous"])
+        payload = json.loads(event["body"])
+        payload["sender"]["login"] = "octo cat; rm -rf /"
+        event["body"] = json.dumps(payload)
+
+        with (
+            patch("handler.launch_ec2_spot_instance", return_value="i-abc"),
+            patch("handler.get_github_app_token", return_value="ghp_test"),
+            patch("handler.verify_github_signature", return_value=True),
+            patch("handler.get_ssm_param", return_value="secret"),
+        ):
+            result = lambda_handler(event, None)
+        self.assertEqual(result["statusCode"], 400)
+
+
+class TestOpencodeApiKeyParam(unittest.TestCase):
+    """The credential path is server-derived — never user-supplied
+    text (issue #165)."""
+
+    def test_org_path_is_env_scoped(self):
+        from _env import opencode_api_key_param
+
+        with patch.dict(os.environ, {"BLITZLOG_ENV": "prod"}):
+            self.assertEqual(
+                opencode_api_key_param(), "/blitzlog/prod/opencode/api-key"
+            )
+
+    def test_user_path_is_env_independent(self):
+        from _env import opencode_api_key_param
+
+        with patch.dict(os.environ, {"BLITZLOG_ENV": "prod"}):
+            self.assertEqual(
+                opencode_api_key_param("octocat"),
+                "/blitzlog/users/octocat/opencode/api-key",
+            )
+
+    def test_invalid_login_is_rejected(self):
+        from _env import opencode_api_key_param
+
+        with self.assertRaises(ValueError):
+            opencode_api_key_param("octo cat; rm -rf /")
+
+
 if __name__ == "__main__":
     unittest.main()

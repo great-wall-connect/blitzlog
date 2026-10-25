@@ -310,7 +310,13 @@ def lambda_handler(event, context):
         if sender_login:
             try:
                 user_profile = get_opencode_profile(sender_login)
-            except (ClientError, ValueError, OSError) as e:
+            except Exception as e:  # noqa: BLE001
+                # The per-user profile is an OPTIONAL enrichment: a
+                # read failure means "no per-user model / no per-user
+                # credential", and the run proceeds on the org default
+                # model + org credential. Failing the webhook here
+                # would take the whole deployment down for one
+                # unreadable parameter.
                 logger.warning(
                     "Failed to read the opencode profile for %s: %s", sender_login, e
                 )
@@ -355,7 +361,9 @@ def lambda_handler(event, context):
             "local_llm": local_llm,
             "opencode_model": selection.model if selection else None,
             "opencode_base_url": selection.base_url if selection else "",
-            "opencode_api_key_ssm_param": selection.credential_path if selection else "",
+            "opencode_api_key_ssm_param": (
+                selection.credential_path if selection else ""
+            ),
         }
         if mode == "assisted":
             return builder(

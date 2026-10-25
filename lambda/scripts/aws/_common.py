@@ -227,7 +227,7 @@ def _read_secrets_from_ssm_script(
     if not local_llm:
         api_key_block = (
             "\n"
-            'OPENCODE_API_KEY=$(aws ssm get-parameter --name '
+            "OPENCODE_API_KEY=$(aws ssm get-parameter --name "
             '"$OPENCODE_API_KEY_SSM_PARAM" --with-decryption --query '
             'Parameter.Value --output text --region "$REGION")\n'
             "export OPENCODE_API_KEY\n"

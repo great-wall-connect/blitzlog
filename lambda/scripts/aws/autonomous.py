@@ -69,7 +69,9 @@ def build_autonomous_user_data(
     # label, the per-user default, or the org default — whichever won.
     # `local_llm["model"]` still wins over all three (the local LLM
     # keeps its top precedence).
-    opencode_model = local_llm["model"] if local_llm else (opencode_model or base_opencode_model)
+    opencode_model = (
+        local_llm["model"] if local_llm else (opencode_model or base_opencode_model)
+    )
     env = _blitzlog_env()
     s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
     s3_log_prefix = s3_archive_prefix
