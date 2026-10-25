@@ -1,6 +1,19 @@
 terraform {
   required_version = ">= 1.0"
 
+  required_providers {
+    # Declared explicitly at the root so the provider version is pinned
+    # where the stack is applied, not only inside the module. Issue
+    # #161 migrated hashicorp/aws 5.x -> 6.0; the module's own
+    # `required_providers` does not change the root's resolution, so a
+    # root-level pin is what keeps `terraform init` here on the 6.x
+    # series.
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+
   backend "s3" {
     bucket = ""
     key    = ""
