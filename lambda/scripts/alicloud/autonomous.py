@@ -170,8 +170,8 @@ LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
 TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
 # Audit-trail identity (issue #119). The bootstrap above fetched
 # these from /blitzlog/users/{{owner}}/git-author/{{name,email}};
-# the watchdog forwards them to the container via `-e` so the
-# container's `git config --global user.{{name,email}}` step
+# the watchdog forwards them to the container via -e so the
+# container's git config --global user.{{name,email}} step
 # (entrypoint.sh) attributes commits to the operator.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"

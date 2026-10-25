@@ -256,6 +256,34 @@ class TestAssistedEnvFileQuoting(unittest.TestCase):
             msg=f"bash -n failed: stderr={result.stderr!r} body={body!r}",
         )
 
+    def test_blitzlog_env_heredoc_has_no_command_substitution(self):
+        """The heredoc is UNQUOTED (`<<ENVEOF`), so the shell expands
+        it at write time: backticks and `$(...)` are COMMAND
+        SUBSTITUTION, not text.
+
+        A comment that mentions `options.baseURL` in backticks would
+        therefore run `options.baseURL` as a command while the
+        bootstrap writes the file — polluting the boot log with
+        "command not found" and, in the worst case, executing
+        something. Only the intended `${VAR}` expansions may appear.
+        """
+        script = self._render_with_resume()
+        heredoc = _extract_blitzlog_env_heredoc(script)
+        for lineno, raw_line in enumerate(heredoc.splitlines(), start=1):
+            if "`" in raw_line:
+                self.fail(
+                    f"backtick in the /etc/blitzlog.env heredoc at line {lineno}: "
+                    f"{raw_line!r} — the heredoc is unquoted, so a backtick "
+                    f"is a command substitution"
+                )
+            # The one intentional command substitution is the
+            # schedule-group hash (`$(printf ... | sha256sum | cut ...)`).
+            if "$(" in raw_line and "$(printf" not in raw_line:
+                self.fail(
+                    f"command substitution in the /etc/blitzlog.env heredoc at "
+                    f"line {lineno}: {raw_line!r}"
+                )
+
     def test_blitzlog_env_sources_cleanly(self):
         import subprocess
 

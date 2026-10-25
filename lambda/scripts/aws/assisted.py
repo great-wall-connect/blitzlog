@@ -222,7 +222,7 @@ OPENCODE_API_KEY="${{OPENCODE_API_KEY:-}}"
 OPENCODE_MODEL="{opencode_model}"
 # The resolved base URL of a BYO / self-hosted endpoint (empty for a
 # built-in provider). The container renders it as the provider's
-# `options.baseURL` together with a `models` map.
+# options.baseURL together with a models map.
 OPENCODE_BASE_URL="${{OPENCODE_BASE_URL:-}}"
 # The server-derived secret-store path the host reads the API key
 # from. Never user-supplied text.
@@ -240,7 +240,7 @@ TELEGRAM_SENDER_LOGIN="{sender_login}"
 # Audit-trail identity (issue #119). Fetched from
 # /blitzlog/users/{{owner}}/git-author/{{name,email}} above; the
 # watchdog forwards to the container so entrypoint.sh can
-# `git config --global user.{{name,email}}`.
+# git config --global user.{{name,email}}.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 STT_API_URL="${{STT_API_URL}}"

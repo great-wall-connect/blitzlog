@@ -229,7 +229,7 @@ TELEGRAM_SENDER_LOGIN="{sender_login}"
 # Audit-trail identity (issue #119). Fetched from
 # /blitzlog/users/{{owner}}/git-author/{{name,email}} above; the
 # watchdog forwards to the container so entrypoint.sh can
-# `git config --global user.{{name,email}}`.
+# git config --global user.{{name,email}}.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 STT_API_URL="${{STT_API_URL}}"

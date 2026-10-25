@@ -150,13 +150,13 @@ SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 S3_LOG_PREFIX="{s3_log_prefix}"
 # The credential itself is resolved by the HOST from the path below
-# (issue #165). The `:-` default keeps the heredoc safe under
-# `set -u` when a local LLM is configured and no cloud key is fetched.
+# (issue #165). The :- default keeps the heredoc safe under
+# set -u when a local LLM is configured and no cloud key is fetched.
 OPENCODE_API_KEY="${{OPENCODE_API_KEY:-}}"
 OPENCODE_MODEL="${{OPENCODE_MODEL}}"
 # The resolved base URL of a BYO / self-hosted endpoint (empty for a
 # built-in provider). The container renders it as the provider's
-# `options.baseURL` together with a `models` map.
+# options.baseURL together with a models map.
 OPENCODE_BASE_URL="${{OPENCODE_BASE_URL:-}}"
 # The server-derived secret-store path the host reads the API key
 # from. Never user-supplied text.
@@ -169,8 +169,8 @@ LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
 TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
 # Audit-trail identity (issue #119). The bootstrap above fetched
 # these from /blitzlog/users/{{owner}}/git-author/{{name,email}};
-# the watchdog forwards them to the container via `-e` so the
-# container's `git config --global user.{{name,email}}` step
+# the watchdog forwards them to the container via -e so the
+# container's git config --global user.{{name,email}} step
 # (entrypoint.sh) attributes commits to the operator.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
