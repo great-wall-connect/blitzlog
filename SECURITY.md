@@ -70,6 +70,21 @@ Blitzlog is designed around a few hardening principles — review these before p
   the process count so a fork bomb cannot exhaust the host's PIDs, and
   `--init` puts `docker-init` at PID 1 so orphaned grandchildren are
   reaped instead of accumulating as zombies for the life of the run.
+- **Non-root container user** — the agent container runs as uid 1000
+  (`blitzlog`), never as uid 0. The image's `USER` directive sets it
+  and `packages/images/agent/smoke-test.sh` asserts the runtime uid, so
+  an image that loses the directive fails the smoke test instead of
+  quietly running the agent as root.
+- **Read-only container rootfs** — `--read-only` means the agent cannot
+  rewrite the binaries it runs (`/usr/local/bin/{opencode,git,gh,
+  whisper-cli}`) and serve a tampered copy for the rest of the session.
+  The writable paths are an explicit, documented list (`/tmp`, the
+  agent's `HOME`, `/var/log/blitzlog`, `/workspace`); a
+  read-only rootfs with an implicit hole is worse than no flag at all.
+- **Read-only credential mounts** — the GitHub token and the `gh` CLI
+  config are owned by the host and mounted read-only, so the agent can
+  use them but cannot tamper with the host's copy. The token is also
+  kept out of the container's environment entirely.
 
 The container's runtime flags live in one place —
 `packages/images/agent/container-hardening.env` — shared by the

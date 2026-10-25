@@ -147,6 +147,25 @@ ARG NODE_VERSION
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=UTC \
+    # Issue #164: the rootfs is read-only, so a system-wide
+    # `pip install` (which every repo's `bootstrap` task does) would
+    # fail with EROFS. PIP_USER=1 makes pip install into the user
+    # site-packages — $HOME/.local/lib/python3.12/site-packages —
+    # which lives on the writable HOME tmpfs and is already on
+    # sys.path. The system site-packages (pip itself, setuptools, the
+    # whisper shim's deps) stays read-only and intact.
+    #
+    # Known limitation: `pip install --user` is rejected inside a
+    # virtualenv, so a target repo whose bootstrap creates a venv
+    # before installing will fail. See docs/DOCKER.md.
+    PIP_USER=1 \
+    # Issue #164: the agent no longer runs as root, so HOME moves off
+    # /root. Every path the agent used to write under /root (the
+    # global git config, mise's toolchain, the npm cache, opencode's
+    # config + state, the telegram bot's config) now lives under
+    # /home/blitzlog. The container's HOME is a tmpfs, so it is
+    # writable even with --read-only.
+    HOME=/home/blitzlog \
     # /usr/sbin is added so tailscaled (Debian package puts the daemon
     # there, not the CLI) is on PATH for the local-test Tailscale
     # flow in entrypoint.sh. Other daemons that might land in /usr/sbin
@@ -210,25 +229,60 @@ COPY --from=build /usr/local/bin/opencode-telegram /usr/local/bin/opencode-teleg
 COPY server.py /opt/whisper-stt/server.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
+# Issue #164: installs the baked opencode components into the agent's
+# HOME (which is a tmpfs, so anything baked under $HOME would be
+# shadowed). Shared by the entrypoint and the image's smoke test.
+COPY install-opencode-plugins.sh /usr/local/bin/install-opencode-plugins.sh
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown). These are baked directly into
 # the opencode config dirs so they're present from the first startup —
 # no runtime copy needed. Without these, the agent has no shutdown
 # tool, no idle watchdog, no session archiver, etc.
-COPY opencode/plugins/ /root/.config/opencode/plugins/
-COPY opencode/tools/ /root/.config/opencode/tools/
-COPY opencode/lib/ /root/.config/opencode/lib/
+#
+# Issue #164: they are baked into /opt/blitzlog/opencode, NOT into
+# $HOME/.config/opencode. The container's HOME is a tmpfs (the
+# rootfs is read-only), so anything baked under $HOME would be
+# shadowed by the tmpfs at runtime. The entrypoint copies these three
+# directories into $HOME/.config/opencode/ on startup — still baked
+# into the image, still present from the first startup, no network and
+# no runtime npm install.
+COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/
+COPY opencode/tools/ /opt/blitzlog/opencode/tools/
+COPY opencode/lib/ /opt/blitzlog/opencode/lib/
+
+# Issue #164: the unprivileged runtime user. uid/gid 1000 match
+# BLITZLOG_CONTAINER_UID / BLITZLOG_CONTAINER_GID in
+# packages/images/agent/container-hardening.env — the host-side
+# watchdog chowns the bind mounts it exposes to the container to this
+# uid, because a bind mount preserves the SOURCE's ownership (a
+# root-owned 0700 directory is unreadable to a non-root container
+# user).
+RUN groupadd --gid 1000 blitzlog \
+    && useradd --uid 1000 --gid 1000 --home-dir /home/blitzlog \
+        --create-home --shell /bin/sh blitzlog
 
 # Layout that the entrypoint expects
-RUN mkdir -p /opt/whisper-stt/models /workspace /var/log/blitzlog \
-    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh
+RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/opencode \
+        /var/log/blitzlog /workspace \
+    && chown blitzlog:blitzlog /var/log/blitzlog /workspace \
+    && chmod -R a+rX /opt/blitzlog/opencode \
+    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh \
+        /usr/local/bin/install-opencode-plugins.sh
 
-# Sanity checks
+# Sanity checks (still root — this runs at build time)
 RUN /usr/local/bin/whisper-cli --help >/dev/null \
     && python3 -c "import pywhispercpp, multipart, imageio_ffmpeg; print('python deps ok')" \
     && opencode --version
 
 WORKDIR /workspace
+
+# Issue #164: drop root. Every process in the container — including the
+# agent's bash tool — now runs as uid 1000. Combined with
+# --cap-drop=ALL and --read-only (both set by the caller from
+# packages/images/agent/container-hardening.env), a compromise of the
+# agent cannot escalate, cannot tamper with the binaries it runs, and
+# cannot write outside the explicitly documented writable paths.
+USER blitzlog
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

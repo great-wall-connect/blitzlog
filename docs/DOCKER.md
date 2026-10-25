@@ -194,6 +194,7 @@ production.
 | `--cap-drop=ALL` | Drops Docker's default capability set (`CAP_NET_RAW`, `CAP_SYS_CHROOT`, `CAP_DAC_OVERRIDE`, `CAP_MKNOD`, `CAP_SETUID`/`CAP_SETGID`). The base agent path needs none of them. |
 | `--pids-limit=1024` | Bounds the process count so a fork bomb cannot exhaust the host's PIDs. |
 | `--init` | Runs `docker-init` as PID 1 so orphaned grandchildren are reaped instead of accumulating as zombies for the life of the run. |
+| `--read-only` | Makes the container's rootfs read-only, so the agent cannot rewrite the binaries it runs (`/usr/local/bin/{opencode,git,gh,whisper-cli}`) and serve a tampered copy for the rest of the session. |
 
 **The one capability exemption.** When — and only when —
 `TAILSCALE_AUTH_KEY` is set, the run additionally gets
@@ -208,3 +209,89 @@ run gets `--cap-drop=ALL` and nothing else.
 > tunnel: it logged `WARNING: tailscale up failed` and the local-LLM
 > preflight fell back to cloud. The AMI now loads the `tun` module and
 > creates `/dev/net/tun` (`infra/aws/packer/scripts-docker-ubuntu/01-system.sh`).
+
+### The container runs as a non-root user
+
+The image creates an unprivileged `blitzlog` user (uid/gid **1000**),
+sets `HOME=/home/blitzlog` and declares `USER blitzlog`. Every process
+in the container — including the agent's bash tool — runs as that uid.
+The host-side watchdog `chown`s the bind mounts it exposes to uid 1000,
+because a bind mount preserves the *source*'s ownership: a root-owned
+`0700` directory is unreadable from inside a non-root container.
+
+`id -u` is asserted by `packages/images/agent/smoke-test.sh`, so an
+image that loses its `USER` directive fails the smoke test instead of
+quietly running the agent as root.
+
+### Writable paths
+
+The rootfs is read-only, so every path the agent legitimately writes to
+is carved out explicitly. **This list is the complete set** — a
+read-only rootfs with an implicit hole is worse than no flag at all.
+`tests/test_container_hardening.py` asserts that this table matches
+`BLITZLOG_WRITABLE_PATHS` / `BLITZLOG_READONLY_MOUNTS` in
+`packages/images/agent/container-hardening.env`, so the list cannot
+silently grow.
+
+Writable:
+
+<!-- writable-paths:start -->
+| Path | Mode | Mechanism | What the agent writes there |
+|---|---|---|---|
+| `/tmp` | rw | tmpfs | Scratch space — pip/npm/node temporaries, and the tailscaled state + control socket when the Tailnet path is enabled. |
+| `/home/blitzlog` | rw | tmpfs | The agent's `HOME`: the global git config, mise's toolchain, the npm/npx cache, opencode's config + state, and the telegram bot's config. |
+| `/var/log/blitzlog` | rw | bind mount | The entrypoint's and the services' logs. The watchdog uploads them to S3 after the run. |
+| `/workspace` | rw | bind mount | The cloned repository, plus the `.blitzlog/` session artifacts and the `.idle` / `.shutdown` signal files. |
+<!-- writable-paths:end -->
+
+Read-only (the agent may read these, but cannot write them):
+
+<!-- readonly-paths:start -->
+| Path | Source | Why read-only |
+|---|---|---|
+| `/home/blitzlog/.git-credentials.d` | host credential store | The host owns the GitHub token and the token-refresh poll loop rewrites it there (issue #145). The agent must not be able to tamper with the host's copy. |
+| `/home/blitzlog/.config/gh` | host gh config | Same — the host's `hosts.yml` is the only writer's copy. |
+| `/opt/whisper-stt/models` | host whisper models | The Whisper model file is an input, never an output. |
+<!-- readonly-paths:end -->
+
+Everything else — `/usr/local/bin`, `/opt/blitzlog/opencode`, `/etc`,
+`/usr` — is read-only image content.
+
+> **The toolchain bootstrap still works on a read-only rootfs.** Every
+> repo's `bootstrap` task installs its Python dependencies, which would
+> normally write to the system site-packages — read-only here. The image
+> sets `PIP_USER=1`, so `pip install` writes to the user
+> site-packages (`$HOME/.local/lib/python3.12/site-packages`) on the
+> writable HOME tmpfs, which is already on `sys.path`. The system
+> site-packages (pip itself, setuptools, the whisper shim's
+> dependencies) stays read-only and intact.
+>
+> A repo whose bootstrap creates a **virtualenv** before installing is
+> the one known gap: `pip install --user` is rejected inside a
+> virtualenv. Such a repo's bootstrap needs a small adjustment (install
+> into the venv, or drop the venv) — the agent has write access to the
+> clone and can make that change.
+>
+> The symlink a bootstrap task may create under `/usr/local/bin` hits
+> the same wall; this repo's own `bootstrap` task falls back to
+> `$HOME/.local/bin` (already on the container's `PATH`) when
+> `/usr/local/bin` is read-only.
+
+> **Why the opencode plugins are baked outside `$HOME`.** The
+> plugins (`idle_watchdog`, `periodic_autosave`, `session_archive`,
+> `spot_watchdog`), the tools (`shutdown`) and the shared lib are baked
+> into `/opt/blitzlog/opencode` and copied into
+> `$HOME/.config/opencode` by `install-opencode-plugins.sh` on every
+> boot. They cannot simply be baked into `$HOME`, because `$HOME` is a
+> tmpfs and would shadow them. The copy is still "baked into the
+> image" — no network, no runtime `npm install` — and the image's smoke
+> test runs the same script, so the two can never disagree about what
+> "installed" means.
+
+### Credentials never enter the container's environment
+
+The GitHub token is **not** passed to the container as an env var. The
+host writes the two credential files and mounts them read-only; the
+agent reads them through git's credential helper and the `gh` CLI. The
+token therefore never appears in `docker inspect` or in
+`/proc/<pid>/environ`.

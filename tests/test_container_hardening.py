@@ -45,6 +45,11 @@ PACKER_HCL = REPO_ROOT / "infra/aws/packer/agent-docker-ubuntu.pkr.hcl"
 SYSTEMD_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/02-systemd.sh"
 SYSTEM_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
 ENTRYPOINT = REPO_ROOT / "packages/images/agent/entrypoint.sh"
+DOCKERFILE = REPO_ROOT / "packages/images/agent/Dockerfile"
+SMOKE_TEST = REPO_ROOT / "packages/images/agent/smoke-test.sh"
+INSTALLER = REPO_ROOT / "packages/images/agent/install-opencode-plugins.sh"
+DOCKER_DOC = REPO_ROOT / "docs/DOCKER.md"
+
 
 # The flags every `docker run` of the agent image must carry. Kept as
 # an explicit literal (rather than "whatever the contract file says")
@@ -56,6 +61,7 @@ EXPECTED_HARDENING_FLAGS = [
     "--cap-drop=ALL",
     "--pids-limit=1024",
     "--init",
+    "--read-only",
 ]
 
 # The one and only capability relaxation in the project.
@@ -108,6 +114,26 @@ def _source_contract(expr):
             f"could not source {CONTRACT} under /bin/sh: {result.stderr.strip()}"
         )
     return result.stdout
+
+
+def _doc_paths(marker):
+    """Return the backtick-quoted paths in the docs/DOCKER.md table
+    delimited by `<!-- {marker}:start -->` / `<!-- {marker}:end -->`.
+
+    The markers exist so this extraction is deterministic: the writable
+    -path list is the security contract, and a prose paragraph that
+    happened to mention a path must not be able to change it.
+    """
+    text = _read(DOCKER_DOC)
+    start_marker = f"<!-- {marker}:start -->"
+    end_marker = f"<!-- {marker}:end -->"
+    self_contained = text.split(start_marker, 1)
+    if len(self_contained) != 2:
+        raise AssertionError(f"docs/DOCKER.md is missing the {start_marker} marker")
+    body = self_contained[1].split(end_marker, 1)
+    if len(body) != 2:
+        raise AssertionError(f"docs/DOCKER.md is missing the {end_marker} marker")
+    return re.findall(r"`(/[^`\s]+)`", body[0])
 
 
 class TestContainerHardeningContract(unittest.TestCase):
@@ -371,6 +397,268 @@ class TestContractIsWiredIntoTheAmi(unittest.TestCase):
             "02-systemd.sh must copy the contract to "
             "/usr/local/bin/container-hardening.env — that is where the "
             "watchdog sources it from",
+        )
+
+
+class TestWritablePathContract(unittest.TestCase):
+    """The writable-path list is the security contract of the read-only
+    rootfs. It must be explicit, documented, and asserted — a
+    --read-only rootfs with an implicit hole is worse than no flag at
+    all."""
+
+    def test_writable_paths_match_the_documented_table(self):
+        contract = set(_source_contract('"$BLITZLOG_WRITABLE_PATHS"').split())
+        documented = set(_doc_paths("writable-paths"))
+        self.assertEqual(
+            contract,
+            documented,
+            "the writable-path list in "
+            "packages/images/agent/container-hardening.env does not match "
+            "the table in docs/DOCKER.md. A path that can be written but "
+            "is not documented (or vice versa) is exactly the implicit "
+            "hole this contract exists to prevent.",
+        )
+
+    def test_readonly_mounts_match_the_documented_table(self):
+        contract = set(_source_contract('"$BLITZLOG_READONLY_MOUNTS"').split())
+        documented = set(_doc_paths("readonly-paths"))
+        self.assertEqual(
+            contract,
+            documented,
+            "the read-only mount list does not match the table in " "docs/DOCKER.md",
+        )
+
+    def test_the_two_lists_do_not_overlap(self):
+        writable = set(_source_contract('"$BLITZLOG_WRITABLE_PATHS"').split())
+        readonly = set(_source_contract('"$BLITZLOG_READONLY_MOUNTS"').split())
+        self.assertEqual(
+            writable & readonly,
+            set(),
+            "a path is listed as both writable and read-only — the "
+            "container's actual behaviour would be one or the other",
+        )
+
+    def test_tmpfs_mounts_cover_every_non_bind_writable_path(self):
+        """The tmpfs mounts are what back the writable paths that are
+        not host bind mounts (/tmp and the agent's HOME)."""
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        self.assertIn("--tmpfs /tmp:", tmpfs)
+        self.assertIn("/home/blitzlog:", tmpfs)
+        # The tmpfs must be owned by the container's unprivileged uid,
+        # otherwise the agent cannot write its own HOME.
+        self.assertIn("uid=1000,gid=1000", tmpfs)
+
+    def test_every_docker_run_expands_the_tmpfs_mounts(self):
+        """A --read-only rootfs without its tmpfs mounts would leave
+        the agent unable to write anything at all."""
+        for path in (WATCHDOG, MISE_TOML):
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    "$BLITZLOG_TMPFS_MOUNTS",
+                    _read(path),
+                    f"{path.name} does not expand the tmpfs mounts — a "
+                    "read-only rootfs with no writable paths would break "
+                    "the agent",
+                )
+
+
+class TestContainerRunsAsNonRoot(unittest.TestCase):
+    """The image must not run the agent as uid 0."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.smoke = _read(SMOKE_TEST)
+
+    def test_dockerfile_declares_a_non_root_user(self):
+        users = re.findall(r"(?m)^USER\s+(\S+)", self.dockerfile)
+        self.assertTrue(users, "the Dockerfile has no USER directive")
+        for user in users:
+            self.assertNotEqual(
+                user,
+                "root",
+                "the image's USER directive must not be root",
+            )
+        self.assertEqual(
+            users[-1],
+            "blitzlog",
+            "the image's final USER directive must be the unprivileged "
+            "`blitzlog` user",
+        )
+
+    def test_dockerfile_creates_the_blitzlog_user_with_the_contract_ids(self):
+        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
+        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
+        self.assertIn(f"--uid {uid}", self.dockerfile)
+        self.assertIn(f"--gid {gid}", self.dockerfile)
+        self.assertIn("useradd", self.dockerfile)
+        self.assertIn("groupadd", self.dockerfile)
+
+    def test_dockerfile_sets_home_to_the_contract_home(self):
+        home = _source_contract('"$BLITZLOG_CONTAINER_HOME"').strip()
+        self.assertIn(
+            f"HOME={home}",
+            self.dockerfile,
+            "the Dockerfile must set HOME to the contract's container home",
+        )
+
+    def test_dockerfile_installs_pip_into_the_writable_home(self):
+        """A repo's `bootstrap` task does a system-wide
+        `pip install`, which fails with EROFS on a read-only rootfs.
+        PIP_USER=1 sends it to the user site-packages on the writable
+        HOME tmpfs instead."""
+        self.assertIn(
+            "PIP_USER=1",
+            self.dockerfile,
+            "the image must set PIP_USER=1 — a repo's bootstrap task "
+            "would otherwise fail to install its Python dependencies on "
+            "the read-only rootfs",
+        )
+
+    def test_dockerfile_bakes_the_opencode_components_outside_home(self):
+        """They must NOT be baked under $HOME — HOME is a tmpfs and
+        would shadow them."""
+        home = _source_contract('"$BLITZLOG_CONTAINER_HOME"').strip()
+        self.assertIn(
+            "COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/", self.dockerfile
+        )
+        self.assertIn(
+            "COPY opencode/tools/ /opt/blitzlog/opencode/tools/", self.dockerfile
+        )
+        self.assertIn("COPY opencode/lib/ /opt/blitzlog/opencode/lib/", self.dockerfile)
+        self.assertNotIn(
+            f"COPY opencode/plugins/ {home}/",
+            self.dockerfile,
+            "the opencode components are baked under $HOME, which is a "
+            "tmpfs — they would be shadowed at runtime",
+        )
+
+    def test_entrypoint_installs_the_baked_components_into_home(self):
+        self.assertIn(
+            "/usr/local/bin/install-opencode-plugins.sh",
+            self.entrypoint,
+            "the entrypoint must install the baked opencode components "
+            "into the agent's HOME",
+        )
+
+    def test_installer_is_copied_into_the_image_and_executable(self):
+        self.assertIn(
+            "COPY install-opencode-plugins.sh /usr/local/bin/install-opencode-plugins.sh",
+            self.dockerfile,
+        )
+        self.assertIn(
+            "/usr/local/bin/install-opencode-plugins.sh",
+            self.dockerfile,
+            "the installer must be made executable in the image",
+        )
+
+    def test_installer_uses_cp_r_not_cp_a(self):
+        """`cp -a` preserves ownership, which a non-root user cannot
+        do — GNU cp exits non-zero when it fails to, and the entrypoint
+        runs under `set -e`."""
+        src = _read(INSTALLER)
+        self.assertIn("cp -R ", src)
+        self.assertNotIn("cp -a ", src)
+
+    def test_smoke_test_asserts_a_non_root_uid(self):
+        self.assertIn(
+            "AGENT_UID=$(id -u)",
+            self.smoke,
+            "the image's smoke test must assert the runtime uid",
+        )
+        self.assertIn(
+            'if [ "$AGENT_UID" = "0" ]',
+            self.smoke,
+            "the image's smoke test must fail when the container runs as " "root",
+        )
+
+    def test_smoke_test_does_not_mkdir_on_a_read_only_rootfs(self):
+        """`mkdir -p` on a read-only rootfs fails with EROFS — the
+        smoke test must assert existence, not create it."""
+        self.assertNotIn(
+            'mkdir -p "$d"',
+            self.smoke,
+            "the smoke test creates directories, which fails on the "
+            "read-only rootfs — it should assert they exist",
+        )
+
+
+class TestCredentialMountsAreReadOnly(unittest.TestCase):
+    """The host owns the GitHub credentials; the agent may read them
+    but must not be able to tamper with the host's copy."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.watchdog_src = _read(WATCHDOG)
+
+    def test_credential_bind_mounts_are_read_only(self):
+        for mount in (
+            (
+                '-v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}'
+                '/.git-credentials.d:ro"'
+            ),
+            (
+                '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
+                '/.config/gh:ro"'
+            ),
+        ):
+            with self.subTest(mount=mount):
+                self.assertIn(
+                    mount,
+                    self.watchdog_src,
+                    "the GitHub credential bind mounts must be read-only — "
+                    "the host is the only writer of those files",
+                )
+
+    def test_watchdog_chowns_the_credential_paths_to_the_container_uid(self):
+        self.assertIn(
+            'chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \\\n'
+            '            /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"',
+            self.watchdog_src,
+            "the watchdog must chown the credential paths to the "
+            "container's uid — a bind mount preserves the source's "
+            "ownership, so a root-owned 0600 file is unreadable from "
+            "inside a non-root container",
+        )
+
+    def test_watchdog_chowns_the_writable_bind_mounts(self):
+        for path in ("/workspace", "/var/log/blitzlog"):
+            with self.subTest(path=path):
+                self.assertIn(
+                    f'chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" {path}',
+                    self.watchdog_src,
+                    f"the watchdog must chown {path} to the container's "
+                    "uid, or the agent's first write fails with EACCES",
+                )
+
+    def test_github_token_is_not_passed_to_the_container(self):
+        """The token reaches the agent through the read-only mounts —
+        it must not also sit in the container's environment, where
+        `docker inspect` and every same-uid process could read it."""
+        self.assertNotIn(
+            '-e "GITHUB_TOKEN=$GITHUB_TOKEN"',
+            self.watchdog_src,
+            "the GitHub token must not be passed to the container as an "
+            "env var — the host owns the credential files",
+        )
+
+    def test_entrypoint_does_not_write_the_credential_mount_unconditionally(self):
+        """The write is the local-dev fallback; the production path
+        finds the file already mounted read-only."""
+        entrypoint = _read(ENTRYPOINT)
+        self.assertIn(
+            'if [ ! -d "$HOME/.git-credentials.d" ] || '
+            '[ -w "$HOME/.git-credentials.d" ]; then',
+            entrypoint,
+            "the entrypoint must only materialise the credential file "
+            "when the target is not a read-only host mount",
+        )
+        self.assertIn(
+            'if [ ! -f "$GH_HOSTS_FILE" ]; then',
+            entrypoint,
+            "the entrypoint must only run `gh auth login` when the host "
+            "has not already mounted a hosts.yml",
         )
 
 

@@ -63,7 +63,7 @@ class TestEntrypointReadiness(unittest.TestCase):
         fallback restart. Find the log line directly and verify it
         follows some cp + fi in the initial block.
         """
-        i = self.text.index('log "Wrote /root/.config/opencode/opencode.json')
+        i = self.text.index('log "Wrote $HOME/.config/opencode/opencode.json')
         # Sanity: the log must come after at least one `cp` of the
         # .jsonc to .json rename in the initial config-writing block.
         # We require the cp to be at most 1200 chars before the log —
@@ -72,7 +72,8 @@ class TestEntrypointReadiness(unittest.TestCase):
         # further out.
         preceding = self.text[max(0, i - 1200) : i]
         self.assertIn(
-            "cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json",
+            'cp "$HOME/.config/opencode/opencode.jsonc" '
+            '"$HOME/.config/opencode/opencode.json"',
             preceding,
             "the 'Wrote opencode.json' log must follow a cp of .jsonc to .json",
         )
