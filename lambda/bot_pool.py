@@ -7,6 +7,9 @@ Responsibilities:
     get_local_llm_config       — read /blitzlog/users/<login>/local-llm/* and validate the endpoint
                                  IP via llm_guard (loopback/IMDS hard-rejected; RFC1918/ULA/CGNAT
                                  opt-in only; public IPs hard-rejected)
+    get_opencode_profile       — read /blitzlog/users/<login>/opencode/* (issue #165): the
+                                 per-user default model + the per-user credential. The credential
+                                 itself never leaves this module — only a boolean does.
     acquire_bot_token          — find a free bot in the pool, write a TTL'd S3 lock, return (name, token)
     _get_lock                  — read an S3 lock with TTL semantics (4 h)
     _update_lock_instance_id   — overwrite the lock with the real EC2 instance id after launch
@@ -36,7 +39,9 @@ from llm_guard import (
     _ip_always_blocked,
     _ip_is_opt_in_only,
     _resolve_endpoint_ips,
+    validate_byo_endpoint,
 )
+from model_select import UserOpencodeProfile
 from provider import get_object_store, get_secrets
 
 BOT_POOL_LOCK_PREFIX = "bot-pool-locks"
@@ -200,6 +205,83 @@ def get_local_llm_config(sender_login: str) -> dict | None:
         "fallback": fallback,
         "tailscale_auth_key": (params.get("tailscale-auth-key") or "").strip(),
     }
+
+
+def get_opencode_profile(sender_login: str) -> UserOpencodeProfile | None:
+    """Read this user's per-user opencode config (issue #165).
+
+    The namespace is `/blitzlog/users/<login>/opencode/*` — it mirrors
+    the org layout `/blitzlog/<env>/opencode/api-key` and, like every
+    other per-user namespace, carries no env prefix: a buyer has one
+    model default and one credential, not one per env.
+
+    Parameters:
+        model               — the buyer's default model (`provider/model`)
+        api-key             — the buyer's own credential (SecureString)
+        provider            — the provider the credential belongs to
+        base-url            — an optional self-hosted endpoint for the model
+        allow-private-cidrs — opt-in for a private (Tailnet/VPC) base URL
+
+    Returns `None` when the user has no opencode config at all (the
+    common case — the org default model and the org credential are
+    then used, exactly as before issue #165).
+
+    The API KEY ITSELF NEVER LEAVES THIS FUNCTION. The caller only
+    learns whether a credential exists (`has_api_key`); the key is
+    fetched on the EC2 host from a server-derived secret-store path.
+    That keeps key material out of the Lambda's memory, its logs, and
+    the rendered user-data.
+
+    A `base-url` that fails the safety guard rejects the WHOLE
+    profile rather than silently dropping the base URL: the endpoint
+    is where the credential gets sent, so falling back to the
+    provider's default endpoint would move the user's key to a host
+    the user did not choose.
+    """
+    if not sender_login:
+        return None
+
+    try:
+        params = get_secrets().get_by_path(
+            f"{BOT_POOL_SSM_PATH}/{sender_login}/opencode",
+            decrypt=True,
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
+            return None
+        raise
+
+    model = (params.get("model") or "").strip()
+    api_key = (params.get("api-key") or "").strip()
+    provider = (params.get("provider") or "").strip()
+    base_url = (params.get("base-url") or "").strip()
+
+    if not any((model, api_key, provider, base_url)):
+        return None
+
+    if base_url:
+        allow_private = (params.get("allow-private-cidrs") or "").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        ok, reason = validate_byo_endpoint(base_url, allow_private_cidrs=allow_private)
+        if not ok:
+            logger.warning(
+                "Opencode base URL %s rejected for %s: %s — the per-user profile is "
+                "ignored for this run",
+                base_url,
+                sender_login,
+                reason,
+            )
+            return None
+
+    return UserOpencodeProfile(
+        model=model,
+        has_api_key=bool(api_key),
+        provider=provider,
+        base_url=base_url,
+    )
 
 
 def _lock_key(sender_login: str, bot_name: str) -> str:
