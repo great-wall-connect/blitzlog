@@ -75,9 +75,20 @@ S3_LOGS_BUCKET="${S3_LOGS_BUCKET}"
 SESSION_ARCHIVE_BUCKET="${SESSION_ARCHIVE_BUCKET}"
 SESSION_ARCHIVE_PREFIX="${SESSION_ARCHIVE_PREFIX}"
 S3_LOG_PREFIX="${S3_LOG_PREFIX}"
-OPENCODE_API_KEY="${OPENCODE_API_KEY}"
+OPENCODE_API_KEY="${OPENCODE_API_KEY:-}"
 OPENCODE_MODEL="${OPENCODE_MODEL}"
 OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
+# Issue #165: the resolved base URL of a BYO / self-hosted endpoint
+# (empty for a built-in provider). The container renders it as the
+# provider's `options.baseURL` together with a `models` map.
+OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-}"
+# Issue #165: the server-derived secret-store path the HOST resolved
+# the API key from. The path is not a secret (the credential itself
+# is, and it crosses into the container as OPENCODE_API_KEY above);
+# it is carried so the container can report where its credential
+# came from. Re-emitted here because this rewrite OVERWRITES the
+# bootstrap's write of /etc/blitzlog.env.
+OPENCODE_API_KEY_SSM_PARAM="${OPENCODE_API_KEY_SSM_PARAM:-}"
 LOCAL_LLM_ENDPOINT="${LOCAL_LLM_ENDPOINT:-}"
 LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"
 LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-}"
@@ -155,6 +166,10 @@ COMMON_ARGS=(
     -e "OPENCODE_MODEL=$OPENCODE_MODEL"
     -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
     -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    # Issue #165: the resolved base URL + the path the API key was
+    # resolved from. The key itself is what the container uses.
+    -e "OPENCODE_BASE_URL=$OPENCODE_BASE_URL"
+    -e "OPENCODE_API_KEY_SSM_PARAM=$OPENCODE_API_KEY_SSM_PARAM"
     -e "LOCAL_LLM_ENDPOINT=$LOCAL_LLM_ENDPOINT"
     -e "LOCAL_LLM_MODEL=$LOCAL_LLM_MODEL"
     -e "LOCAL_LLM_API_KEY=$LOCAL_LLM_API_KEY"
