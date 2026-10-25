@@ -163,7 +163,7 @@ resource "aws_lambda_function" "handler" {
       # same shape as SPOT_INSTANCE_TYPES_JSON below).
       OPENCODE_MODEL_PROFILES    = jsonencode(var.opencode_model_profiles)
       OPENCODE_ALLOWED_PROVIDERS = jsonencode(var.opencode_allowed_providers)
-      S3_LOGS_BUCKET            = data.aws_s3_bucket.agent_logs.bucket
+      S3_LOGS_BUCKET             = data.aws_s3_bucket.agent_logs.bucket
       # JSON-encoded so a single env var can carry the ordered list; the Lambda
       # parses it once at cold start (see lambda/ec2.py::_load_spot_instance_types).
       SPOT_INSTANCE_TYPES_JSON = jsonencode(var.spot_instance_types)
