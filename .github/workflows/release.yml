@@ -336,7 +336,7 @@ jobs:
 
       - name: Install Packer
         if: steps.detect.outputs.mode == 'pr-test' || steps.detect.outputs.mode == 'release'
-        uses: hashicorp/setup-packer@v2
+        uses: hashicorp/setup-packer@v3
         # v2 of hashicorp/setup-packer renamed the input from
         # `packer_version` (v1) to `version`. Passing the old name fails
         # the step with "Unexpected input(s) 'packer_version', valid
@@ -696,7 +696,7 @@ jobs:
           build-ref: ${{ env.BUILD_REF }}
 
       - name: Install Packer
-        uses: hashicorp/setup-packer@v2
+        uses: hashicorp/setup-packer@v3
         with:
           version: 1.16.1
 
