@@ -118,6 +118,11 @@ fi
 # our config is still picked up.
 opencode_model="${OPENCODE_MODEL:-}"
 opencode_api_key="${OPENCODE_API_KEY:-}"
+# Issue #165: the resolved base URL of a BYO / self-hosted endpoint.
+# Empty for a built-in provider. When set, the provider is a CUSTOM
+# one, so opencode needs an explicit `models` map (see
+# write_cloud_config below).
+opencode_base_url="${OPENCODE_BASE_URL:-}"
 opencode_provider=""
 opencode_model_id=""
 opencode_max_steps="${OPENCODE_AGENT_MAX_STEPS:-500}"
@@ -147,6 +152,80 @@ else
 fi
 
 mkdir -p /root/.config/opencode
+
+# Render the CLOUD provider block into opencode.json.
+#
+# Two shapes:
+#
+#   * No base URL — a built-in provider. opencode resolves the model
+#     id from its own catalogue, so only the API key is written.
+#
+#   * A base URL — a BYO / self-hosted endpoint (issue #165). The
+#     provider is CUSTOM, and opencode has no catalogue of valid
+#     model ids for a custom provider: without an explicit `models`
+#     map it emits "Model not found: <provider>/<id>" even when the
+#     endpoint is reachable and the model exists. The map key is the
+#     model id (everything after the FIRST slash of the model
+#     string), matching opencode's provider/model parsing.
+#
+# The API key written here is the RESOLVED credential for this run
+# (the per-user key when the buyer supplied one, the org key
+# otherwise) — the host fetched it from the resolved secret path.
+write_cloud_config() {
+    if [ -n "$opencode_base_url" ] && [ -n "$opencode_provider" ] && [ -n "$opencode_model_id" ]; then
+        cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "${opencode_model}",
+  "default_agent": "build",
+  "compaction": {
+    "auto": false
+  },
+  "agent": {
+    "build": {
+      "steps": ${opencode_max_steps}${agent_prompt}
+    }
+  },
+  "provider": {
+    "${opencode_provider}": {
+      "options": {
+        "baseURL": "${opencode_base_url}",
+        "apiKey": "${opencode_api_key}"
+      },
+      "models": {
+        "${opencode_model_id}": {}
+      }
+    }
+  }
+}
+OPENCODE_CFG
+    else
+        cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "${opencode_model}",
+  "default_agent": "build",
+  "compaction": {
+    "auto": false
+  },
+  "agent": {
+    "build": {
+      "steps": ${opencode_max_steps}${agent_prompt}
+    }
+  },
+  "provider": {
+    "${opencode_provider}": {
+      "options": {
+        "apiKey": "${opencode_api_key}"
+      }
+    }
+  }
+}
+OPENCODE_CFG
+    fi
+    cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+}
+
 if [ -n "${OPENCODE_CONFIG_JSON:-}" ]; then
     # Lambda pre-rendered the config (production path) — use verbatim
     printf '%s' "$OPENCODE_CONFIG_JSON" > /root/.config/opencode/opencode.jsonc
@@ -221,29 +300,7 @@ OPENCODE_CFG
         fi
         cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
     elif [ -n "$opencode_provider" ] && [ -n "$opencode_api_key" ]; then
-        cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "model": "${opencode_model}",
-  "default_agent": "build",
-  "compaction": {
-    "auto": false
-  },
-  "agent": {
-    "build": {
-      "steps": ${opencode_max_steps}${agent_prompt}
-    }
-  },
-  "provider": {
-    "${opencode_provider}": {
-      "options": {
-        "apiKey": "${opencode_api_key}"
-      }
-    }
-  }
-}
-OPENCODE_CFG
-        cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+        write_cloud_config
     elif [ -n "$opencode_model" ]; then
         cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
 {
@@ -400,26 +457,10 @@ for u in data:
         cloud)
             if [ "$has_cloud_key" = "true" ]; then
                 log "User chose cloud fallback; switching inference to cloud"
-                # Re-emit the cloud opencode.json and restart opencode serve
-                cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "model": "${opencode_model}",
-  "default_agent": "build",
-  "compaction": { "auto": false },
-  "agent": {
-    "build": {
-      "steps": ${opencode_max_steps}${agent_prompt}
-    }
-  },
-  "provider": {
-    "${opencode_provider}": {
-      "options": { "apiKey": "${OPENCODE_API_KEY}" }
-    }
-  }
-}
-OPENCODE_CFG
-                cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+                # Re-emit the cloud opencode.json (with the RESOLVED
+                # credential, plus the baseURL + models map when the
+                # run uses a BYO endpoint) and restart opencode serve.
+                write_cloud_config
                 # Restart opencode serve (assisted mode only)
                 if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
                     kill "$SERVE_PID" 2>/dev/null || true

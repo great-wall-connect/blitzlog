@@ -43,6 +43,9 @@ def build_autonomous_user_data(
     sender_login: str = "",
     sender_id: str = "",
     local_llm: dict | None = None,
+    opencode_model: str | None = None,
+    opencode_base_url: str = "",
+    opencode_api_key_ssm_param: str = "",
 ) -> str:
     """Generate the autonomous-mode user-data script for an Alicloud ECS instance.
 
@@ -55,6 +58,15 @@ def build_autonomous_user_data(
     scripts.aws.autonomous.build_autonomous_user_data 1-to-1 so
     lambda/handler.py can dispatch via the scripts package's
     __init__.py without per-cloud branching.
+
+    `opencode_model`, `opencode_base_url` and
+    `opencode_api_key_ssm_param` are the resolved model + credential
+    path of issue #165. They are ACCEPTED for signature parity but
+    IGNORED here: the three-level model selection ships on the AWS
+    path only (the Alicloud tree is still under development, and it
+    has no per-user stack to read a per-user model or credential
+    from). The Alicloud run keeps using the org default model and
+    the org KMS secret.
     """
     prompt = (
         f"Work on GitHub issue #{issue_number}. Follow AGENTS.md for branch naming, "
@@ -158,8 +170,8 @@ LOCAL_LLM_FALLBACK="${{LOCAL_LLM_FALLBACK:-closed}}"
 TAILSCALE_AUTH_KEY="${{TAILSCALE_AUTH_KEY:-}}"
 # Audit-trail identity (issue #119). The bootstrap above fetched
 # these from /blitzlog/users/{{owner}}/git-author/{{name,email}};
-# the watchdog forwards them to the container via `-e` so the
-# container's `git config --global user.{{name,email}}` step
+# the watchdog forwards them to the container via -e so the
+# container's git config --global user.{{name,email}} step
 # (entrypoint.sh) attributes commits to the operator.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"

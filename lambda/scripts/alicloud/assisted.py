@@ -104,6 +104,9 @@ def build_assisted_user_data(
     bot_token: str = "",
     telegram_user_id: str = "",
     local_llm: dict | None = None,
+    opencode_model: str | None = None,
+    opencode_base_url: str = "",
+    opencode_api_key_ssm_param: str = "",
 ) -> str:
     """Generate the assisted-mode user-data script for an Alicloud ECS instance.
 
@@ -112,6 +115,15 @@ def build_assisted_user_data(
     `alicloud/_common.py`; the body of this function only differs
     from the AWS side in (a) the `OSS_*` env-var names and (b) the
     `blitzlog_oss_*` helper calls in the session-restore block.
+
+    `opencode_model`, `opencode_base_url` and
+    `opencode_api_key_ssm_param` are the resolved model + credential
+    path of issue #165. They are ACCEPTED for signature parity but
+    IGNORED here: the three-level model selection ships on the AWS
+    path only (the Alicloud tree is still under development, and it
+    has no per-user stack to read a per-user model or credential
+    from). The Alicloud run keeps using the org default model and
+    the org KMS secret.
     """
     oss_bucket = os.environ.get("OSS_LOGS_BUCKET", "<your-agent-logs-bucket>")
     base_opencode_model = os.environ.get(
@@ -217,7 +229,7 @@ TELEGRAM_SENDER_LOGIN="{sender_login}"
 # Audit-trail identity (issue #119). Fetched from
 # /blitzlog/users/{{owner}}/git-author/{{name,email}} above; the
 # watchdog forwards to the container so entrypoint.sh can
-# `git config --global user.{{name,email}}`.
+# git config --global user.{{name,email}}.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 STT_API_URL="${{STT_API_URL}}"

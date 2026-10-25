@@ -114,12 +114,21 @@ def build_assisted_user_data(
     bot_token: str = "",
     telegram_user_id: str = "",
     local_llm: dict | None = None,
+    opencode_model: str | None = None,
+    opencode_base_url: str = "",
+    opencode_api_key_ssm_param: str = "",
 ) -> str:
     s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
     base_opencode_model = os.environ.get(
         "OPENCODE_MODEL", "minimax-coding-plan/MiniMax-M3"
     )
-    opencode_model = local_llm["model"] if local_llm else base_opencode_model
+    # `opencode_model` is the RESOLVED model (issue #165): the task
+    # label, the per-user default, or the org default — whichever won.
+    # `local_llm["model"]` still wins over all three (the local LLM
+    # keeps its top precedence).
+    opencode_model = (
+        local_llm["model"] if local_llm else (opencode_model or base_opencode_model)
+    )
     env = _blitzlog_env()
     s3_archive_prefix = f"{env}/{repo}/issue/{issue_number}"
     s3_log_prefix = s3_archive_prefix
@@ -151,9 +160,11 @@ def build_assisted_user_data(
         git_identity_env=git_identity_env,
         local_llm_log_line=local_llm_log,
         opencode_prompt=None,
+        opencode_base_url=opencode_base_url,
+        opencode_api_key_ssm_param=opencode_api_key_ssm_param,
     )
 
-    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_ssm_script(sender_login)}
+    return f"""{header}{_read_secrets_from_ssm_script(issue_number, local_llm=bool(local_llm), api_key_ssm_param=opencode_api_key_ssm_param)}{_read_git_identity_ssm_script(sender_login)}
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
@@ -169,7 +180,12 @@ fi
 log "Restoring previous session state..."
 {_session_restore_script(repo, issue_number, s3_bucket, env)}
 
-log "Effective opencode config: model=$OPENCODE_MODEL, provider=${{OPENCODE_MODEL%%/*}}, api_key_prefix=${{OPENCODE_API_KEY:0:8}}..."
+# `printf '%.8s'` truncates without the bash-only substring
+# expansion, and the `:-` default keeps the expansion safe
+# under `set -u` when a local LLM is configured (no cloud key is
+# fetched in that case, so OPENCODE_API_KEY is unset).
+api_key_prefix=$(printf '%.8s' "${{OPENCODE_API_KEY:-}}")
+log "Effective opencode config: model=$OPENCODE_MODEL, provider=${{OPENCODE_MODEL%%/*}}, api_key_prefix=${{api_key_prefix}}..."
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown) are now baked into the container
@@ -202,8 +218,15 @@ S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 S3_LOG_PREFIX="{s3_log_prefix}"
-OPENCODE_API_KEY="${{OPENCODE_API_KEY}}"
+OPENCODE_API_KEY="${{OPENCODE_API_KEY:-}}"
 OPENCODE_MODEL="{opencode_model}"
+# The resolved base URL of a BYO / self-hosted endpoint (empty for a
+# built-in provider). The container renders it as the provider's
+# options.baseURL together with a models map.
+OPENCODE_BASE_URL="${{OPENCODE_BASE_URL:-}}"
+# The server-derived secret-store path the host reads the API key
+# from. Never user-supplied text.
+OPENCODE_API_KEY_SSM_PARAM="${{OPENCODE_API_KEY_SSM_PARAM:-}}"
 OPENCODE_PROMPT=""
 LOCAL_LLM_ENDPOINT="${{LOCAL_LLM_ENDPOINT:-}}"
 LOCAL_LLM_MODEL="${{LOCAL_LLM_MODEL:-}}"
@@ -217,7 +240,7 @@ TELEGRAM_SENDER_LOGIN="{sender_login}"
 # Audit-trail identity (issue #119). Fetched from
 # /blitzlog/users/{{owner}}/git-author/{{name,email}} above; the
 # watchdog forwards to the container so entrypoint.sh can
-# `git config --global user.{{name,email}}`.
+# git config --global user.{{name,email}}.
 GIT_AUTHOR_NAME="${{GIT_AUTHOR_NAME:-}}"
 GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 STT_API_URL="${{STT_API_URL}}"

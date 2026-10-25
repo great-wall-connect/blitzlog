@@ -75,9 +75,20 @@ S3_LOGS_BUCKET="${S3_LOGS_BUCKET}"
 SESSION_ARCHIVE_BUCKET="${SESSION_ARCHIVE_BUCKET}"
 SESSION_ARCHIVE_PREFIX="${SESSION_ARCHIVE_PREFIX}"
 S3_LOG_PREFIX="${S3_LOG_PREFIX}"
-OPENCODE_API_KEY="${OPENCODE_API_KEY}"
+OPENCODE_API_KEY="${OPENCODE_API_KEY:-}"
 OPENCODE_MODEL="${OPENCODE_MODEL}"
 OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
+# Issue #165: the resolved base URL of a BYO / self-hosted endpoint
+# (empty for a built-in provider). The container renders it as the
+# provider's `options.baseURL` together with a `models` map.
+OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-}"
+# Issue #165: the server-derived secret-store path the HOST resolved
+# the API key from. The path is not a secret (the credential itself
+# is, and it crosses into the container as OPENCODE_API_KEY above);
+# it is carried so the container can report where its credential
+# came from. Re-emitted here because this rewrite OVERWRITES the
+# bootstrap's write of /etc/blitzlog.env.
+OPENCODE_API_KEY_SSM_PARAM="${OPENCODE_API_KEY_SSM_PARAM:-}"
 LOCAL_LLM_ENDPOINT="${LOCAL_LLM_ENDPOINT:-}"
 LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"
 LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-}"
@@ -155,6 +166,10 @@ COMMON_ARGS=(
     -e "OPENCODE_MODEL=$OPENCODE_MODEL"
     -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
     -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    # Issue #165: the resolved base URL + the path the API key was
+    # resolved from. The key itself is what the container uses.
+    -e "OPENCODE_BASE_URL=$OPENCODE_BASE_URL"
+    -e "OPENCODE_API_KEY_SSM_PARAM=$OPENCODE_API_KEY_SSM_PARAM"
     -e "LOCAL_LLM_ENDPOINT=$LOCAL_LLM_ENDPOINT"
     -e "LOCAL_LLM_MODEL=$LOCAL_LLM_MODEL"
     -e "LOCAL_LLM_API_KEY=$LOCAL_LLM_API_KEY"
@@ -170,6 +185,11 @@ COMMON_ARGS=(
     -e "GITHUB_TOKEN=$GITHUB_TOKEN"
     -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
     -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
+    # Issue #165: the container has no AWS credentials BY DESIGN. This
+    # makes the AWS SDK refuse the instance metadata service as well,
+    # on top of the host-side iptables rule that drops IMDS traffic
+    # from the container's network.
+    -e "AWS_EC2_METADATA_DISABLED=true"
 )
 
 # Mode-specific env vars. We don't reference these outside the
@@ -245,6 +265,29 @@ fi
 # instance .shutdown only ever appears because the agent's shutdown
 # tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
 rm -f /workspace/.shutdown
+
+# Defense in depth (issue #165): block the instance metadata service
+# from the CONTAINER's network.
+#
+# The container runs as root and lives on the docker bridge, so it can
+# reach 169.254.169.254 and assume the EC2 instance role — which, since
+# issue #165, can read ANY user's per-user inference credential
+# (/blitzlog/users/*/opencode/*). The container has no AWS credentials
+# BY DESIGN; this rule makes that true even if something in the agent
+# tries to go around it.
+#
+# DOCKER-USER is only traversed by FORWARDED container traffic, so the
+# HOST's own IMDS access (the watchdog's token + region fetches above)
+# is unaffected. The rule is best-effort: if the chain does not exist
+# yet, or iptables is unavailable, the run continues — issue #164
+# (non-root container, dropped capabilities, read-only rootfs) is the
+# real containment mechanism.
+if command -v iptables >/dev/null 2>&1; then
+    if ! iptables -C DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1; then
+        iptables -I DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1 || \
+            log "WARNING: could not block IMDS from the container network"
+    fi
+fi
 
 sudo docker run --name blitzlog-agent \
     "${TUNNEL_FLAGS[@]}" \

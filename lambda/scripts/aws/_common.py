@@ -95,6 +95,8 @@ def script_header(
     git_identity_env: str = "",
     local_llm_log_line: str = "",
     opencode_prompt: str | None = None,
+    opencode_base_url: str = "",
+    opencode_api_key_ssm_param: str = "",
 ) -> str:
     """Return the shebang + `set -euo pipefail` + defensive env scrub +
     `LOG_FILE`/`log()` + env-export preamble every bootstrap needs.
@@ -131,6 +133,18 @@ def script_header(
 
     `opencode_max_steps` is exported as `OPENCODE_AGENT_MAX_STEPS="N"` and
     is read by the container's entrypoint.sh when it writes opencode.json.
+
+    `opencode_base_url` is the optional base URL of a BYO / self-hosted
+    inference endpoint (issue #165). Empty for a built-in provider.
+
+    `opencode_api_key_ssm_param` is the RESOLVED secret-store path of
+    the API key the host should fetch (issue #165). It is always
+    server-derived — the per-user path when the buyer supplied their
+    own credential, the org path otherwise. The path travels as an env
+    var (rather than being interpolated into the `aws ssm
+    get-parameter` call) so the host reads `$OPENCODE_API_KEY_SSM_PARAM`
+    and the value stays in one place across the
+    `/etc/blitzlog.env` -> `docker run -e` hop.
     """
     if opencode_prompt is not None:
         opencode_interactive_lines = (
@@ -144,6 +158,10 @@ def script_header(
     git_identity_export = (
         " GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL" if git_identity_env else ""
     )
+
+    # The org path is the default: a deployment with no per-user
+    # credential keeps resolving the org key exactly as before.
+    api_key_ssm_param = opencode_api_key_ssm_param or f"{_ssm_root()}/opencode/api-key"
 
     return f"""#!/bin/bash
 set -euo pipefail
@@ -168,12 +186,14 @@ source /usr/local/bin/blitzlog_uploader.sh
 ISSUE_NUMBER={issue_number}
 REPO="{repo}"
 {opencode_interactive_lines}OPENCODE_MODEL="{opencode_model}"
+OPENCODE_BASE_URL="{opencode_base_url}"
+OPENCODE_API_KEY_SSM_PARAM="{api_key_ssm_param}"
 OPENCODE_AGENT_MAX_STEPS="{opencode_max_steps}"
 S3_LOGS_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_BUCKET="{s3_bucket}"
 SESSION_ARCHIVE_PREFIX="{s3_archive_prefix}"
 S3_LOG_PREFIX="{s3_log_prefix}"
-{local_llm_env}{git_identity_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX S3_LOG_PREFIX{git_identity_export}
+{local_llm_env}{git_identity_env}export ISSUE_NUMBER OPENCODE_MODEL OPENCODE_BASE_URL OPENCODE_API_KEY_SSM_PARAM OPENCODE_AGENT_MAX_STEPS S3_LOGS_BUCKET{interactive_export} SESSION_ARCHIVE_BUCKET SESSION_ARCHIVE_PREFIX S3_LOG_PREFIX{git_identity_export}
 
 log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
@@ -183,13 +203,23 @@ log "Reading secrets from SSM..."
 """
 
 
-def _read_secrets_from_ssm_script(issue_number: int, local_llm: bool = False) -> str:
+def _read_secrets_from_ssm_script(
+    issue_number: int, local_llm: bool = False, api_key_ssm_param: str = ""
+) -> str:
     """Render the bootstrap snippet that fetches the GitHub token and (when a
     cloud run is intended) the OPENCODE_API_KEY from SSM via IMDSv2.
 
     When local_llm is True the OPENCODE_API_KEY export is omitted so the agent
     has no cloud credentials in its environment. The cloud-fallback path
     re-reads the SSM param on demand.
+
+    `api_key_ssm_param` is the RESOLVED path of the key parameter
+    (issue #165) — the per-user path when the buyer brought their own
+    credential, the org path otherwise. The fetch reads it from
+    `$OPENCODE_API_KEY_SSM_PARAM` (exported by `script_header`) rather
+    than interpolating the path into the command, so the path exists in
+    exactly one place. It is always server-derived, never user-supplied
+    text, so there is no injection surface.
     """
     ssm_root = _ssm_root()
 
@@ -197,9 +227,9 @@ def _read_secrets_from_ssm_script(issue_number: int, local_llm: bool = False) ->
     if not local_llm:
         api_key_block = (
             "\n"
-            f"OPENCODE_API_KEY=$(aws ssm get-parameter --name "
-            f'"{ssm_root}/opencode/api-key" --with-decryption --query '
-            f'Parameter.Value --output text --region "$REGION")\n'
+            "OPENCODE_API_KEY=$(aws ssm get-parameter --name "
+            '"$OPENCODE_API_KEY_SSM_PARAM" --with-decryption --query '
+            'Parameter.Value --output text --region "$REGION")\n'
             "export OPENCODE_API_KEY\n"
         )
 

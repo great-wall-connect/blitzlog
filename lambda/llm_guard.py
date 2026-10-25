@@ -10,6 +10,20 @@ The guard sits behind `bot_pool.get_local_llm_config` and is consulted on
 every LLM endpoint lookup so a malicious or misconfigured SSM param can't
 trick the bootstrap into shipping credentials to loopback or to an
 attacker-controlled public endpoint.
+
+Two validation modes, because "local endpoint" and "BYO cloud endpoint"
+have opposite public/private postures:
+
+  * `validate_local_endpoint` — a LOCAL LLM must be reachable only
+    from a private network. Public IPs are hard-rejected: the whole
+    point of the local-LLM feature is that the model never leaves
+    the user's own network.
+
+  * `validate_byo_endpoint` — a BYO (bring-your-own) provider
+    endpoint is normally a PUBLIC API (`api.openai.com`), so public
+    IPs are fine. Loopback and link-local stay hard-blocked (that is
+    the IMDS / metadata-service path), and private ranges need an
+    explicit opt-in — a self-hosted endpoint on a Tailnet or VPC.
 """
 
 import ipaddress
@@ -72,3 +86,79 @@ def _resolve_endpoint_ips(endpoint: str) -> list[str]:
             ip = ip.split("%", 1)[0]
         ips.append(ip)
     return ips
+
+
+def _http_url_reason(url: str) -> str:
+    """Return "" when the URL's scheme + hostname are structurally
+    fine, otherwise a human-readable explanation."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"non-http(s) scheme {parsed.scheme!r}"
+    if not parsed.hostname:
+        return "no hostname"
+    return ""
+
+
+def validate_byo_endpoint(
+    url: str, allow_private_cidrs: bool = False
+) -> tuple[bool, str]:
+    """Validate a BYO (bring-your-own) provider endpoint URL.
+
+    Returns `(ok, reason)`. `reason` is "" when `ok` is True.
+
+    Rules:
+      - Always blocked: loopback, link-local (covers the EC2/Aliyun
+        metadata service).
+      - Opt-in (requires `allow_private_cidrs`): RFC1918, ULA,
+        Tailscale CGNAT — a self-hosted endpoint on a private
+        network.
+      - Public IPs are ALLOWED — a cloud provider's API endpoint
+        normally resolves to one.
+
+    Used by `bot_pool.get_opencode_profile` for the per-user
+    `opencode_base_url` parameter (issue #165).
+    """
+    url = (url or "").strip()
+    if not url:
+        return False, "empty URL"
+
+    reason = _http_url_reason(url)
+    if reason:
+        return False, reason
+
+    try:
+        resolved_ips = _resolve_endpoint_ips(url)
+    except (OSError, ValueError) as e:
+        # OSError covers socket.gaierror (the usual DNS failure) and
+        # any other resolver-level error.
+        return False, f"DNS resolution failed: {e}"
+
+    if not resolved_ips:
+        return False, "no resolved addresses"
+
+    for ip_str in resolved_ips:
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False, f"cannot parse resolved IP {ip_str!r}"
+
+        if _ip_always_blocked(ip_obj):
+            return False, (
+                f"resolves to always-blocked IP {ip_obj} (loopback or link-local)"
+            )
+
+        if _ip_is_opt_in_only(ip_obj) and not allow_private_cidrs:
+            return False, (
+                f"resolves to private IP {ip_obj} but private endpoints are not "
+                f"enabled"
+            )
+
+    return True, ""
+
+
+__all__ = [
+    "_ip_always_blocked",
+    "_ip_is_opt_in_only",
+    "_resolve_endpoint_ips",
+    "validate_byo_endpoint",
+]

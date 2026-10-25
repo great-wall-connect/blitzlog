@@ -77,6 +77,28 @@ variable "opencode_model" {
   default     = "minimax-coding-plan/MiniMax-M3"
 }
 
+variable "opencode_api_key_provider" {
+  description = "The provider the OpenCode inference credential belongs to (e.g. anthropic). Defaults to the provider prefix of var.opencode_model. Issue #165: a credential is only ever used with a model whose provider matches it, so the org credential's provider has to be declared. Set it explicitly when var.opencode_model names a provider that differs from the one the key actually belongs to (e.g. an internal proxy that fronts the same provider)."
+  type        = string
+  default     = ""
+}
+
+variable "opencode_model_profiles" {
+  description = "Alias -> model profile, selectable per task via the 'model:<alias>' issue label (issue #165). The alias is chosen by whoever labels the issue, so only register aliases the operator is happy to expose; 'model:<provider>/<model>' is the raw form and is restricted to var.opencode_allowed_providers. A profile may carry a base_url — that is how an org registers a buyer's self-hosted endpoint WITHOUT the label being able to."
+  type = map(object({
+    model    = string
+    base_url = optional(string)
+    provider = optional(string)
+  }))
+  default = {}
+}
+
+variable "opencode_allowed_providers" {
+  description = "Providers a raw 'model:<provider>/<model>' label value may name (issue #165). Arbitrary endpoints are never reachable from a label: the run's credential rides along with the model, so a labeler must not be able to point a run at a provider the operator has not approved. An empty list means raw labels are rejected (only operator-registered aliases are selectable)."
+  type        = list(string)
+  default     = []
+}
+
 variable "opencode_agent_max_steps" {
   description = "Maximum number of agentic iterations the opencode CLI is allowed per session. When the per-session counter reaches this cap, opencode injects MAX_STEPS_PROMPT and forces a summarization — the agent stops mid-task. Default 500 is sized well above a typical multi-file change (variable + script + wrapper + tests + docs + verify + commit + PR) but still acts as a safety net against runaway loops. Set higher for particularly large tasks; lower for cost-sensitive deployments."
   type        = number

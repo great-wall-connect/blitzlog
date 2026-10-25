@@ -43,6 +43,20 @@ Why the rule exists:
 
 Filing or batching issues in this repo is, by definition, an agent task — so this rule applies to every issue created by an automated agent on this repository.
 
+### Model labels are a privilege, not a preference
+
+The labels `model:<value>` select the inference model for a single task (issue #165). **Agents must never apply them either** — same rule, same reasoning.
+
+A model label is not cosmetic. It decides which provider the run's credential authenticates to, and therefore which endpoint receives the key and which catalogue the model is drawn from. Picking that for someone else is a privilege decision, and the blast radius is a credential.
+
+The rules that make it safe for humans are the same ones that make it unsafe for an agent to do it silently:
+
+- A **raw** `model:<provider>/<model>` label requires a per-user credential and is restricted to the operator's approved-provider list. The org's shared credential is never reachable from a raw label.
+- An **alias** (`model:<alias>`, registered by the operator in `opencode_model_profiles`) may run on the org credential, because the operator chose what the alias points at.
+- A credential is only ever used with a model whose provider matches it. A mismatch fails the run fast — the key is never sent to the wrong provider.
+
+So: leave the choice to the human who owns the credential. If a task genuinely needs a different model, say so in the issue body and let the maintainer apply the label.
+
 ## Agent Commit Attribution (Audit Trail)
 
 A blitzlog agent's commits must be attributed to the human who triggered the run, **not** to the EC2 default (`root@<hostname>`), the worker hostname, or any fictional runner identity. "A bot cannot be audited. The owner — the person who chose to trigger the event — is responsible for the task."

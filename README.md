@@ -60,7 +60,7 @@ Two modes:
 | `infra/alicloud/modules/core/` | Reusable Terraform module containing all Alicloud-shaped blitzlog resources (Function Compute + ECS + RAM + API Gateway + OSS + MNS + KMS). Issue #126. |
 | `infra/alicloud/{dev,prod}/` | Thin Terraform wrappers that deploy the Alicloud core module with `environment = "dev"` / `"prod"`. The release workflow picks the tree based on `vars.BLITZLOG_PROVIDER`. |
 | `infra/alicloud/bootstrap/` | One-time Alicloud bootstrap stack: shared OSS buckets (agent logs + STT models) |
-| `infra/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool and per-user local LLM config into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
+| `infra/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool, per-user local LLM config, and per-user OpenCode model + credential into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
 | `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
@@ -722,6 +722,15 @@ aws ssm get-parameters-by-path \
 
 You should see your `allowed-user-id` parameter and one `pool/<bot>` parameter per bot.
 
+If you configured a [per-user model or credential](#model-selection-three-levels-issue-165), the `opencode/` namespace shows up here too:
+
+```bash
+aws ssm get-parameters-by-path \
+  --path "/blitzlog/users/<owner_login>/opencode/" \
+  --recursive \
+  --query "Parameters[].Name"
+```
+
 ### Rotate, add, or remove bots
 
 1. Edit `infra/user-pool/terraform.tfvars`.
@@ -1058,6 +1067,8 @@ In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present
 
 **Fix:** Remove and re-add the correct label, or use the exact names above. If the label is correct but still no launch, check later log lines for bot-pool or spot-capacity errors.
 
+If the webhook returned HTTP `422`, the model/credential combination was rejected before launch — see [Model selection](#model-selection-three-levels-issue-165) for the binding rule. The response body names the rejected value and the knob to fix.
+
 ### `No bot pool configured for user X`
 
 **Symptom:** Assisted mode fails; Lambda logs `No bot pool configured for user <login>` (and the API body reports the same).
@@ -1267,6 +1278,96 @@ The default model is `minimax-coding-plan/MiniMax-M3`. Override for any provider
 
 ---
 
+## Model selection (three levels, issue #165)
+
+Blitzlog resolves the inference model **per run**, from three levels. The higher one supersedes the lower when it is set:
+
+| Level | Where it comes from | Who sets it |
+|---|---|---|
+| 1. Per task | A `model:<value>` issue label | whoever labels the issue |
+| 2. Per user | `/blitzlog/users/<login>/opencode/model` (your `infra/user-pool/`) | the buyer |
+| 3. Per org | `var.opencode_model` (the deployment default) | the operator |
+
+The credential resolves on **its own axis** and travels with the user:
+
+```
+per-user credential  →  org credential
+```
+
+A buyer with their own key and no model override runs the **org default model on their own key**, as long as the providers match. That is the purest BYOK story, and it falls out of the binding rule rather than needing a special case.
+
+> **Local LLMs keep their top precedence.** If a local LLM is configured, it wins outright and the three levels below do not apply — existing local-LLM users see no behaviour change.
+
+### The binding rule
+
+> A credential is used **only** with a model whose provider matches the credential's provider. On a mismatch the run fails fast with an explicit message — the agent must never send a key to a provider it does not belong to.
+
+A mismatch fails the **webhook** (HTTP 422) before any EC2 instance is launched, so a misconfiguration costs no spot spend. The error names both providers and the knob to fix.
+
+### The `model:` label
+
+`model:<value>` resolves in two steps:
+
+1. `<value>` matches an **alias** in the operator's profile allowlist → that profile is used.
+2. Otherwise `<value>` parses as `<provider>/<model>` **and** `<provider>` is on the operator's **approved-provider list** → used raw.
+
+Anything else is ignored: the label falls through to the next level and the Lambda logs a warning naming the rejected value. When an issue carries several `model:` labels, the alphabetically-first one that *resolves* wins, and the conflict is logged.
+
+A label selects a **model**, never a secret — labels are visible to everyone with repo read access, so they cannot carry credentials.
+
+```hcl
+# infra/aws/{prod,dev}/terraform.tfvars
+opencode_model_profiles = {
+  fast = {
+    model = "minimax-coding-plan/MiniMax-M2"
+  }
+  internal = {
+    model    = "anthropic/claude-sonnet-4"
+    base_url = "https://llm.internal/v1"
+  }
+}
+
+# Providers a raw `model:<provider>/<model>` label may name. Arbitrary
+# endpoints are never reachable from a label.
+opencode_allowed_providers = ["minimax-coding-plan"]
+```
+
+A profile may carry a `base_url` — that is how an org registers a buyer's self-hosted endpoint **without** the label being able to.
+
+### Raw labels need your own credential
+
+An operator-registered **alias** may run on the org credential: the operator chose what the alias points at. A **raw** `model:<provider>/<model>` may **not** — the raw string is chosen by whoever can label an issue, so the org's shared key is never reachable from it. A raw label therefore requires a per-user credential, and fails fast with an actionable message when none is configured.
+
+### Bring your own model + credential
+
+In your `infra/user-pool/terraform.tfvars`:
+
+```hcl
+opencode_model                = "anthropic/claude-sonnet-4"
+opencode_api_key              = "sk-ant-..."
+opencode_api_key_provider     = "anthropic"   # defaults to opencode_model's provider
+# opencode_base_url           = "https://llm.internal/v1"
+# opencode_base_url_allow_private_cidrs = true
+```
+
+These land in `/blitzlog/users/<login>/opencode/{model,api-key,provider,base-url}` — the same env-independent namespace as your bot pool, so one configuration serves prod and dev.
+
+`opencode_api_key_provider` is the provider your key belongs to; the binding rule checks it against the selected model's provider. Set it **explicitly** when `opencode_model` is empty — your key then runs the org default model, which only works when the two providers match.
+
+> The credential is stored as a SecureString and **the Lambda never reads it**. The Lambda resolves the *path*; the EC2 host fetches the key from there.
+
+### Self-hosted endpoints
+
+`opencode_base_url` points the agent at your own endpoint. It requires `opencode_api_key` — the org credential is never sent to a custom endpoint. The endpoint must resolve to a public IP, or to a private one with `opencode_base_url_allow_private_cidrs = true` (loopback and link-local — the instance metadata service — are always rejected).
+
+With a base URL set, the container renders the provider's `options.baseURL` **and** an explicit `models` map. The map is required: without it opencode has no catalogue of valid model ids for a custom provider and emits `Model not found: <provider>/<id>` even when the endpoint is reachable.
+
+### Label hygiene
+
+**Agents must never apply `model:*` labels** — see [AGENTS.md](AGENTS.md). A model label decides which provider a run's credential authenticates to; that is a privilege decision, and the blast radius is a credential.
+
+---
+
 ## Example
 
 A worked example — labelled issue → PR — lives in a separate repo:
@@ -1284,6 +1385,7 @@ This project follows the conventions in [AGENTS.md](AGENTS.md). The autonomous a
 - **Tests required** for all new functionality.
 - **No breaking changes** without an issue discussion.
 - **Trigger labels are for humans, not agents**: the labels `autonomous` and `assisted` cause blitzlog to launch an EC2 agent for the labeled issue, so an automated agent must never apply them.
+- **Model labels are a privilege, not a preference**: the labels `model:*` decide which provider a run's credential authenticates to, so an automated agent must never apply them either (see [AGENTS.md](AGENTS.md)).
 
 ---
 

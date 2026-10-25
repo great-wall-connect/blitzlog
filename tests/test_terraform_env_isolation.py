@@ -557,6 +557,150 @@ class TestEnvNamespacing(unittest.TestCase):
         )
 
 
+class TestModelSelectionTerraform(unittest.TestCase):
+    """Issue #165: the Terraform surface of the three-level model
+    selection.
+
+    - The org's model profiles + approved-provider list reach the
+      Lambda as JSON env vars (the SPOT_INSTANCE_TYPES_JSON precedent).
+    - The EC2 agent role can read the per-user credential namespace.
+    - The user-pool creates the per-user model + credential under the
+      env-independent /blitzlog/users/<login>/opencode/ namespace.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.iam_tf = IAM_TF.read_text()
+        cls.lambda_tf = LAMBDA_TF.read_text()
+        cls.variables_tf = (
+            REPO_ROOT / "infra" / "aws" / "modules" / "core" / "variables.tf"
+        ).read_text()
+        cls.user_pool_main = USER_POOL_MAIN.read_text()
+        cls.user_pool_vars = USER_POOL_VARS.read_text()
+
+    def test_ec2_agent_policy_can_read_user_opencode_credential(self):
+        """The host resolves the buyer's own credential from
+        /blitzlog/users/<login>/opencode/api-key — the EC2 agent role
+        must be able to read it."""
+        body = _policy_body_for_role("ec2_agent_policy", self.iam_tf)
+        self.assertIn(
+            "arn:aws:ssm:*:*:parameter/blitzlog/users/*/opencode/*",
+            body,
+            "EC2 agent policy must allow ssm:GetParameter on "
+            "/blitzlog/users/*/opencode/* (issue #165)",
+        )
+
+    def test_lambda_role_can_read_the_user_opencode_namespace(self):
+        """The Lambda reads the per-user model + credential metadata
+        (never the key material) — the existing users/* grant covers
+        it, but the grant must not have been narrowed."""
+        body = _policy_body_for_role("lambda_policy", self.iam_tf)
+        self.assertIn(
+            "arn:aws:ssm:*:*:parameter/blitzlog/users/*",
+            body,
+            "Lambda policy must allow ssm:GetParameter on /blitzlog/users/*",
+        )
+
+    def test_lambda_wires_the_model_selection_env_vars(self):
+        for env_var, source in (
+            ("OPENCODE_MODEL_PROFILES", "jsonencode(var.opencode_model_profiles)"),
+            (
+                "OPENCODE_ALLOWED_PROVIDERS",
+                "jsonencode(var.opencode_allowed_providers)",
+            ),
+            ("OPENCODE_API_KEY_PROVIDER", "var.opencode_api_key_provider"),
+        ):
+            self.assertIn(
+                env_var,
+                self.lambda_tf,
+                f"lambda.tf must pass {env_var} to the Lambda (issue #165)",
+            )
+            self.assertIn(
+                source,
+                self.lambda_tf,
+                f"{env_var} must be wired from {source}",
+            )
+
+    def test_core_module_declares_the_model_selection_variables(self):
+        for name in (
+            "opencode_model_profiles",
+            "opencode_allowed_providers",
+            "opencode_api_key_provider",
+        ):
+            self.assertIn(
+                f'variable "{name}"',
+                self.variables_tf,
+                f"core variables.tf must declare {name} (issue #165)",
+            )
+
+    def test_model_profiles_use_optional_attributes(self):
+        """The profile shape is {model, base_url?, provider?} — the
+        optional() form needs Terraform >= 1.3, so the module's
+        required_version has to allow it."""
+        self.assertIn("optional(string)", self.variables_tf)
+        main_tf = (
+            REPO_ROOT / "infra" / "aws" / "modules" / "core" / "main.tf"
+        ).read_text()
+        self.assertIn('required_version = ">= 1.3"', main_tf)
+
+    def test_both_env_layers_pass_the_model_selection_variables(self):
+        for layer in ("prod", "dev"):
+            layer_main = (REPO_ROOT / "infra" / "aws" / layer / "main.tf").read_text()
+            layer_vars = (
+                REPO_ROOT / "infra" / "aws" / layer / "variables.tf"
+            ).read_text()
+            for name in (
+                "opencode_model_profiles",
+                "opencode_allowed_providers",
+                "opencode_api_key_provider",
+            ):
+                self.assertRegex(
+                    layer_main,
+                    rf"{name}\s*=\s*var\.{name}",
+                    f"infra/aws/{layer}/main.tf must pass {name} to the core module",
+                )
+                self.assertIn(
+                    f'variable "{name}"',
+                    layer_vars,
+                    f"infra/aws/{layer}/variables.tf must declare {name}",
+                )
+
+    def test_user_pool_creates_the_opencode_namespace(self):
+        for name in (
+            "opencode_model",
+            "opencode_api_key",
+            "opencode_api_key_provider",
+            "opencode_base_url",
+        ):
+            self.assertIn(
+                f'variable "{name}"',
+                self.user_pool_vars,
+                f"infra/user-pool/variables.tf must declare {name} (issue #165)",
+            )
+        self.assertIn(
+            '"/blitzlog/users/${var.owner_login}/opencode/${each.value}"',
+            self.user_pool_main,
+            "the user-pool must create the params under "
+            "/blitzlog/users/<login>/opencode/",
+        )
+
+    def test_user_opencode_namespace_is_env_independent(self):
+        """The per-user namespace must carry no env prefix — a buyer
+        has one model and one credential, not one per env."""
+        self.assertNotIn(
+            "/blitzlog/${", self.user_pool_main.split("opencode")[1][:2000]
+        )
+
+    def test_only_the_credential_is_a_secure_string(self):
+        """The model id, the provider name and the base URL are
+        configuration; only the key is a secret."""
+        self.assertIn(
+            'opencode_secure_keys = ["api-key"]',
+            self.user_pool_main,
+            "only the api-key parameter may be a SecureString",
+        )
+
+
 class TestAlicloudProviderDispatch(unittest.TestCase):
     """Static analysis tests for the Alicloud Terraform split (issue #126).
 
