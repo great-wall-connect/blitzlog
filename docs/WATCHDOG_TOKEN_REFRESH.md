@@ -171,6 +171,13 @@ watchdog.
        └──────────────────────────────┘
 ```
 
+Since issue #164 the two host-side files are mounted **read-only** into
+the container (at `$HOME/.git-credentials.d/github` and
+`$HOME/.config/gh/hosts.yml`): the host is the only writer, so the
+agent can read the refreshed token but cannot tamper with the host's
+copy of it. The token is also no longer passed to the container as an
+env var. The mechanism itself is otherwise unchanged.
+
 The chain ends naturally at iteration 9 — no 11th event is
 scheduled. If the EC2 instance dies before the chain ends, the
 remaining events fire and no-op against the missing SSM parameter
@@ -435,8 +442,8 @@ done
 |---|---|
 | `Token change detected` doesn't fire within `BLITZLOG_TOKEN_POLL_INTERVAL` | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
 | File mtime updates but content is wrong | The library's printf format changed; check `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml` against `git credential fill` / `yaml.safe_load`. |
-| `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare `watchdog.sh:124` (mkdir) vs `watchdog.sh:133` (write) vs `watchdog.sh:254` (bind mount). |
+| `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare the `mkdir -p "/root/gh-config/${INSTANCE_ID}"` (mkdir) vs the `_bl_tokenpoll_write_gh_hosts_yml` call (write) vs the `-v` bind mount (bind mount) in `watchdog.sh`. |
 | Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
-| `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
+| `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation in `watchdog.sh` is the safety net. |
 | Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/aws/bootstrap/`). |

@@ -146,7 +146,9 @@ GitHub App installation tokens are capped to **1 hour** regardless of the reques
 
 1. The Lambda mints a fresh token at webhook time and writes it to `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>` (per-(env, owner, repo, issue) so two issues numbered the same in different repos don't collide).
 2. Right after the EC2 launch, the Lambda schedules a chain of 10 one-time EventBridge Scheduler events, 50 min apart, each of which re-mints the token (via the existing `get_github_app_token` path) and overwrites the same SecureString.
-3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the bind-mounted `/root/.git-credentials.d/github` and `/root/.config/gh/hosts.yml` whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
+3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the host-side credential files — `/root/.git-credentials.d/github` and `/root/gh-config/<instance>/hosts.yml` — whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
+
+Since issue #164 those two files are mounted **read-only** into the container (at `$HOME/.git-credentials.d/github` and `$HOME/.config/gh/hosts.yml`): the host is the only writer, so the agent cannot tamper with the host's copy of the token, and the token is no longer passed to the container as an env var.
 
 **No agent-side code change is required.** The chain is fully Lambda-owned (no per-instance state, no continuous schedule); if the EC2 instance dies before the chain ends, the remaining events fire and no-op against the missing SSM parameter.
 

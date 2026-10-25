@@ -25,12 +25,15 @@ plus host extras (`awscli`, `git`, `jq`) and the host-side watchdog
 - **Tags**: semver (`2.1.0`) for prod; `latest` mirrors the most recent push
 - **Architecture**: `linux/arm64`
 - **Base**: `python:3.12-slim` (debian, glibc) — multi-stage build
+- **User**: `blitzlog` (uid/gid 1000), `HOME=/home/blitzlog` — the image
+  does **not** run as root (see [the container boundary](#security-the-container-boundary))
 - **Contents**:
   - whisper.cpp prebuilt aarch64-linux-gnu CLI (pinned to `v1.7.6`)
   - `pywhispercpp`, `python-multipart`, `imageio-ffmpeg` (Python deps)
   - `opencode-ai` CLI (npm)
   - `@grinev/opencode-telegram-bot` (npm)
-  - opencode plugins (baked from `packages/opencode-session-archive/` etc.)
+  - opencode plugins + tools, baked into `/opt/blitzlog/opencode/` and
+    copied into `$HOME/.config/opencode/` on boot
   - `git`, `curl`, `jq`, `libgomp1`, `ca-certificates`
 - **No `awscli` / no `boto3`**: the container has zero AWS credentials. The
   host does all SSM/S3 work and passes results via env vars + mounted files.
