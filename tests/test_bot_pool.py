@@ -826,6 +826,22 @@ class TestGetOpencodeProfile(unittest.TestCase):
         self.assertIsNone(get_opencode_profile("octocat"))
 
     @patch("provider.aws._boto3_client")
+    def test_rejects_an_invalid_model(self, mock_boto3_client):
+        """The per-user model lands in the EC2 user-data bash script,
+        so an invalid value rejects the WHOLE profile — the buyer
+        meant to run their own model, and silently falling back to the
+        org model would not be what they asked for."""
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": 'evil/x"; rm -rf / #',
+                "api-key": "sk-secret",
+                "provider": "evil",
+            }
+        )
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("provider.aws._boto3_client")
     def test_reads_the_env_independent_user_namespace(self, mock_boto3_client):
         mock_ssm = mock_boto3_client.return_value
         mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(

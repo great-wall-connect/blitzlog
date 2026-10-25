@@ -41,7 +41,7 @@ from llm_guard import (
     _resolve_endpoint_ips,
     validate_byo_endpoint,
 )
-from model_select import UserOpencodeProfile
+from model_select import UserOpencodeProfile, is_valid_model
 from provider import get_object_store, get_secrets
 
 BOT_POOL_LOCK_PREFIX = "bot-pool-locks"
@@ -257,6 +257,21 @@ def get_opencode_profile(sender_login: str) -> UserOpencodeProfile | None:
     base_url = (params.get("base-url") or "").strip()
 
     if not any((model, api_key, provider, base_url)):
+        return None
+
+    # The model string is interpolated into the EC2 user-data bash
+    # script (`OPENCODE_MODEL="..."`), so it is validated before it
+    # can reach one. An invalid value rejects the WHOLE profile: the
+    # buyer meant to run their own model, and silently falling back to
+    # the org model (or running it on the org credential) would not be
+    # what they asked for.
+    if model and not is_valid_model(model):
+        logger.warning(
+            "Opencode model %r for %s is not a valid '<provider>/<model>' value "
+            "— the per-user profile is ignored for this run",
+            model,
+            sender_login,
+        )
         return None
 
     if base_url:

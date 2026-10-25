@@ -466,6 +466,45 @@ class TestBindingRule(unittest.TestCase):
         with self.assertRaises(ModelSelectionError):
             _resolve(org_model="")
 
+    def test_an_invalid_org_model_fails_fast(self):
+        """The org model lands in the EC2 user-data bash script, so it
+        is validated like every other source."""
+        with self.assertRaises(ModelSelectionError) as ctx:
+            _resolve(org_model='evil/x"; rm -rf / #')
+        self.assertIn("not a valid", str(ctx.exception))
+
+    def test_an_invalid_user_model_fails_fast(self):
+        """Same for the per-user model: it comes from the buyer's own
+        Terraform and lands in the same bash script."""
+        user = UserOpencodeProfile(
+            model='evil/x"; rm -rf / #',
+            has_api_key=True,
+            provider="evil",
+        )
+        with self.assertRaises(ModelSelectionError) as ctx:
+            _resolve(user_profile=user, user_login="octocat")
+        self.assertIn("not a valid", str(ctx.exception))
+
+    def test_a_profile_with_an_invalid_model_is_skipped(self):
+        """An operator typo in one alias must not fail every run: the
+        alias is ignored and the label falls through."""
+        with patch("model_select.logger") as log:
+            profiles = load_model_profiles('{"bad": {"model": "x"; rm -rf / #"}}')
+            self.assertEqual(profiles, {})
+            log.error.assert_called()
+            sel = _resolve(labels={"model:bad"})
+            self.assertEqual(sel.model, ORG_MODEL)
+
+    def test_a_profile_may_supply_the_provider_separately(self):
+        """A profile may name a bare model id plus the provider — the
+        rendered model gets the provider prefix."""
+        profiles = load_model_profiles(
+            '{"proxied": {"model": "MiniMax-M2", "provider": "minimax-coding-plan"}}'
+        )
+        self.assertIn("proxied", profiles)
+        sel = _resolve(labels={"model:proxied"}, profiles=profiles)
+        self.assertEqual(sel.model, "minimax-coding-plan/MiniMax-M2")
+
 
 if __name__ == "__main__":
     unittest.main()

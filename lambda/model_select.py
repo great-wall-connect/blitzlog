@@ -281,6 +281,18 @@ def load_model_profiles(raw: str | None = None) -> dict[str, ModelProfile]:
                 "OPENCODE_MODEL_PROFILES[%r] has no 'model'; alias ignored", alias
             )
             continue
+        profile_provider = str(spec.get("provider") or "").strip()
+        if not is_valid_model(model) and not (profile_provider and "/" not in model):
+            # A profile whose model cannot be rendered safely into the
+            # EC2 user-data is skipped rather than failing the run:
+            # the label falls through to the next level, with a
+            # warning naming the rejected value.
+            logger.error(
+                "OPENCODE_MODEL_PROFILES[%r] has an invalid model %r; alias ignored",
+                alias,
+                model,
+            )
+            continue
         provider = str(spec.get("provider") or "").strip()
         base_url = str(spec.get("base_url") or "").strip()
         if base_url and not is_valid_base_url(base_url):
@@ -433,6 +445,19 @@ def resolve_selection(
         raise ModelSelectionError(
             "No model could be resolved: the org default model is empty and no "
             "per-task label or per-user default was supplied."
+        )
+
+    # The model string is interpolated into the EC2 user-data bash
+    # script (`OPENCODE_MODEL="..."`) and into the container's
+    # opencode.json, so EVERY source is validated — not just the raw
+    # label. A per-user model comes from the buyer's own Terraform and
+    # an org model from the operator's: a typo in either must fail
+    # loudly rather than land in a shell script unvalidated.
+    if not is_valid_model(model):
+        raise ModelSelectionError(
+            f"The selected model {model!r} is not a valid '<provider>/<model>' "
+            f"value and was rejected. Models must look like "
+            f"'provider/model' (e.g. 'anthropic/claude-sonnet-4')."
         )
 
     if needs_user_credential and not user.has_api_key:
