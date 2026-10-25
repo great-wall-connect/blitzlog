@@ -63,7 +63,7 @@ class TestParseModelLabels(unittest.TestCase):
         self.assertEqual(parse_model_labels({"model:   "}), [])
 
     def test_dedupes(self):
-        self.assertEqual(parse_model_labels({"model:a", "model:a"}), ["a"])
+        self.assertEqual(parse_model_labels(["model:a", "model:a"]), ["a"])
 
     def test_handles_none(self):
         self.assertEqual(parse_model_labels(None), [])
@@ -169,10 +169,13 @@ class TestProfileLoading(unittest.TestCase):
         self.assertEqual(load_model_profiles(""), {})
 
     def test_allowed_providers_parsing(self):
-        self.assertEqual(load_allowed_providers('["openai", " anthropic "]'), [
-            "openai",
-            "anthropic",
-        ])
+        self.assertEqual(
+            load_allowed_providers('["openai", " anthropic "]'),
+            [
+                "openai",
+                "anthropic",
+            ],
+        )
 
     def test_allowed_providers_malformed_fails_closed(self):
         with patch("model_select.logger") as log:
@@ -210,10 +213,10 @@ class TestPrecedence(unittest.TestCase):
             has_api_key=True,
             provider="anthropic",
         )
-        profiles = {"cheap": ModelProfile(alias="cheap", model="anthropic/claude-haiku")}
-        sel = _resolve(
-            labels={"model:cheap"}, user_profile=user, profiles=profiles
-        )
+        profiles = {
+            "cheap": ModelProfile(alias="cheap", model="anthropic/claude-haiku")
+        }
+        sel = _resolve(labels={"model:cheap"}, user_profile=user, profiles=profiles)
         self.assertEqual(sel.model, "anthropic/claude-haiku")
         self.assertEqual(sel.source, SOURCE_LABEL_ALIAS)
 
@@ -287,9 +290,7 @@ class TestLabelResolution(unittest.TestCase):
             self.assertEqual(sel.model, "anthropic/claude-sonnet-4")
             self.assertEqual(sel.source, SOURCE_USER)
             # The rejected value is named in the warning.
-            self.assertTrue(
-                any("evil/model" in w for w in sel.warnings), sel.warnings
-            )
+            self.assertTrue(any("evil/model" in w for w in sel.warnings), sel.warnings)
             self.assertTrue(
                 any("evil/model" in str(c) for c in log.warning.call_args_list)
             )
@@ -299,9 +300,7 @@ class TestLabelResolution(unittest.TestCase):
             sel = _resolve(labels={"model:nosuchalias"})
             self.assertEqual(sel.model, ORG_MODEL)
             self.assertEqual(sel.source, SOURCE_ORG)
-            self.assertTrue(
-                any("nosuchalias" in w for w in sel.warnings), sel.warnings
-            )
+            self.assertTrue(any("nosuchalias" in w for w in sel.warnings), sel.warnings)
             self.assertTrue(
                 any("nosuchalias" in str(c) for c in log.warning.call_args_list)
             )
@@ -313,9 +312,7 @@ class TestLabelResolution(unittest.TestCase):
             sel = _resolve(labels={'model:evil/x"; rm -rf / #'})
             self.assertEqual(sel.model, ORG_MODEL)
             self.assertTrue(any("evil/x" in w for w in sel.warnings), sel.warnings)
-            self.assertTrue(
-                any("evil/x" in str(c) for c in log.warning.call_args_list)
-            )
+            self.assertTrue(any("evil/x" in str(c) for c in log.warning.call_args_list))
 
     def test_multiple_labels_pick_the_first_that_resolves(self):
         profiles = {

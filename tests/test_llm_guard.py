@@ -17,9 +17,7 @@ from llm_guard import validate_byo_endpoint
 
 class TestValidateByoEndpoint(unittest.TestCase):
     def test_accepts_public_endpoint(self):
-        with patch(
-            "llm_guard._resolve_endpoint_ips", return_value=["93.184.216.34"]
-        ):
+        with patch("llm_guard._resolve_endpoint_ips", return_value=["93.184.216.34"]):
             ok, reason = validate_byo_endpoint("https://api.openai.com/v1")
         self.assertTrue(ok, reason)
         self.assertEqual(reason, "")

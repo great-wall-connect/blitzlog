@@ -88,21 +88,20 @@ def _resolve_endpoint_ips(endpoint: str) -> list[str]:
     return ips
 
 
-def _parse_http_url(url: str) -> tuple[str, str]:
-    """Validate the scheme/hostname of an endpoint URL.
-
-    Returns `(hostname, reason)` — `reason` is "" when the URL is
-    structurally fine, otherwise a human-readable explanation.
-    """
+def _http_url_reason(url: str) -> str:
+    """Return "" when the URL's scheme + hostname are structurally
+    fine, otherwise a human-readable explanation."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return "", f"non-http(s) scheme {parsed.scheme!r}"
+        return f"non-http(s) scheme {parsed.scheme!r}"
     if not parsed.hostname:
-        return "", "no hostname"
-    return parsed.hostname, ""
+        return "no hostname"
+    return ""
 
 
-def validate_byo_endpoint(url: str, allow_private_cidrs: bool = False) -> tuple[bool, str]:
+def validate_byo_endpoint(
+    url: str, allow_private_cidrs: bool = False
+) -> tuple[bool, str]:
     """Validate a BYO (bring-your-own) provider endpoint URL.
 
     Returns `(ok, reason)`. `reason` is "" when `ok` is True.
@@ -123,7 +122,7 @@ def validate_byo_endpoint(url: str, allow_private_cidrs: bool = False) -> tuple[
     if not url:
         return False, "empty URL"
 
-    hostname, reason = _parse_http_url(url)
+    reason = _http_url_reason(url)
     if reason:
         return False, reason
 
