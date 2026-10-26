@@ -257,6 +257,31 @@ Read-only (the agent may read these, but cannot write them):
 Everything else — `/usr/local/bin`, `/opt/blitzlog/opencode`, `/etc`,
 `/usr` — is read-only image content.
 
+> **`$HOME/.config` carries its own tmpfs, and it has to.** Docker
+> creates the *missing parent* of a bind mount as `root:root 0755`. The
+> gh CLI config is bind-mounted at `$HOME/.config/gh`, so Docker creates
+> `$HOME/.config` itself — owned by root, inside the `$HOME` tmpfs. The
+> agent runs as uid 1000 and could not create `$HOME/.config/opencode`
+> under it:
+>
+> ```
+> mkdir: cannot create directory '/home/blitzlog/.config/opencode': Permission denied
+> ```
+>
+> which aborted the entrypoint before the agent ever started. The
+> contract therefore mounts a second tmpfs at `$HOME/.config` owned by
+> the agent's uid; Docker mounts parents before children, so the
+> `$HOME/.config/gh` bind then lands *inside* it (still root-owned and
+> read-only, which is correct — that one is an input).
+>
+> The rule this encodes: **any mount point under `$HOME` needs its own
+> uid-owned tmpfs**, because Docker will otherwise create its parent as
+> root. The image's smoke test asserts `$HOME/.config` is writable by
+> the runtime uid, and the CI smoke-test step mounts a gh config at the
+> same path production does — without that mount the assertion cannot
+> see the failure mode, which is how a broken non-root image was merged
+> with a green CI run.
+
 > **The toolchain bootstrap still works on a read-only rootfs.** Every
 > repo's `bootstrap` task installs its Python dependencies, which would
 > normally write to the system site-packages — read-only here. The image

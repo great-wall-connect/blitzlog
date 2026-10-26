@@ -388,3 +388,142 @@ def test_library_uses_caller_log_when_defined() -> None:
     _run_bash(Path("/tmp"), snippet)  # aws_shim not needed for this test
     assert "test message from poll library" in capture_path.read_text()
     capture_path.unlink()
+
+
+# --- the two gaps that let a dead chain look healthy -------------------
+
+
+def test_poll_loop_does_not_report_a_change_when_the_token_is_unchanged(
+    aws_shim: Path,
+) -> None:
+    """The watchdog's `log()` writes to STDOUT. The poll loop used to
+    capture the helper's stdout into the "last seen token" variable, so
+    the captured value was "<log line>\\n<token>" — which can never
+    equal the token itself. The loop therefore concluded "the token
+    changed" on EVERY tick, rewrote both credential files every 5
+    minutes, and logged "Token change detected" every 5 minutes.
+
+    That log line is the operator's only in-instance signal that the
+    issue-#145 refresh chain is alive, so a false positive on every
+    tick made a DEAD chain indistinguishable from a healthy one. That
+    is exactly what happened in production on 2026-10-26: the instance
+    log showed a steady stream of "Token change detected" while the
+    value in SSM had not changed since the launch-time mint and the
+    token had been expired for hours.
+
+    The existing tests could not catch this because neither of them
+    reproduces the production `log()`: one omits `log()` entirely (so
+    the library's fallback writes to stderr) and the other defines it
+    as a plain file writer. This one defines it exactly the way
+    watchdog.sh does — stdout plus a tee to the log file.
+    """
+    log_file = aws_shim / "watchdog.log"
+    git_creds = aws_shim / "git-creds"
+    gh_hosts = aws_shim / "gh-hosts"
+    marker = aws_shim / "new_marker"
+
+    snippet = textwrap.dedent(f"""
+        LOG_FILE="{log_file}"
+        # EXACTLY the watchdog's log() (infra/aws/packer/scripts-docker-ubuntu/
+        # watchdog.sh): printf | tee -a "$LOG_FILE" — the tee writes to
+        # the file AND to stdout.
+        log() {{ printf '[%s] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"; }}
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            0.05
+        # Several ticks with a STABLE ssm value. Nothing changed, so
+        # "Token change detected" must not appear at all.
+        sleep 0.4
+        # Now simulate the Lambda's refresh: the shim starts returning
+        # the new value once the marker exists.
+        touch "{marker}"
+        sleep 0.4
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        fi
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, result.stderr
+
+    log_text = log_file.read_text()
+    changes = log_text.count("Token change detected")
+    initialisations = log_text.count("Initialising credential files from SSM")
+
+    assert initialisations == 1, (
+        "the first observation must initialise the credential files "
+        f"exactly once, got {initialisations}: {log_text!r}"
+    )
+    assert changes == 1, (
+        "the poll loop must report a token change EXACTLY once — on the "
+        "genuine rotation. It reported "
+        f"{changes} times. The watchdog's log() writes to stdout and the "
+        "loop used to capture that stdout into the 'last seen token' "
+        "variable, so the comparison could never match and every tick "
+        "looked like a rotation. A dead refresh chain then looks "
+        f"identical to a healthy one: {log_text!r}"
+    )
+
+    # The rotation must still have been applied to the files.
+    assert "ghp_token_v2_new" in git_creds.read_text()
+    assert "ghp_token_v2_new" in gh_hosts.read_text()
+
+
+def test_poll_loop_exits_promptly_on_sigterm_with_a_long_interval(
+    aws_shim: Path,
+) -> None:
+    """SIGTERM must be honoured while the loop is blocked in its sleep.
+
+    The loop used to run `sleep "$poll_interval"` in the foreground.
+    bash defers a trapped signal until the running foreground command
+    returns, so with the production interval (300 s) the `trap 'exit 0'
+    TERM` only fired once the sleep finished — up to five minutes
+    later. The watchdog gives the loop a 100 ms grace period and then
+    SIGKILLs it, so every teardown logged
+
+        Token refresh poll loop did not exit on SIGTERM; sending SIGKILL
+
+    The existing SIGTERM test used a 50 ms interval, so the loop was
+    essentially never blocked in a long sleep when the signal arrived
+    and the trap fired immediately — which is why the bug survived.
+    This one uses a 30 s interval, so the loop IS blocked in the sleep.
+    """
+    snippet = textwrap.dedent(f"""
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{aws_shim}/git-creds" \\
+            "{aws_shim}/gh-hosts" \\
+            30
+        sleep 0.3
+        if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            echo "DIED_EARLY"
+            exit 1
+        fi
+        # SIGTERM while the loop is blocked in its 30 s sleep.
+        kill "$BLITZLOG_TOKEN_POLL_PID"
+        for _ in $(seq 1 100); do
+            if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                echo "OK"
+                exit 0
+            fi
+            sleep 0.02
+        done
+        echo "TRAP_DEFERRED"
+        kill -9 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        exit 1
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, (
+        "the poll loop did not exit on SIGTERM while blocked in its "
+        f"sleep: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "OK" in result.stdout, result.stdout
+    assert "TRAP_DEFERRED" not in result.stdout, (
+        "the SIGTERM trap was deferred until the sleep finished — bash "
+        "only runs a trapped signal after the running foreground command "
+        "returns. The loop must background its sleep and `wait` on it, "
+        "because `wait` IS interruptible."
+    )

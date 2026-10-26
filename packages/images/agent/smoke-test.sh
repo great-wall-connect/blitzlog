@@ -60,6 +60,23 @@ test -w "$HOME" \
   || { echo "FAIL: HOME ($HOME) is not writable"; exit 1; }
 echo "HOME=$HOME is writable"
 
+echo "==> checking the agent's config dir is writable"
+# $HOME/.config needs its own uid-owned tmpfs, not just the $HOME one.
+# Docker creates the missing parent of a bind mount as root:root 0755,
+# so the gh config's mount point ($HOME/.config/gh) makes Docker create
+# $HOME/.config as root — and the agent (uid 1000) then cannot create
+# $HOME/.config/opencode under it:
+#
+#   mkdir: cannot create directory '/home/blitzlog/.config/opencode':
+#   Permission denied
+#
+# which aborted the entrypoint before the agent ever started. The CI
+# step mounts a gh config at the same path production does, so this
+# assertion sees the real topology.
+test -w "$HOME/.config" \
+  || { echo "FAIL: $HOME/.config is not writable by uid $(id -u) — it is probably a Docker-created bind-mount parent (root:root); it needs its own uid-owned tmpfs (see container-hardening.env)"; exit 1; }
+echo "$HOME/.config is writable"
+
 echo "==> checking the baked opencode components land in HOME"
 # The components are baked into /opt/blitzlog/opencode (NOT under
 # $HOME — HOME is a tmpfs and would shadow them) and copied into

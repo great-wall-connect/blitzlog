@@ -102,11 +102,29 @@ jobs:
       #
       # The flags come from the canonical hardening contract, so CI
       # exercises exactly the posture production uses.
+      #
+      # The gh-config bind mount is NOT optional: it is what makes the
+      # container's $HOME/.config a Docker-created, root-owned
+      # directory (Docker creates the missing parent of a bind mount as
+      # root:root 0755). Without that mount the agent's config dir is
+      # created by the agent itself and the failure mode below is
+      # invisible — which is exactly how a broken non-root image got
+      # merged: CI was green, and the first real run died with
+      #
+      #   mkdir: cannot create directory '/home/blitzlog/.config/opencode':
+      #   Permission denied
+      #
+      # because only production mounted a gh config under $HOME/.config.
+      # Mounting it here reproduces the production mount topology.
       - name: Smoke test under the hardening flags
         run: |
           . packages/images/agent/container-hardening.env
+          mkdir -p "$RUNNER_TEMP/gh-config"
+          printf 'github.com:\n    oauth_token: smoke-test-not-a-real-token\n    git_protocol: https\n' \
+            > "$RUNNER_TEMP/gh-config/hosts.yml"
           docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS \
             --entrypoint="" \
             -v "$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro" \
+            -v "$RUNNER_TEMP/gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro" \
             "${REGISTRY}/${OWNER}/${IMAGE_NAME}:${BUILT_TAG}" \
             sh /smoke-test.sh
