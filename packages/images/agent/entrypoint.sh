@@ -47,21 +47,28 @@ MODE="${MODE:-autonomous}"
 
 # --- Project-side bootstrap: mise ---
 #
-# The container runs as an unprivileged uid (issue #164), and mise's
-# own install script only makes the binary executable when it runs as
-# root:
+# The container runs as an unprivileged uid (issue #164), and the mise
+# bootstrap has two failure modes that only show up at runtime:
 #
-#   if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#   1. Docker's `--tmpfs` mounts a tmpfs with `noexec` unless the
+#      option string says otherwise, and mise's toolchain lives on the
+#      HOME tmpfs. With `noexec` in place the first `mise` call dies
+#      with
 #
-# Without that chmod the installed binary can keep whatever mode the
-# tarball carried, and the first `mise` call then fails with
+#        /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
 #
-#   /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+#      (dash exits 126) — the container died before the agent started.
+#      The tmpfs mounts now carry `exec` (see
+#      packages/images/agent/container-hardening.env).
 #
-# (dash exits 126), which killed the container before the agent ever
-# started. install-mise.sh does the chmod itself and then verifies
-# that the binary actually runs, so a broken mise fails with a
-# diagnosable message instead of an exec error three lines later.
+#   2. mise's own install script only makes the binary executable when
+#      it runs as root:
+#
+#        if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#
+# install-mise.sh does the chmod itself and then verifies that the
+# binary actually runs, so a broken mise fails with a diagnosable
+# message instead of an exec error three lines later.
 MISE_BIN=""
 
 install_mise() {

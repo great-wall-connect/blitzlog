@@ -4,20 +4,33 @@
 #
 # Why this is a separate script (issue #164):
 #
-#   The container runs as an unprivileged uid, and mise's own install
-#   script only makes the binary executable when it runs as ROOT:
+#   The container runs as an unprivileged uid, and there are two ways
+#   the mise bootstrap can end with a mise that cannot be run:
 #
-#     if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#   1. Docker's `--tmpfs` mounts a tmpfs with `noexec` unless the
+#      option string says otherwise, and mise lives on the HOME tmpfs
+#      (`$HOME/.local/bin/mise`). With `noexec` in place:
 #
-#   Without that chmod the installed binary can keep whatever mode the
-#   tarball carried, and the first `mise` call then fails with
+#        /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
 #
-#     /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+#      (dash exits 126) — the container died before the agent started.
+#      The tmpfs mounts now carry `exec` (see
+#      packages/images/agent/container-hardening.env); this script
+#      cannot fix that, but it can REPORT it.
 #
-#   (dash exits 126), which killed the container before the agent ever
-#   started. This script does the chmod itself and then VERIFIES that
-#   the binary runs: a broken mise must fail loudly with a diagnosable
-#   message, not as an exec error three lines later.
+#   2. mise's own install script only makes the binary executable when
+#      it runs as ROOT:
+#
+#        if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#
+#      As the container's unprivileged uid the installed binary can
+#      keep whatever mode the tarball carried. This script does the
+#      chmod itself.
+#
+#   Either way the result is a mise that cannot be executed, so this
+#   script VERIFIES that the binary runs: a broken toolchain must fail
+#   loudly with a diagnosable message, not as an exec error three
+#   lines later.
 #
 # Usage:
 #   install-mise.sh [install-path]

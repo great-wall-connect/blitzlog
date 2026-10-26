@@ -43,18 +43,28 @@ sh -n /usr/local/bin/blitzlog-credential-helper
 sh -n /usr/local/bin/install-mise.sh
 
 echo "==> checking mise can be installed AND executed"
-# Issue #164: the container runs as an unprivileged uid, and mise's own
-# install script only chmods the binary when it runs as root. Without
-# that chmod the first `mise` call fails with "mise: Permission
-# denied" (exit 126) and the container dies before the agent starts.
-# install-mise.sh does the chmod itself — assert that here, with a
-# deliberately non-executable fake binary (no network involved).
+# Issue #164: two things can leave mise installed but unusable, and
+# BOTH have to be checked here:
+#
+#   1. Docker mounts every `--tmpfs` with `noexec` unless the option
+#      string says otherwise. The tmpfs mounts carry `exec` explicitly
+#      (see container-hardening.env), because mise's toolchain lives
+#      on the HOME tmpfs and the agent has to run it. Without `exec`
+#      the first `mise` call dies with "mise: Permission denied"
+#      (exit 126) and the container never starts the agent.
+#   2. mise's own install script only chmods the binary when it runs
+#      as root, and the container runs as an unprivileged uid.
+#
+# install-mise.sh does the chmod itself and then verifies that the
+# binary runs. Assert that here with a deliberately non-executable
+# fake binary — no network involved, and a `noexec` mount fails the
+# same way the real mise did.
 SMOKE_MISE="$(mktemp -d)/mise"
 printf '#!/bin/sh\necho "mise 0.0.0"\n' > "$SMOKE_MISE"
 chmod 0644 "$SMOKE_MISE"
 test -x "$SMOKE_MISE" && { echo "FAIL: the fake mise should not be executable yet"; exit 1; }
 SMOKE_MISE_PATH="$(/usr/local/bin/install-mise.sh "$SMOKE_MISE")" \
-  || { echo "FAIL: install-mise.sh could not make the binary executable"; exit 1; }
+  || { echo "FAIL: install-mise.sh could not make the binary executable (is the tmpfs noexec?)"; exit 1; }
 test -x "$SMOKE_MISE" \
   || { echo "FAIL: install-mise.sh left the binary non-executable"; exit 1; }
 test "$SMOKE_MISE_PATH" = "$SMOKE_MISE" \

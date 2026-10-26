@@ -257,6 +257,34 @@ Read-only (the agent may read these, but cannot write them):
 Everything else — `/usr/local/bin`, `/opt/blitzlog/opencode`, `/etc`,
 `/usr` — is read-only image content.
 
+> **The tmpfs mounts are `exec`, and that is not Docker's default.**
+> Docker mounts every `--tmpfs` with `noexec,nosuid,nodev` unless the
+> option string says otherwise (moby prepends those defaults and merges
+> the caller's options on top). `nosuid` and `nodev` we want; `noexec`
+> we must not have, because these mounts are where the agent's
+> executables live:
+>
+> - mise's toolchain — `mise install` puts node, python, terraform and
+>   friends under `$HOME/.local/share/mise`, and the agent has to
+>   *run* them;
+> - the opencode tools (the `shutdown` tool) under
+>   `$HOME/.config/opencode/tools`;
+> - `/tmp` — pip, npm and node-gyp compile and run scripts there.
+>
+> With Docker's default `noexec` in place, the very first `mise` call
+> died with:
+>
+> ```
+> /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+> ```
+>
+> (dash exits 126) — the container died before the agent started, and
+> the toolchain it installs would have been unusable too. The contract
+> therefore passes `exec` explicitly on all three tmpfs mounts, and the
+> image's smoke test proves it: it installs a binary under `/tmp` and
+> runs it. No static check can see a mount flag, so that assertion has
+> to happen inside the container.
+
 > **`$HOME/.config` carries its own tmpfs, and it has to.** Docker
 > creates the *missing parent* of a bind mount as `root:root 0755`. The
 > gh CLI config is bind-mounted at `$HOME/.config/gh`, so Docker creates

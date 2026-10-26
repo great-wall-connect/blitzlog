@@ -547,6 +547,55 @@ class TestWritablePathContract(unittest.TestCase):
         # otherwise the agent cannot write its own HOME.
         self.assertIn("uid=1000,gid=1000", tmpfs)
 
+    def test_tmpfs_mounts_are_exec_able(self):
+        """Docker's `--tmpfs` defaults to `noexec` — and the agent's
+        executables live on these mounts.
+
+        Docker prepends `noexec,nosuid,nodev` to every `--tmpfs`
+        mount and merges the caller's options on top (moby/sys
+        `MergeTmpfsOptions`). With `noexec` in place the first `mise`
+        call died with
+
+            /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+
+        (dash exits 126) — the container died before the agent
+        started. mise's toolchain lives under `$HOME`, the opencode
+        tools under `$HOME/.config`, and pip/npm/node-gyp run scripts
+        out of `/tmp`, so all three mounts have to be exec-able.
+        """
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        mounts = [m for m in tmpfs.split("--tmpfs ") if m.strip()]
+        self.assertEqual(
+            len(mounts),
+            3,
+            f"expected three tmpfs mounts (/tmp, $HOME, $HOME/.config), got {tmpfs!r}",
+        )
+        for mount in mounts:
+            with self.subTest(mount=mount):
+                self.assertIn(
+                    "exec",
+                    mount.split(":", 1)[1].split(","),
+                    f"tmpfs mount {mount!r} is not exec-able — Docker's "
+                    "--tmpfs defaults to noexec, so the agent could not "
+                    "run mise, its toolchain, or the opencode tools",
+                )
+                self.assertNotIn(
+                    "noexec",
+                    mount,
+                    f"tmpfs mount {mount!r} explicitly disables exec",
+                )
+
+    def test_smoke_test_proves_the_tmpfs_is_exec_able(self):
+        """The image's smoke test installs a binary under /tmp and runs
+        it — the only way to catch a `noexec` mount, which no static
+        check can see."""
+        self.assertIn(
+            "install-mise.sh",
+            _read(SMOKE_TEST),
+            "the smoke test must run a binary from a tmpfs, or a noexec "
+            "mount ships unnoticed",
+        )
+
     def test_agent_config_dir_has_its_own_uid_owned_tmpfs(self):
         """$HOME/.config needs its OWN tmpfs, not just the $HOME one.
 
