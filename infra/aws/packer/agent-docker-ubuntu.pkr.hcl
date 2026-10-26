@@ -127,7 +127,7 @@ build {
   # same file from the repo. The final copy to /usr/local/bin/ is done
   # by 02-systemd.sh.
   provisioner "file" {
-    source      = "${path.root}/../../packages/images/agent/container-hardening.env"
+    source      = "${path.root}/../../../packages/images/agent/container-hardening.env"
     destination = "/tmp/blitzlog-container-hardening.env"
   }
 

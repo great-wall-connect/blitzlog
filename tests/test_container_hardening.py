@@ -42,6 +42,7 @@ CONTRACT = REPO_ROOT / "packages/images/agent/container-hardening.env"
 WATCHDOG = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/watchdog.sh"
 MISE_TOML = REPO_ROOT / "mise.toml"
 PACKER_HCL = REPO_ROOT / "infra/aws/packer/agent-docker-ubuntu.pkr.hcl"
+PACKER_DIR = PACKER_HCL.parent
 SYSTEMD_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/02-systemd.sh"
 SYSTEM_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
 ENTRYPOINT = REPO_ROOT / "packages/images/agent/entrypoint.sh"
@@ -81,6 +82,26 @@ EXPECTED_DOCKER_RUN_TASKS = {
 
 def _read(path):
     return path.read_text(encoding="utf-8")
+
+
+# Every `${path.root}/...` path the Packer template hands to a
+# provisioner. `path.root` is the directory of the input HCL file and
+# Packer resolves a relative provisioner path against the directory
+# packer runs in — both relative to the same base — so `${path.root}/x`
+# always means "x next to the template".
+_PROVISIONER_PATH_RE = re.compile(
+    r'\b(?:source|script)\s*=\s*"\$\{path\.root\}(?P<rel>[^"]*)"'
+)
+
+
+def _provisioner_paths(hcl_text):
+    """The relative paths every Packer provisioner points at."""
+    return [m.group("rel") for m in _PROVISIONER_PATH_RE.finditer(hcl_text)]
+
+
+def _resolve_provisioner_path(rel):
+    """Resolve a `${path.root}/<rel>` reference to an absolute path."""
+    return (PACKER_DIR / rel.lstrip("/")).resolve()
 
 
 def _source_contract(expr):
@@ -360,6 +381,35 @@ class TestContractIsWiredIntoTheAmi(unittest.TestCase):
             "the Packer build must upload the hardening contract to "
             "/tmp/blitzlog-container-hardening.env (02-systemd.sh copies "
             "it into /usr/local/bin)",
+        )
+
+    def test_packer_provisioner_paths_resolve(self):
+        src = _read(PACKER_HCL)
+        rels = _provisioner_paths(src)
+        self.assertTrue(
+            rels,
+            "the Packer template must reference its provisioner scripts "
+            "through ${path.root}",
+        )
+        for rel in rels:
+            resolved = _resolve_provisioner_path(rel)
+            self.assertTrue(
+                resolved.is_file(),
+                f"the Packer provisioner path ${{path.root}}/{rel} resolves "
+                f"to {resolved}, which does not exist — the AMI bake dies "
+                "at the `file` provisioner's prepare step with 'Bad "
+                "source' before a single instance is created",
+            )
+
+    def test_packer_contract_source_resolves_to_the_contract(self):
+        src = _read(PACKER_HCL)
+        resolved = [_resolve_provisioner_path(rel) for rel in _provisioner_paths(src)]
+        self.assertIn(
+            CONTRACT.resolve(),
+            resolved,
+            "the Packer build must upload the hardening contract from "
+            f"{CONTRACT} — the provisioner's source path has to resolve to "
+            "the file the watchdog sources, not just mention its name",
         )
 
     def test_systemd_setup_installs_the_contract(self):
