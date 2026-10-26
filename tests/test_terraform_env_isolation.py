@@ -1296,5 +1296,202 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         )
 
 
+class TestAwsProviderV6(unittest.TestCase):
+    """Static analysis tests for the hashicorp/aws 5.x -> 6.x bump (#161).
+
+    The AWS provider shipped 6.0.0 as a major release with breaking
+    changes. This class guards the invariants of that migration:
+
+    - Every AWS stack that declares `required_providers` pins
+      `hashicorp/aws` to the 6.x series, so no stack silently keeps
+      resolving 5.x.
+    - The committed lock files record the v6 provider and the 6.x
+      constraint, so `terraform init` in CI (which does NOT pass
+      `-upgrade`) installs what we tested.
+    - None of the v6-removed resources / attributes creep back in.
+
+    These tests need no AWS credentials and no `terraform init`.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    AWS_MODULE = REPO_ROOT / "infra" / "aws" / "modules" / "core"
+    AWS_BOOTSTRAP = REPO_ROOT / "infra" / "aws" / "bootstrap"
+    AWS_DEV = REPO_ROOT / "infra" / "aws" / "dev"
+    AWS_PROD = REPO_ROOT / "infra" / "aws" / "prod"
+    USER_POOL = REPO_ROOT / "infra" / "user-pool"
+    SCRUMMASTER = REPO_ROOT / "infra" / "scrummaster"
+    README = REPO_ROOT / "README.md"
+
+    STACKS = (
+        AWS_MODULE,
+        AWS_BOOTSTRAP,
+        AWS_DEV,
+        AWS_PROD,
+        USER_POOL,
+        SCRUMMASTER,
+    )
+
+    def test_every_aws_stack_pins_the_6x_series(self):
+        """Every AWS stack must declare `hashicorp/aws ~> 6.0`.
+
+        The v6 migration is a major-version bump: a stack left on
+        `~> 5.0` resolves a different provider binary than the one
+        the v6 upgrade guide was audited against, and a stack left on
+        the implicit default resolves whatever the registry serves.
+        """
+        for stack in self.STACKS:
+            text = (stack / "main.tf").read_text()
+            self.assertIn(
+                'source  = "hashicorp/aws"',
+                text,
+                f"{stack}/main.tf must declare the hashicorp/aws provider source explicitly",
+            )
+            self.assertIn(
+                'version = "~> 6.0"',
+                text,
+                f"{stack}/main.tf must pin hashicorp/aws to ~> 6.0",
+            )
+            self.assertNotIn(
+                'version = "~> 5.0"',
+                text,
+                f"{stack}/main.tf must not still pin hashicorp/aws to ~> 5.0",
+            )
+
+    def test_committed_lock_files_record_the_v6_provider(self):
+        """The committed lock files must resolve the 6.x provider.
+
+        CI (`lint.yml`) and both deploy workflows run a plain
+        `terraform init` — no `-upgrade` — so the lock file is the
+        only thing that decides which provider binary gets installed.
+        A lock file still on 5.100.0 would silently downgrade the
+        stacks even though every `required_providers` says `~> 6.0`.
+        """
+        for lock in (
+            self.AWS_MODULE / ".terraform.lock.hcl",
+            self.AWS_BOOTSTRAP / ".terraform.lock.hcl",
+            self.AWS_DEV / ".terraform.lock.hcl",
+            self.AWS_PROD / ".terraform.lock.hcl",
+        ):
+            text = lock.read_text()
+            self.assertIn(
+                'provider "registry.terraform.io/hashicorp/aws"',
+                text,
+                f"{lock} must contain a hashicorp/aws provider entry",
+            )
+            self.assertRegex(
+                text,
+                r'provider "registry\.terraform\.io/hashicorp/aws" \{\s*\n'
+                r'\s*version\s*=\s*"6\.[0-9]+\.[0-9]+"\s*\n'
+                r'\s*constraints\s*=\s*"~> 6\.0"',
+                f"{lock} must lock hashicorp/aws to a 6.x release with the "
+                f"~> 6.0 constraint",
+            )
+            self.assertNotRegex(
+                text,
+                r'provider "registry\.terraform\.io/hashicorp/aws" \{\s*\n'
+                r'\s*version\s*=\s*"5\.',
+                f"{lock} must not still lock hashicorp/aws to a 5.x release",
+            )
+
+    def test_no_v6_removed_resources_or_attributes(self):
+        """The v6 upgrade guide removed a batch of resources and
+        attributes. None of them are used by blitzlog; this test
+        fails the moment one creeps back in.
+        """
+        removed = (
+            # Removed resources (SimpleDB / Worklink / OpsWorks /
+            # Transcoder / CloudWatch Evidently).
+            'resource "aws_simpledb_domain"',
+            'resource "aws_worklink_fleet"',
+            'resource "aws_opsworks_stack"',
+            'resource "aws_elastictranscoder_pipeline"',
+            'resource "aws_evidently_feature"',
+            # Removed provider arguments.
+            "endpoints.simpledb",
+            "endpoints.worklink",
+            "endpoints.opsworks",
+            "s3_us_east_1_regional_endpoint",
+            # Removed / renamed resource attributes.
+            "cpu_core_count",
+            "cpu_threads_per_core",
+            "reset_on_delete",
+            "compute_environments",
+            "s3_prefix",
+            "inference_accelerator",
+            "elastic_gpu_specifications",
+            "elastic_inference_accelerator",
+            "block_duration_minutes",
+            "log_group_name",
+            "kibana_endpoint",
+            "snapshot_copy",
+            "base_policy_region",
+            "vpn_gateway_id",
+            "resolve_conflicts",
+            "tags_all",
+        )
+        for stack in self.STACKS:
+            for tf_file in stack.rglob("*.tf"):
+                text = tf_file.read_text()
+                for token in removed:
+                    self.assertNotIn(
+                        token,
+                        text,
+                        f"{tf_file} must not use `{token}` — removed or renamed "
+                        f"in hashicorp/aws v6",
+                    )
+
+    def test_ami_lookups_stay_unambiguous(self):
+        """`data.aws_ami` with `most_recent = true` is an error in v6
+        unless the config also identifies the image by `owners` or by
+        an `image-id` / `owner-id` filter.
+        """
+        for tf_file in list(self.AWS_MODULE.rglob("*.tf")) + list(
+            self.SCRUMMASTER.rglob("*.tf")
+        ):
+            text = tf_file.read_text()
+            if 'data "aws_ami"' not in text:
+                continue
+            self.assertNotIn(
+                "most_recent",
+                text,
+                f"{tf_file} must not use `most_recent` on aws_ami — v6 rejects "
+                f"ambiguous AMI lookups (use owners + an image-id filter)",
+            )
+            self.assertIn(
+                "owners",
+                text,
+                f"{tf_file} must scope its aws_ami lookup with `owners`",
+            )
+
+    def test_lambda_function_has_no_redundant_ignore_changes(self):
+        """`ignore_changes = [last_modified]` is a no-op that Terraform
+        flags as a "Redundant ignore_changes element" warning.
+
+        `last_modified` is computed-only in the provider (both 5.x and
+        6.x), so there is no configured value to compare against and
+        the warning survives the v6 bump. The lint job treats any
+        validate warning as noise the migration was supposed to clear,
+        so the element must be gone.
+        """
+        lambda_tf = (self.AWS_MODULE / "lambda.tf").read_text()
+        self.assertNotIn(
+            "ignore_changes",
+            lambda_tf,
+            "lambda.tf must not ignore_changes on computed-only attributes "
+            "(terraform validate warns: Redundant ignore_changes element)",
+        )
+
+    def test_readme_documents_the_v6_provider(self):
+        """The README prerequisites list the provider version the
+        operator is expected to have; it must not lag behind the
+        stacks.
+        """
+        self.assertIn(
+            "- AWS provider ~> 6.0",
+            self.README.read_text(),
+            "README prerequisites must list the AWS provider 6.x series",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

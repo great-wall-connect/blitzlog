@@ -203,8 +203,8 @@ Tailscale daemon needs them to build the WireGuard tunnel. Every other
 run gets `--cap-drop=ALL` and nothing else.
 
 > The container-side Tailnet join is the **only** enrolment path in the
-> project — the Lambda bootstrap no longer installs or joins Tailscale
-> on the host. Before issue #164 the capability flags were passed
+> project — the Lambda bootstrap no longer installs or joins Tailscale on
+> the host. Before issue #164 the capability flags were passed
 > *without* `--device /dev/net/tun`, so the join could never establish a
 > tunnel: it logged `WARNING: tailscale up failed` and the local-LLM
 > preflight fell back to cloud. The AMI now loads the `tun` module and
@@ -295,3 +295,51 @@ host writes the two credential files and mounts them read-only; the
 agent reads them through git's credential helper and the `gh` CLI. The
 token therefore never appears in `docker inspect` or in
 `/proc/<pid>/environ`.
+
+### apt's sandbox is pinned to root in the image
+
+`--cap-drop=ALL` removes `CAP_SETUID`, `CAP_SETGID` and `CAP_CHOWN` — and
+apt needs all three, because it drops privileges to the unprivileged
+`_apt` user before running its download methods. With the capabilities
+gone, every project bootstrap that installs build dependencies (the
+documented pattern in [`BOOTSTRAP.md`](BOOTSTRAP.md)) failed with:
+
+```
+E: setgroups 0 failed - setgroups (1: Operation not permitted)
+E: Method https has died unexpectedly!
+```
+
+The image therefore pins apt's sandbox to root
+(`/etc/apt/apt.conf.d/99-no-sandbox`):
+
+```
+APT::Sandbox::User "root";
+APT::Sandbox::Group "root";
+```
+
+The packages come from the same signed Debian archive the image itself
+was built from, so apt's own privilege drop bought no trust — it only
+cost the platform its ability to install the toolchain the agent is
+*supposed* to install. The alternative (re-granting
+`SETUID`/`SETGID`/`CHOWN` on every run) would put those capabilities
+back on every agent run, including the ones that never install a
+package.
+
+> **A runtime `apt-get install` is not possible in the hardened
+> container.** The container runs as a non-root uid on a read-only
+> rootfs, so apt cannot write its own database (`/var/lib/dpkg`) or
+> cache (`/var/cache/apt`), and it cannot escalate to root to run a
+> `dpkg` maintainer script. The sandbox pin above therefore keeps the
+> *image's own build* working and keeps a root-run `apt` inside the
+> image correct — it does not make `apt-get install` viable at runtime.
+> A target repo whose `bootstrap` task needs system packages has to
+> install them in the image or use a toolchain that does not need root;
+> `pip` installs work (see the `PIP_USER=1` note above).
+
+**Known limitation.** `--cap-drop=ALL` also breaks anything else that
+drops privileges on purpose — `useradd`/`adduser` (they call `setuid`),
+`su`, and `dpkg` maintainer scripts that create system users. A project
+bootstrap that does more than `apt-get install` needs the capability
+set re-granted for that run; that is part of the non-root /
+read-only-rootfs slice of issue #164, not something the runtime
+hardening can paper over.

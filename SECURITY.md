@@ -85,6 +85,13 @@ Blitzlog is designed around a few hardening principles — review these before p
   config are owned by the host and mounted read-only, so the agent can
   use them but cannot tamper with the host's copy. The token is also
   kept out of the container's environment entirely.
+- **apt's sandbox is pinned to root in the image** — apt's own privilege
+  drop to the `_apt` user needs `CAP_SETUID`/`CAP_SETGID`/`CAP_CHOWN`,
+  which `--cap-drop=ALL` removes. The image pins apt's sandbox to root
+  (`/etc/apt/apt.conf.d/99-no-sandbox`) rather than re-granting those
+  capabilities on every agent run. Note that the container itself now
+  runs as a non-root uid on a read-only rootfs, so a runtime
+  `apt-get install` is not possible either way — see `docs/DOCKER.md`.
 
 The container's runtime flags live in one place —
 `packages/images/agent/container-hardening.env` — shared by the

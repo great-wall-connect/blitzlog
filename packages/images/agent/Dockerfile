@@ -142,6 +142,31 @@ FROM python:${PYTHON_VERSION}-slim
 COPY sources.list.hk /etc/apt/sources.list.d/99-hk.list
 RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.disabled
 
+# apt runs its download methods as the unprivileged `_apt` user, which
+# needs CAP_SETUID + CAP_SETGID + CAP_CHOWN. The agent container's
+# hardening contract drops ALL capabilities (see
+# packages/images/agent/container-hardening.env), so an `apt-get install`
+# — the documented pattern in docs/BOOTSTRAP.md — died with:
+#
+#   E: setgroups 0 failed - setgroups (1: Operation not permitted)
+#   E: Method https has died unexpectedly!
+#
+# Run the methods as root instead. The packages come from the same
+# signed Debian archive the image itself was built from, so the
+# privilege drop bought no trust and cost the platform its ability to
+# install build dependencies.
+#
+# Note that this config is installed in the RUNTIME stage, so it also
+# governs apt inside the running container. The container itself runs
+# as a non-root uid on a read-only rootfs (see the USER directive
+# below), so a runtime `apt-get install` cannot write /var/lib/dpkg or
+# /var/cache/apt and cannot escalate to root for a dpkg maintainer
+# script — the pin keeps the image's own build and any root-run apt
+# correct; it does not make runtime package installation viable. See
+# docs/DOCKER.md.
+RUN printf 'APT::Sandbox::User "root";\nAPT::Sandbox::Group "root";\n' \
+    > /etc/apt/apt.conf.d/99-no-sandbox
+
 ARG NODE_VERSION
 
 ENV PIP_NO_CACHE_DIR=1 \
