@@ -281,6 +281,14 @@ fi
 # tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
 rm -f /workspace/.shutdown
 
+# `set -e` is active, so a non-zero `docker run` aborted the script
+# right here — before the cleanup below (log upload, bot-lock release,
+# SSM/schedule teardown, instance terminate) could run. A failed agent
+# run therefore left the instance alive, the bot-pool lock held and the
+# logs on the instance instead of in S3. Capture the exit code instead
+# of letting errexit kill the watchdog; the cleanup path runs either
+# way and the script exits with the container's code at the very end.
+CONTAINER_EXIT=0
 sudo docker run --name blitzlog-agent \
     "${HARDENING_ARGS[@]}" \
     "${TUNNEL_FLAGS[@]}" \
@@ -290,9 +298,8 @@ sudo docker run --name blitzlog-agent \
     -v "/root/gh-config/${INSTANCE_ID}:/root/.config/gh" \
     -v /workspace:/workspace \
     -v /var/log/blitzlog:/var/log/blitzlog \
-    "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
-
-CONTAINER_EXIT=$?
+    "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}" \
+    || CONTAINER_EXIT=$?
 
 # The watcher auto-exits once it sends SIGTERM (the while loop ends
 # when .shutdown appears). If .shutdown was never touched (autonomous
