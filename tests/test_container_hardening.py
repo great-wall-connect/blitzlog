@@ -50,6 +50,7 @@ DOCKERFILE = REPO_ROOT / "packages/images/agent/Dockerfile"
 SMOKE_TEST = REPO_ROOT / "packages/images/agent/smoke-test.sh"
 INSTALLER = REPO_ROOT / "packages/images/agent/install-opencode-plugins.sh"
 DOCKER_DOC = REPO_ROOT / "docs/DOCKER.md"
+DOCKER_IMAGES_WORKFLOW = REPO_ROOT / ".github/workflows/docker-images.yml"
 
 # The flags every `docker run` of the agent image must carry. Kept as
 # an explicit literal (rather than "whatever the contract file says")
@@ -543,6 +544,75 @@ class TestWritablePathContract(unittest.TestCase):
         # The tmpfs must be owned by the container's unprivileged uid,
         # otherwise the agent cannot write its own HOME.
         self.assertIn("uid=1000,gid=1000", tmpfs)
+
+    def test_agent_config_dir_has_its_own_uid_owned_tmpfs(self):
+        """$HOME/.config needs its OWN tmpfs, not just the $HOME one.
+
+        Docker creates the missing parent of a bind mount as
+        `root:root 0755`. The gh CLI config is bind-mounted at
+        `$HOME/.config/gh`, so Docker creates `$HOME/.config` itself —
+        owned by root, inside the $HOME tmpfs. The agent runs as uid
+        1000 and then cannot create `$HOME/.config/opencode` under it:
+
+            mkdir: cannot create directory '/home/blitzlog/.config/opencode':
+            Permission denied
+
+        which aborted the entrypoint before the agent ever started.
+        Mounting a tmpfs at $HOME/.config with the agent's own uid/gid
+        makes the mountpoint uid-owned; Docker then mounts the
+        `$HOME/.config/gh` bind INSIDE it (parents before children).
+        """
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        self.assertIn(
+            "--tmpfs /home/blitzlog/.config:",
+            tmpfs,
+            "$HOME/.config MUST have its own tmpfs. Docker creates the "
+            "missing parent of the $HOME/.config/gh bind mount as "
+            "root:root 0755, and the agent (uid 1000) then cannot "
+            "create $HOME/.config/opencode — the entrypoint aborts with "
+            "'Permission denied' before the agent starts.",
+        )
+        # ...and it must be owned by the agent's uid, not root.
+        config_tmpfs = tmpfs.split("--tmpfs /home/blitzlog/.config:")[1]
+        self.assertIn(
+            "uid=1000,gid=1000",
+            config_tmpfs,
+            "the $HOME/.config tmpfs must be owned by the container's "
+            "unprivileged uid (1000), or the agent cannot write its own "
+            "config dir",
+        )
+
+    def test_smoke_test_asserts_the_config_dir_is_writable(self):
+        """The image's smoke test must assert $HOME/.config is writable.
+
+        This assertion is only meaningful when the container actually
+        has a Docker-created $HOME/.config — i.e. when a gh config is
+        bind-mounted under it, the way production does it. Without
+        both halves the failure mode is invisible: CI was green while
+        the first real production run died on 'Permission denied'.
+        """
+        smoke = _read(SMOKE_TEST)
+        self.assertIn(
+            '$HOME/.config"',
+            smoke,
+            "the smoke test must assert that $HOME/.config is writable "
+            "by the runtime uid — that is the invariant the non-root "
+            "read-only-rootfs design depends on",
+        )
+        for path, label in (
+            (DOCKER_IMAGES_WORKFLOW, "the CI smoke-test step"),
+            (MISE_TOML, "the local mise image-* tasks"),
+        ):
+            with self.subTest(path=path.name):
+                src = _read(path)
+                self.assertIn(
+                    ".config/gh:ro",
+                    src,
+                    f"{label} must bind-mount a gh config at "
+                    "$HOME/.config/gh — that mount is what makes Docker "
+                    "create $HOME/.config as root, which is the topology "
+                    "the smoke test must be exercised against",
+                )
 
     def test_every_docker_run_expands_the_tmpfs_mounts(self):
         """A --read-only rootfs without its tmpfs mounts would leave

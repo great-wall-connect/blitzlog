@@ -15,7 +15,7 @@ smoke test wrapped in `scripts/test-dev-spot.sh` (Level 3, ~10 min,
 
 ## Self-perpetuation status (current)
 
-**Healthy** as of PR #154. The chain mints every 50 min as designed;
+**Healthy on dev** as of PR #154. The chain mints every 50 min as designed;
 the first auto-mint lands at `instance_launch + 50 min`, and the
 bind-mount picks it up within the next 5-min poll. A 60-min
 dev-instance monitor will see:
@@ -29,6 +29,48 @@ dev-instance monitor will see:
 The `iam:PassRole` regression that killed the chain at iteration 0
 on the dev instance is fixed in PR #154 commit `b8152e2` and
 pinned by `tests/test_lambda_iam.py`.
+
+### Prod was never verified — and on 2026-10-26 it was not working
+
+Everything above is a **dev** observation. The nightly
+`integration-test.yml` job, `scripts/test-dev-spot.sh` and the
+"60-min dev-instance monitor" all run against the dev account; the prod
+account's chain has never been exercised end to end.
+
+On 2026-10-26 a **prod** instance (issue #164) showed the chain dead:
+
+- the token in SSM was still the launch-time mint (`iat 11:16:37Z`,
+  `exp 12:16:37Z`), and the refreshes scheduled for 12:06 and 12:56
+  never delivered a new one;
+- the poll loop dutifully rewrote the credential files every 5 minutes
+  with that same expired value.
+
+Two separate defects hid it:
+
+1. **The poll loop reported a change on every tick.** The watchdog's
+   `log()` writes to stdout, and the loop captured the helper's stdout
+   into its "last seen token" variable — so the captured value was
+   `"<log line>\n<token>"`, which never equals the token. Every tick
+   therefore looked like a rotation, and the log line that is supposed
+   to prove the chain is alive was pure noise. A dead chain and a
+   healthy one were indistinguishable in the instance log. Fixed by
+   tracking the token in a variable instead of capturing stdout, and
+   by logging the token's own `iat` / `exp` so an expired token says
+   so out loud.
+2. **The prod IAM role may predate the `iam:PassRole` fix.** If prod's
+   last terraform apply predates PR #154, the very first
+   `CreateSchedule` fails with `AccessDeniedException` and the chain
+   dies at iteration 0 — the same fingerprint as the dev regression
+   above, and invisible unless you read the Lambda's CloudWatch log.
+
+**To check prod's chain**, read the prod handler's CloudWatch log
+(`/aws/lambda/blitzlog-prod-handler`) around the launch time:
+
+| Log line | Meaning |
+|---|---|
+| `Failed to schedule initial token refresh …` | `CreateSchedule` was denied — the chain never started. Check the Lambda's `iam:PassRole` grant on the scheduler role. |
+| `Scheduling refresh event: … fire_at=…` and then silence | The schedule was created but the event never fired. |
+| `Refresh event received: issue=… iteration=…` | The chain ran. If it is followed by `mint failed` / `ssm put failed`, the failure is in the mint or the SSM write, not the schedule. |
 
 ### Instance teardown: one-call group delete
 
