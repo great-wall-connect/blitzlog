@@ -70,7 +70,7 @@ Two modes:
 ## Prerequisites
 
 - Terraform >= 1.0
-- AWS provider ~> 5.0
+- AWS provider ~> 6.0
 - An AWS account
 - An existing VPC and subnet (Blitzlog needs to launch into one)
 - An S3 bucket for Terraform state
