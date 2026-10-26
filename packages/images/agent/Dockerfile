@@ -258,6 +258,17 @@ COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
 # HOME (which is a tmpfs, so anything baked under $HOME would be
 # shadowed). Shared by the entrypoint and the image's smoke test.
 COPY install-opencode-plugins.sh /usr/local/bin/install-opencode-plugins.sh
+# Issue #164: the read-only GitHub credential helper. The credential
+# file is owned by the host and mounted read-only into the container,
+# and `git credential-store` rewrites that file under a lock when git
+# approves a credential ("unable to get credential storage lock ...
+# Read-only file system"). This helper implements `get` only and never
+# writes the file.
+COPY blitzlog-credential-helper /usr/local/bin/blitzlog-credential-helper
+# Issue #164: installs mise and makes sure the installed binary is
+# actually executable. mise's own installer only chmods the binary
+# when it runs as root, and the container no longer runs as root.
+COPY install-mise.sh /usr/local/bin/install-mise.sh
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown). These are baked directly into
@@ -293,7 +304,9 @@ RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/opencode \
     && chown blitzlog:blitzlog /var/log/blitzlog /workspace \
     && chmod -R a+rX /opt/blitzlog/opencode \
     && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh \
-        /usr/local/bin/install-opencode-plugins.sh
+        /usr/local/bin/install-opencode-plugins.sh \
+        /usr/local/bin/blitzlog-credential-helper \
+        /usr/local/bin/install-mise.sh
 
 # Sanity checks (still root — this runs at build time)
 RUN /usr/local/bin/whisper-cli --help >/dev/null \

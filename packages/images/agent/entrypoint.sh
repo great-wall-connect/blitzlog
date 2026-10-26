@@ -45,6 +45,34 @@ log() {
 
 MODE="${MODE:-autonomous}"
 
+# --- Project-side bootstrap: mise ---
+#
+# The container runs as an unprivileged uid (issue #164), and mise's
+# own install script only makes the binary executable when it runs as
+# root:
+#
+#   if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#
+# Without that chmod the installed binary can keep whatever mode the
+# tarball carried, and the first `mise` call then fails with
+#
+#   /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+#
+# (dash exits 126), which killed the container before the agent ever
+# started. install-mise.sh does the chmod itself and then verifies
+# that the binary actually runs, so a broken mise fails with a
+# diagnosable message instead of an exec error three lines later.
+MISE_BIN=""
+
+install_mise() {
+    mise_path="$(/usr/local/bin/install-mise.sh)" || {
+        log "ERROR: mise is not usable — the project toolchain cannot be installed (see the container log for the reason)."
+        exit 1
+    }
+    MISE_BIN="$mise_path"
+    export PATH="$(dirname "$MISE_BIN"):$PATH"
+}
+
 shutdown() {
     log "Caught signal; graceful shutdown"
     if [ -n "${SHIM_PID:-}" ]; then
@@ -113,13 +141,26 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     fi
 fi
 
-# Point git at the credential store. In production the file is the
+# Point git at the credential file. In production the file is the
 # host's read-only mount; in the dev path it is the file we just wrote.
-# `git credential-store` only READS on `fill`, so a read-only file is
-# fine — `store`/`erase` are never reached because the credential
-# already matches.
+#
+# We deliberately do NOT use `git credential-store` here. That helper is
+# not read-only in practice: after a successful authentication git
+# calls the helper's `store` operation, and credential-store REWRITES
+# the file under a lock. On the host's read-only mount that fails with
+#
+#   fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+#
+# git ignores a helper's exit status, so the clone still succeeds — but
+# every run logs a spurious "fatal:" that reads like a failed clone.
+#
+# The container ships a get-only helper instead
+# (/usr/local/bin/blitzlog-credential-helper): it reads the host's file
+# on every call — the host's token-refresh poll loop rewrites that file
+# in place, so the token is always current — and never writes it.
 if [ -f "$GIT_CRED_FILE" ]; then
-    git config --global credential.helper "store --file $GIT_CRED_FILE"
+    git config --global credential.helper \
+        '!/usr/local/bin/blitzlog-credential-helper'
 fi
 if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
     git config --global user.name "${GIT_AUTHOR_NAME}"
@@ -565,12 +606,11 @@ if [ "$MODE" = "autonomous" ]; then
 
     # Project-side bootstrap (mirrors the current _install_toolchain_script)
     if [ -f mise.toml ] || [ -f .tool-versions ]; then
-        wget -q -O - https://mise.run | sh || curl -fsSL https://mise.run | sh
-        export PATH="$HOME/.local/bin:$PATH"
-        mise trust 2>/dev/null || true
-        mise install -y
-        if mise tasks --name-only 2>/dev/null | grep -qx bootstrap; then
-            mise run bootstrap
+        install_mise
+        "$MISE_BIN" trust 2>/dev/null || true
+        "$MISE_BIN" install -y
+        if "$MISE_BIN" tasks --name-only 2>/dev/null | grep -qx bootstrap; then
+            "$MISE_BIN" run bootstrap
         fi
     fi
 
@@ -647,12 +687,11 @@ else
     # bootstrap). mise installs the toolchain pinned in mise.toml so
     # /workspace/repo can be developed with the same tooling locally.
     if [ -f mise.toml ] || [ -f .tool-versions ]; then
-        wget -q -O - https://mise.run | sh || curl -fsSL https://mise.run | sh
-        export PATH="$HOME/.local/bin:$PATH"
-        mise trust 2>/dev/null || true
-        mise install -y
-        if mise tasks --name-only 2>/dev/null | grep -qx bootstrap; then
-            mise run bootstrap
+        install_mise
+        "$MISE_BIN" trust 2>/dev/null || true
+        "$MISE_BIN" install -y
+        if "$MISE_BIN" tasks --name-only 2>/dev/null | grep -qx bootstrap; then
+            "$MISE_BIN" run bootstrap
         fi
     fi
 

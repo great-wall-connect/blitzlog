@@ -31,8 +31,10 @@ container's runtime shell is ``/bin/sh`` -> dash, and the mise dev
 tasks must be able to source the file under a POSIX shell too.
 """
 
+import os
 import re
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -825,6 +827,278 @@ class TestCredentialMountsAreReadOnly(unittest.TestCase):
             entrypoint,
             "the entrypoint must only run `gh auth login` when the host "
             "has not already mounted a hosts.yml",
+        )
+
+
+class TestCredentialHelperIsReadOnly(unittest.TestCase):
+    """git must not try to WRITE the host's credential file.
+
+    The credential file is a read-only bind mount, and
+    `git credential-store` is not read-only in practice: after a
+    successful authentication git calls the helper's `store` operation,
+    and credential-store rewrites the file under a lock:
+
+        fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+
+    git ignores a helper's exit status, so the clone still succeeds —
+    but every run logs a spurious "fatal:" that reads like a failed
+    clone, and the credential can never be updated. The container
+    therefore ships a get-only helper instead.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.helper = REPO_ROOT / "packages/images/agent/blitzlog-credential-helper"
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.smoke_test = _read(SMOKE_TEST)
+
+    def test_helper_is_baked_into_the_image(self):
+        self.assertTrue(
+            self.helper.is_file(),
+            f"missing {self.helper} — the container needs a get-only "
+            "credential helper to use the host's read-only credential file",
+        )
+        self.assertIn(
+            "COPY blitzlog-credential-helper /usr/local/bin/blitzlog-credential-helper",
+            self.dockerfile,
+            "the credential helper must be baked into the image — the "
+            "rootfs is read-only, so it cannot be written at runtime",
+        )
+        self.assertIn(
+            "/usr/local/bin/blitzlog-credential-helper",
+            self.dockerfile.split("chmod +x")[-1],
+            "the credential helper must be chmod +x in the image",
+        )
+
+    def test_entrypoint_points_git_at_the_read_only_helper(self):
+        self.assertTrue(
+            "'!/usr/local/bin/blitzlog-credential-helper'" in self.entrypoint,
+            "the entrypoint must configure the get-only credential helper",
+        )
+        self.assertNotIn(
+            'credential.helper "store --file',
+            self.entrypoint,
+            "the entrypoint must NOT use `git credential-store` against "
+            "the host's read-only credential file — credential-store "
+            "rewrites the file under a lock when git approves a "
+            "credential, which fails with 'unable to get credential "
+            "storage lock ... Read-only file system'",
+        )
+
+    def test_helper_only_answers_get(self):
+        """`store` and `erase` must be no-ops."""
+        helper_src = _read(self.helper)
+        self.assertIn(
+            '[ "$op" = "get" ] || exit 0',
+            helper_src,
+            "the helper must ignore every operation except `get` — the "
+            "credential file is a read-only mount",
+        )
+
+    def test_helper_never_writes_the_credential_file(self):
+        helper_src = _read(self.helper)
+        # Strip the comments so the prose cannot trip the check, then
+        # look for anything that could write: a redirection (other than
+        # /dev/null) or a command that mutates a file.
+        code = "\n".join(
+            line
+            for line in helper_src.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        code = code.replace(">/dev/null", "").replace("2>&1", "")
+        for forbidden in (
+            ">",
+            "rm ",
+            "mv ",
+            "cp ",
+            "dd ",
+            "tee ",
+            "truncate",
+            "chmod ",
+            "install ",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    code,
+                    "the credential helper must never write the "
+                    "credential file — that is the whole point of it",
+                )
+
+    def test_helper_returns_the_token(self):
+        """Functional: the helper must hand git the token."""
+        with tempfile.TemporaryDirectory() as tmp:
+            creds = Path(tmp) / "github"
+            creds.write_text(
+                "https://x-access-token:ghp_TESTTOKEN123@github.com\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(self.helper),
+                    "get",
+                ],
+                input="protocol=https\nhost=github.com\n\n",
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "BLITZLOG_GIT_CREDENTIAL_FILE": str(creds),
+                },
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("username=x-access-token", result.stdout)
+            self.assertIn("password=ghp_TESTTOKEN123", result.stdout)
+
+    def test_helper_does_not_touch_the_file_on_store_or_erase(self):
+        """Functional: the write paths must leave the file byte-identical."""
+        with tempfile.TemporaryDirectory() as tmp:
+            creds = Path(tmp) / "github"
+            original = "https://x-access-token:ghp_TESTTOKEN123@github.com\n"
+            creds.write_text(original, encoding="utf-8")
+            for op in ("store", "erase"):
+                with self.subTest(op=op):
+                    result = subprocess.run(
+                        ["sh", str(self.helper), op],
+                        input=(
+                            "protocol=https\nhost=github.com\n"
+                            "username=x-access-token\npassword=other\n\n"
+                        ),
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "BLITZLOG_GIT_CREDENTIAL_FILE": str(creds),
+                        },
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(
+                        creds.read_text(encoding="utf-8"),
+                        original,
+                        f"the helper modified the credential file on {op}",
+                    )
+
+    def test_smoke_test_exercises_the_helper(self):
+        self.assertIn(
+            "blitzlog-credential-helper",
+            self.smoke_test,
+            "the image smoke test must exercise the credential helper — a "
+            "helper that cannot read the host's file would only fail at "
+            "clone time, in production",
+        )
+
+
+class TestMiseIsRunnableAsAnUnprivilegedUid(unittest.TestCase):
+    """mise's installer only makes the binary executable when it runs as
+    root, and the container no longer runs as root (issue #164).
+
+    Without the exec bit the first `mise` call fails with
+
+        /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+
+    and dash exits 126 — the container dies before the agent starts.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.installer = REPO_ROOT / "packages/images/agent/install-mise.sh"
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.smoke_test = _read(SMOKE_TEST)
+
+    def test_installer_is_baked_into_the_image(self):
+        self.assertTrue(
+            self.installer.is_file(),
+            f"missing {self.installer} — the entrypoint needs a mise "
+            "installer that works as an unprivileged uid",
+        )
+        self.assertIn(
+            "COPY install-mise.sh /usr/local/bin/install-mise.sh",
+            self.dockerfile,
+            "the mise installer must be baked into the image — the "
+            "rootfs is read-only, so it cannot be written at runtime",
+        )
+        self.assertIn(
+            "/usr/local/bin/install-mise.sh",
+            self.dockerfile.split("chmod +x")[-1],
+            "the mise installer must be chmod +x in the image",
+        )
+
+    def test_entrypoint_uses_the_installer(self):
+        self.assertTrue(
+            "/usr/local/bin/install-mise.sh" in self.entrypoint,
+            "the entrypoint must install mise through install-mise.sh — "
+            "mise's own installer only chmods the binary as root",
+        )
+
+    def test_installer_makes_the_binary_executable(self):
+        installer = _read(self.installer)
+        self.assertIn(
+            'chmod +x "$MISE_BIN"',
+            installer,
+            "the installer must chmod +x the mise binary — mise's own "
+            "installer only does that when it runs as root",
+        )
+
+    def test_installer_verifies_that_mise_actually_runs(self):
+        installer = _read(self.installer)
+        self.assertIn(
+            '"$MISE_BIN" --version',
+            installer,
+            "the installer must probe that mise actually runs, so a "
+            "broken toolchain fails with a diagnosable message instead "
+            "of an exec error three lines later",
+        )
+
+    def test_entrypoint_calls_mise_by_absolute_path(self):
+        """A PATH lookup would turn a missing/unusable mise into the
+        same cryptic 'Permission denied'."""
+        self.assertNotIn(
+            "        mise install -y\n",
+            self.entrypoint,
+            "mise must be invoked through $MISE_BIN, not through a PATH " "lookup",
+        )
+        self.assertIn('"$MISE_BIN" install -y', self.entrypoint)
+
+    def test_installer_makes_a_non_executable_binary_runnable(self):
+        """Functional: the exact bug this fixes.
+
+        A binary that is present but NOT executable is what mise's
+        installer leaves behind when it runs as a non-root user. The
+        installer must make it runnable.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_mise = Path(tmp) / "mise"
+            fake_mise.write_text('#!/bin/sh\necho "mise 0.0.0"\n', encoding="utf-8")
+            fake_mise.chmod(0o644)
+            self.assertFalse(
+                os.access(fake_mise, os.X_OK),
+                "the fake mise should not be executable before the fix",
+            )
+            result = subprocess.run(
+                ["sh", str(self.installer), str(fake_mise)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(fake_mise))
+            self.assertTrue(
+                os.access(fake_mise, os.X_OK),
+                "the installer must make a non-executable mise runnable",
+            )
+
+    def test_smoke_test_exercises_the_mise_installer(self):
+        self.assertIn(
+            "install-mise.sh",
+            self.smoke_test,
+            "the image smoke test must exercise the mise installer — a "
+            "non-executable mise only failed at runtime, in production",
         )
 
 

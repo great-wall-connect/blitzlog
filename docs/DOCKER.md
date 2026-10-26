@@ -321,6 +321,32 @@ agent reads them through git's credential helper and the `gh` CLI. The
 token therefore never appears in `docker inspect` or in
 `/proc/<pid>/environ`.
 
+### Git reads the credential file; it never writes it
+
+`git credential-store` is not read-only in practice. After a
+successful authentication git calls the helper's `store` operation,
+and credential-store **rewrites** the file under a lock. Against the
+host's read-only mount that fails with:
+
+```
+fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+```
+
+git ignores a helper's exit status, so the clone still succeeds — but
+every run logs a spurious `fatal:` that reads like a failed clone, and
+the credential can never be updated.
+
+The container therefore ships its own helper,
+`/usr/local/bin/blitzlog-credential-helper`, which implements `get`
+and nothing else. It reads the host's file on every call — the host's
+token-refresh poll loop rewrites that file *in place*, so the token is
+always current — and never writes it. The entrypoint wires it up with:
+
+```sh
+git config --global credential.helper \
+    '!/usr/local/bin/blitzlog-credential-helper'
+```
+
 ### apt's sandbox is pinned to root in the image
 
 `--cap-drop=ALL` removes `CAP_SETUID`, `CAP_SETGID` and `CAP_CHOWN` — and

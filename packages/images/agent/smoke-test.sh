@@ -39,6 +39,68 @@ echo "==> checking entrypoint syntax"
 sh -n /usr/local/bin/entrypoint.sh
 bash -n /usr/local/bin/entrypoint.sh
 sh -n /usr/local/bin/install-opencode-plugins.sh
+sh -n /usr/local/bin/blitzlog-credential-helper
+sh -n /usr/local/bin/install-mise.sh
+
+echo "==> checking mise can be installed AND executed"
+# Issue #164: the container runs as an unprivileged uid, and mise's own
+# install script only chmods the binary when it runs as root. Without
+# that chmod the first `mise` call fails with "mise: Permission
+# denied" (exit 126) and the container dies before the agent starts.
+# install-mise.sh does the chmod itself — assert that here, with a
+# deliberately non-executable fake binary (no network involved).
+SMOKE_MISE="$(mktemp -d)/mise"
+printf '#!/bin/sh\necho "mise 0.0.0"\n' > "$SMOKE_MISE"
+chmod 0644 "$SMOKE_MISE"
+test -x "$SMOKE_MISE" && { echo "FAIL: the fake mise should not be executable yet"; exit 1; }
+SMOKE_MISE_PATH="$(/usr/local/bin/install-mise.sh "$SMOKE_MISE")" \
+  || { echo "FAIL: install-mise.sh could not make the binary executable"; exit 1; }
+test -x "$SMOKE_MISE" \
+  || { echo "FAIL: install-mise.sh left the binary non-executable"; exit 1; }
+test "$SMOKE_MISE_PATH" = "$SMOKE_MISE" \
+  || { echo "FAIL: install-mise.sh printed '$SMOKE_MISE_PATH', expected '$SMOKE_MISE'"; exit 1; }
+rm -rf "$(dirname "$SMOKE_MISE")"
+echo "install-mise.sh makes a non-executable mise runnable"
+
+echo "==> checking the read-only GitHub credential helper"
+# Issue #164: the credential file is owned by the host and mounted
+# READ-ONLY into the container. `git credential-store` rewrites that
+# file under a lock when git approves a credential after a successful
+# auth, which fails on a read-only mount with:
+#
+#   fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+#
+# The container therefore ships a get-only helper. Assert that it
+# returns the credential AND that it never writes the file — the whole
+# point of it is that it is safe to point at a read-only mount.
+test -x /usr/local/bin/blitzlog-credential-helper \
+  || { echo "FAIL: blitzlog-credential-helper is missing or not executable"; exit 1; }
+SMOKE_CREDS="$(mktemp)"
+printf 'https://x-access-token:smoke-test-token@github.com\n' > "$SMOKE_CREDS"
+SMOKE_CREDS_BEFORE="$(cat "$SMOKE_CREDS")"
+SMOKE_HELPER_OUT="$(BLITZLOG_GIT_CREDENTIAL_FILE="$SMOKE_CREDS" \
+  /usr/local/bin/blitzlog-credential-helper get < /dev/null)"
+case "$SMOKE_HELPER_OUT" in
+  *"username=x-access-token"*"password=smoke-test-token"*) ;;
+  *)
+    echo "FAIL: credential helper returned '$SMOKE_HELPER_OUT'"
+    rm -f "$SMOKE_CREDS"
+    exit 1
+    ;;
+esac
+# The store/erase paths must be no-ops: the file is read-only in
+# production and must stay byte-identical.
+BLITZLOG_GIT_CREDENTIAL_FILE="$SMOKE_CREDS" \
+  /usr/local/bin/blitzlog-credential-helper store < /dev/null
+BLITZLOG_GIT_CREDENTIAL_FILE="$SMOKE_CREDS" \
+  /usr/local/bin/blitzlog-credential-helper erase < /dev/null
+if [ "$(cat "$SMOKE_CREDS")" != "$SMOKE_CREDS_BEFORE" ]; then
+  echo "FAIL: credential helper modified the credential file"
+  rm -f "$SMOKE_CREDS"
+  exit 1
+fi
+rm -f "$SMOKE_CREDS"
+echo "credential helper returns the token and never writes the file"
 
 echo "==> checking the container does NOT run as root"
 # Issue #164: the agent container runs as an unprivileged uid. The

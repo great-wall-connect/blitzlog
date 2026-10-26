@@ -57,6 +57,18 @@ Concretely, the lifecycle is:
 
 1. **Cloud-init** clones the target repository into `/workspace/repo`.
 2. **`mise` is installed** if `mise.toml` or `.tool-versions` is present.
+   The install runs inside the container, as the container's
+   unprivileged uid — and mise's own install script only makes the
+   binary executable when it runs as *root*:
+
+   ```sh
+   if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+   ```
+
+   The container's entrypoint therefore does the `chmod +x` itself and
+   then verifies that the binary actually runs, so a mis-installed mise
+   fails with a readable message instead of
+   `mise: Permission denied` (exit 126).
 3. **`mise install`** provisions the language toolchains declared in
    `[tools]` (Python, Node, Rust, Go, …).
 4. **Bootstrap check** — `mise tasks --name-only` is filtered for an
