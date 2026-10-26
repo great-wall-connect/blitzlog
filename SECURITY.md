@@ -57,6 +57,24 @@ Blitzlog is designed around a few hardening principles — review these before p
 - **No AWS credentials in the agent container** — the container has no
   IAM role, no AWS keys and no `aws` CLI. The host does all SSM/S3 work
   and passes results in via env vars and mounted files.
+- **The container cannot reach the instance metadata service** — the
+  watchdog installs a `DOCKER-USER` rule that drops traffic from the
+  container's network to `169.254.169.254` (that chain only sees
+  forwarded container traffic, so the host's own IMDS access is
+  untouched) and passes `AWS_EC2_METADATA_DISABLED=true` to the
+  container as a second layer. This is what makes the claim above
+  true: without it, the container could assume the EC2 instance role
+  and read every SSM parameter that role can read — including the
+  GitHub App's private key and the webhook secret (issue #175). The
+  block is **fail-closed**: if the rule cannot be installed, the
+  watchdog refuses to start the agent and says so loudly. A boundary
+  that fails silently cannot be told apart from one that works.
+- **The EC2 instance role reads only what the host needs** — the
+  per-issue GitHub token it refreshes for the container, the AMI id, the
+  bot lock, and the log upload paths. It cannot read the GitHub App's
+  private key, the app id, the installation id or the webhook secret:
+  those belong to the Lambda, which is the only component that mints
+  installation tokens. `tests/test_ec2_iam.py` pins that.
 - **Container capability drop** — the agent container runs with
   `--cap-drop=ALL` and `--security-opt=no-new-privileges:true`, so
   third-party npm code that executes in-container cannot escalate via

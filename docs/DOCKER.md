@@ -206,6 +206,29 @@ production.
 Tailscale daemon needs them to build the WireGuard tunnel. Every other
 run gets `--cap-drop=ALL` and nothing else.
 
+**The container cannot reach the instance metadata service.** The
+container has no AWS credentials *by construction*, but the EC2
+instance it runs on has an instance role — and the container shares the
+host's network. Without a block, anything in the container could
+assume that role and read every SSM parameter it can read, including
+the GitHub App's private key and the webhook secret (issue #175).
+
+The watchdog therefore installs a `DOCKER-USER` rule that drops traffic
+from the container's network to `169.254.169.254` — that chain only
+sees forwarded container traffic, so the host's own IMDS access (the
+watchdog's token and region fetches) is unaffected — and passes
+`AWS_EC2_METADATA_DISABLED=true` to the container so the AWS SDK
+refuses IMDS as well.
+
+The block is **fail-closed**: if the rule cannot be installed (no
+iptables, no `DOCKER-USER` chain), the watchdog refuses to start the
+agent and logs an `ERROR`. The first version of this rule was
+best-effort — a warning, and the agent started anyway — and the gap
+then went unnoticed for a release cycle, because a boundary that fails
+silently is indistinguishable from one that works. The refusal path
+still runs the cleanup (log upload, bot-lock release, instance
+terminate), so a refused start does not strand the instance.
+
 > The container-side Tailnet join is the **only** enrolment path in the
 > project — the Lambda bootstrap no longer installs or joins Tailscale on
 > the host. Before issue #164 the capability flags were passed

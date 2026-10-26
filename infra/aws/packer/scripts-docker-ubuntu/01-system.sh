@@ -10,10 +10,15 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
+# `iptables` is installed explicitly (issue #175): the watchdog installs a
+# DOCKER-USER rule that blocks the agent container from reaching the
+# instance metadata service, and it REFUSES to start the agent if the
+# rule cannot be installed. It must not depend on iptables arriving as a
+# transitive dependency of docker-ce.
 sudo apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg \
     awscli jq openssl \
-    kmod
+    kmod iptables
 
 # Docker's official Ubuntu repo (installs dockerd + CLI)
 sudo install -m 0755 -d /etc/apt/keyrings
