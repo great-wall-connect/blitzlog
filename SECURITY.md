@@ -70,6 +70,12 @@ Blitzlog is designed around a few hardening principles — review these before p
   the process count so a fork bomb cannot exhaust the host's PIDs, and
   `--init` puts `docker-init` at PID 1 so orphaned grandchildren are
   reaped instead of accumulating as zombies for the life of the run.
+- **apt runs as root in the container** — apt's own privilege drop to the
+  `_apt` user needs `CAP_SETUID`/`CAP_SETGID`/`CAP_CHOWN`, which
+  `--cap-drop=ALL` removes. The image pins apt's sandbox to root
+  (`/etc/apt/apt.conf.d/99-no-sandbox`) so project bootstraps can still
+  install build dependencies; the alternative was re-granting those
+  capabilities to every agent run.
 
 The container's runtime flags live in one place —
 `packages/images/agent/container-hardening.env` — shared by the

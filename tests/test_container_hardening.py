@@ -46,6 +46,7 @@ PACKER_DIR = PACKER_HCL.parent
 SYSTEMD_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/02-systemd.sh"
 SYSTEM_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
 ENTRYPOINT = REPO_ROOT / "packages/images/agent/entrypoint.sh"
+DOCKERFILE = REPO_ROOT / "packages/images/agent/Dockerfile"
 
 # The flags every `docker run` of the agent image must carry. Kept as
 # an explicit literal (rather than "whatever the contract file says")
@@ -183,6 +184,53 @@ class TestContainerHardeningContract(unittest.TestCase):
             ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
             "the contract grants capabilities outside the documented "
             "Tailscale exemption",
+        )
+
+
+class TestAptStillWorksUnderDroppedCapabilities(unittest.TestCase):
+    """The capability drop must not break package installation.
+
+    apt runs its download methods as the unprivileged `_apt` user, which
+    needs CAP_SETUID + CAP_SETGID + CAP_CHOWN. The hardening contract
+    drops ALL capabilities, so every project bootstrap that installs
+    build dependencies — the documented pattern in docs/BOOTSTRAP.md —
+    died with:
+
+        E: setgroups 0 failed - setgroups (1: Operation not permitted)
+        E: Method https has died unexpectedly!
+
+    The image therefore pins apt's sandbox to root. Re-granting
+    SETUID/SETGID/CHOWN to every run instead would put the
+    capabilities back on every agent run, including the ones that never
+    install a package.
+    """
+
+    def test_image_pins_the_apt_sandbox_to_root(self):
+        src = _read(DOCKERFILE)
+        for setting in ('APT::Sandbox::User "root"', 'APT::Sandbox::Group "root"'):
+            self.assertIn(
+                setting,
+                src,
+                "the image must pin apt's sandbox to root — apt's own "
+                "privilege drop needs CAP_SETUID/CAP_SETGID/CAP_CHOWN, "
+                "which --cap-drop=ALL removes. Without this the agent "
+                "cannot install the toolchain it is supposed to install.",
+            )
+
+    def test_apt_override_lands_in_the_runtime_stage(self):
+        src = _read(DOCKERFILE)
+        self.assertIn(
+            "# ===== Stage 2: runtime =====",
+            src,
+            "the Dockerfile's runtime stage marker moved — update this test",
+        )
+        runtime = src.split("# ===== Stage 2: runtime =====", 1)[-1]
+        self.assertIn(
+            "/etc/apt/apt.conf.d/99-no-sandbox",
+            runtime,
+            "the apt override must be installed in the RUNTIME stage — the "
+            "build stage is discarded, so writing it there would never "
+            "reach the container that runs the agent",
         )
 
 

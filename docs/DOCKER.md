@@ -202,9 +202,47 @@ Tailscale daemon needs them to build the WireGuard tunnel. Every other
 run gets `--cap-drop=ALL` and nothing else.
 
 > The container-side Tailnet join is the **only** enrolment path in the
-> project — the Lambda bootstrap no longer installs or joins Tailscale
-> on the host. Before issue #164 the capability flags were passed
+> project — the Lambda bootstrap no longer installs or joins Tailscale on
+> the host. Before issue #164 the capability flags were passed
 > *without* `--device /dev/net/tun`, so the join could never establish a
 > tunnel: it logged `WARNING: tailscale up failed` and the local-LLM
 > preflight fell back to cloud. The AMI now loads the `tun` module and
 > creates `/dev/net/tun` (`infra/aws/packer/scripts-docker-ubuntu/01-system.sh`).
+
+### apt runs as root inside the container
+
+`--cap-drop=ALL` removes `CAP_SETUID`, `CAP_SETGID` and `CAP_CHOWN` — and
+apt needs all three, because it drops privileges to the unprivileged
+`_apt` user before running its download methods. With the capabilities
+gone, every project bootstrap that installs build dependencies (the
+documented pattern in [`BOOTSTRAP.md`](BOOTSTRAP.md)) failed with:
+
+```
+E: setgroups 0 failed - setgroups (1: Operation not permitted)
+E: Method https has died unexpectedly!
+```
+
+The image therefore pins apt's sandbox to root
+(`/etc/apt/apt.conf.d/99-no-sandbox`):
+
+```
+APT::Sandbox::User "root";
+APT::Sandbox::Group "root";
+```
+
+The container already runs as root and the packages come from the same
+signed Debian archive the image itself was built from, so apt's own
+privilege drop bought no trust — it only cost the platform its ability
+to install the toolchain the agent is *supposed* to install. The
+alternative (re-granting `SETUID`/`SETGID`/`CHOWN` on every run) would
+put those capabilities back on every agent run, including the ones that
+never install a package.
+
+**Known limitation.** `--cap-drop=ALL` also breaks anything else that
+drops privileges on purpose — `useradd`/`adduser` (they call `setuid`),
+`su`, and `dpkg` maintainer scripts that create system users. A project
+bootstrap that does more than `apt-get install` needs the capability
+set re-granted for that run; that is part of the non-root /
+read-only-rootfs slice of issue #164, not something the runtime
+hardening can paper over.
+
