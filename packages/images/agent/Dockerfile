@@ -142,6 +142,23 @@ FROM python:${PYTHON_VERSION}-slim
 COPY sources.list.hk /etc/apt/sources.list.d/99-hk.list
 RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.disabled
 
+# apt runs its download methods as the unprivileged `_apt` user, which
+# needs CAP_SETUID + CAP_SETGID + CAP_CHOWN. The agent container's
+# hardening contract drops ALL capabilities (see
+# packages/images/agent/container-hardening.env), so a project bootstrap
+# that runs `apt-get install` — the documented pattern in
+# docs/BOOTSTRAP.md — died with:
+#
+#   E: setgroups 0 failed - setgroups (1: Operation not permitted)
+#   E: Method https has died unexpectedly!
+#
+# Run the methods as root instead. The container already runs as root
+# and the packages come from the same signed Debian archive the image
+# itself was built from, so the privilege drop bought no trust and cost
+# the platform its ability to install build dependencies at runtime.
+RUN printf 'APT::Sandbox::User "root";\nAPT::Sandbox::Group "root";\n' \
+    > /etc/apt/apt.conf.d/99-no-sandbox
+
 ARG NODE_VERSION
 
 ENV PIP_NO_CACHE_DIR=1 \

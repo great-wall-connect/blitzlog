@@ -113,9 +113,12 @@ runtime, it shrinks to ~30 lines:
 
 ## CI
 
-- **`.github/workflows/docker-images.yml`** — builds the single image,
-  pushes to ghcr.io on main, Trivy gate, image-size gate (500MB max
-  uncompressed).
+- **`.github/workflows/docker-images.yml`** — builds the single image.
+  PRs that touch `packages/images/agent/**` build it but **do not** push
+  it; `workflow_dispatch` builds and pushes to ghcr.io under a
+  caller-chosen tag. The only gate is an **image-size gate** (2 GB max).
+  There is **no Trivy / vulnerability gate** — an earlier version of
+  this document claimed one; see issue #164.
 - **`.github/workflows/release.yml`** — the release pipeline. Builds +
   pushes the agent image and bakes a corresponding AMI (pr-test → dev
   AMI, release → prod AMI). Replaces what was previously a separate
@@ -151,14 +154,95 @@ runtime, it shrinks to ~30 lines:
   /blitzlog/<env>/agent-ami-id-docker-<family>` falls back to the
   upstream minimal AMI.
 
-## Security: container has no AWS credentials
+## Security: the container boundary
 
-The container's only network access is to the loopback (whisper-stt-shim
-on `127.0.0.1:7878`) and the opencode serve port. It cannot reach IMDS,
-SSM, S3, or any AWS API. A compromised agent cannot exfiltrate via AWS
-APIs — the credentials simply aren't in the container.
+### No AWS credentials in the container
 
-This closes a residual risk flagged in the README
-(issue #38, "lock down EC2 egress via nftables when local LLM is
-configured"): with Docker, the egress lockdown becomes a much simpler
-default Docker network policy on the container.
+The container has **no IAM role, no AWS keys and no `aws` CLI**. The
+host does all SSM/S3 work and passes results in via env vars and mounted
+files. A compromised agent cannot call SSM, S3 or any other AWS API —
+the credentials simply are not in the container.
+
+### The container is *not* network-isolated
+
+> **Correction (issue #164).** This document previously claimed *"The
+> container's only network access is to the loopback (whisper-stt-shim on
+> `127.0.0.1:7878`) and the opencode serve port."* That was **false**.
+> The container runs on Docker's default bridge network and the EC2
+> security group allows `0.0.0.0/0` (see
+> `infra/aws/modules/core/ec2.tf`), so it has unrestricted general
+> outbound egress. It **must** be able to reach the LLM provider API,
+> `github.com` and `api.telegram.org` — that egress is what makes the
+> agent work at all.
+
+Egress lockdown is tracked separately in
+[#38](https://github.com/great-wall-connect/blitzlog/issues/38).
+
+### Runtime hardening
+
+The `docker run` invocation that launches the agent carries a fixed set
+of hardening flags. They live in **one** place —
+`packages/images/agent/container-hardening.env` — which is sourced by the
+host-side watchdog (baked into the AMI as
+`/usr/local/bin/container-hardening.env`) and by every dev `docker run`
+site in `mise.toml`, so the dev path exercises the same posture as
+production.
+
+| Flag | Effect |
+|---|---|
+| `--security-opt=no-new-privileges:true` | Blocks setuid elevation. Third-party npm code runs in-container at runtime (`npx -y @grinev/opencode-telegram-bot@latest`), so this is not theoretical. |
+| `--cap-drop=ALL` | Drops Docker's default capability set (`CAP_NET_RAW`, `CAP_SYS_CHROOT`, `CAP_DAC_OVERRIDE`, `CAP_MKNOD`, `CAP_SETUID`/`CAP_SETGID`). The base agent path needs none of them. |
+| `--pids-limit=1024` | Bounds the process count so a fork bomb cannot exhaust the host's PIDs. |
+| `--init` | Runs `docker-init` as PID 1 so orphaned grandchildren are reaped instead of accumulating as zombies for the life of the run. |
+
+**The one capability exemption.** When — and only when —
+`TAILSCALE_AUTH_KEY` is set, the run additionally gets
+`--cap-add=NET_ADMIN --cap-add=NET_RAW --device /dev/net/tun`. The
+Tailscale daemon needs them to build the WireGuard tunnel. Every other
+run gets `--cap-drop=ALL` and nothing else.
+
+> The container-side Tailnet join is the **only** enrolment path in the
+> project — the Lambda bootstrap no longer installs or joins Tailscale on
+> the host. Before issue #164 the capability flags were passed
+> *without* `--device /dev/net/tun`, so the join could never establish a
+> tunnel: it logged `WARNING: tailscale up failed` and the local-LLM
+> preflight fell back to cloud. The AMI now loads the `tun` module and
+> creates `/dev/net/tun` (`infra/aws/packer/scripts-docker-ubuntu/01-system.sh`).
+
+### apt runs as root inside the container
+
+`--cap-drop=ALL` removes `CAP_SETUID`, `CAP_SETGID` and `CAP_CHOWN` — and
+apt needs all three, because it drops privileges to the unprivileged
+`_apt` user before running its download methods. With the capabilities
+gone, every project bootstrap that installs build dependencies (the
+documented pattern in [`BOOTSTRAP.md`](BOOTSTRAP.md)) failed with:
+
+```
+E: setgroups 0 failed - setgroups (1: Operation not permitted)
+E: Method https has died unexpectedly!
+```
+
+The image therefore pins apt's sandbox to root
+(`/etc/apt/apt.conf.d/99-no-sandbox`):
+
+```
+APT::Sandbox::User "root";
+APT::Sandbox::Group "root";
+```
+
+The container already runs as root and the packages come from the same
+signed Debian archive the image itself was built from, so apt's own
+privilege drop bought no trust — it only cost the platform its ability
+to install the toolchain the agent is *supposed* to install. The
+alternative (re-granting `SETUID`/`SETGID`/`CHOWN` on every run) would
+put those capabilities back on every agent run, including the ones that
+never install a package.
+
+**Known limitation.** `--cap-drop=ALL` also breaks anything else that
+drops privileges on purpose — `useradd`/`adduser` (they call `setuid`),
+`su`, and `dpkg` maintainer scripts that create system users. A project
+bootstrap that does more than `apt-get install` needs the capability
+set re-granted for that run; that is part of the non-root /
+read-only-rootfs slice of issue #164, not something the runtime
+hardening can paper over.
+

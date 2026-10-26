@@ -279,13 +279,31 @@ fi
 # Lets the container reach endpoints on a private Tailnet (e.g., a
 # local LLM at 100.x.y.z). The tailscale binary is in the image
 # unconditionally (see Dockerfile); the connection is opt-in via env.
-# Mirrors the lambda's _install_tailscale_script bootstrap snippet in
-# lambda/scripts/_common.py:210-251, but inlined into the entrypoint so
-# local testing gets the same behavior.
+#
+# Issue #164: this is the ONLY Tailnet enrolment path in the project.
+# The Lambda bootstrap used to install and join Tailscale on the EC2
+# host (the old `_install_tailscale_script`); that is gone, so the
+# container is where the join happens. The run therefore has to carry
+# the capability exemption (NET_ADMIN + NET_RAW) and the /dev/net/tun
+# device — see packages/images/agent/container-hardening.env for the
+# canonical flag list. Before #164 the capabilities were passed
+# WITHOUT the device, so the join could never establish a tunnel: it
+# logged "WARNING: tailscale up failed" and the local-LLM preflight
+# fell back to cloud.
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     log "TAILSCALE_AUTH_KEY set; starting tailscaled and joining Tailnet..."
-    mkdir -p /var/lib/tailscale
-    tailscaled --state=/var/lib/tailscale/tailscaled.state >>/var/log/blitzlog/tailscaled.log 2>&1 &
+    # Issue #164: tailscaled's state file and control socket live under
+    # /tmp, which is a tmpfs. The container's rootfs is read-only and
+    # the daemon runs as an unprivileged user, so it can neither write
+    # its state under /var nor create a control socket under /var/run.
+    # Both the daemon and the `tailscale` CLI are pointed at the same
+    # socket.
+    TAILSCALE_DIR="/tmp/tailscale"
+    TAILSCALE_SOCKET="$TAILSCALE_DIR/tailscaled.sock"
+    mkdir -p "$TAILSCALE_DIR"
+    chmod 700 "$TAILSCALE_DIR"
+    tailscaled --state="$TAILSCALE_DIR/tailscaled.state" \
+        --socket="$TAILSCALE_SOCKET" >>/var/log/blitzlog/tailscaled.log 2>&1 &
     TAILSCALED_PID=$!
     # tailscale up is what authenticates and flips the daemon from
     # NeedsLogin to Running. Call it FIRST, then wait for the state to
@@ -293,16 +311,16 @@ if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     # before we ever called tailscale up — the daemon stayed at
     # NeedsLogin and never authenticated.)
     TSC_HOSTNAME="blitzlog-agent-${ISSUE_NUMBER:-local}-$(date +%s)"
-    if tailscale up --authkey="$TAILSCALE_AUTH_KEY" \
+    if tailscale --socket="$TAILSCALE_SOCKET" up --authkey="$TAILSCALE_AUTH_KEY" \
             --hostname="$TSC_HOSTNAME" \
             --accept-routes=false >>/var/log/blitzlog/tailscaled.log 2>&1; then
         for i in $(seq 1 30); do
-            STATE=$(tailscale status --json 2>/dev/null \
+            STATE=$(tailscale --socket="$TAILSCALE_SOCKET" status --json 2>/dev/null \
                 | python3 -c "import sys,json; print(json.load(sys.stdin).get('BackendState',''))" 2>/dev/null || echo "")
             if [ "$STATE" = "Running" ]; then break; fi
             sleep 2
         done
-        TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1 || echo "")
+        TAILSCALE_IP=$(tailscale --socket="$TAILSCALE_SOCKET" ip -4 2>/dev/null | head -1 || echo "")
         log "Tailscale connected: hostname=$TSC_HOSTNAME, ip=$TAILSCALE_IP"
     else
         log "WARNING: tailscale up failed; local-LLM preflight will likely fail if endpoint is on the Tailnet"

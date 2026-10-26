@@ -119,6 +119,18 @@ build {
     destination = "/tmp/blitzlog-token-poll.sh"
   }
 
+  # 1c. Upload the canonical container-hardening contract (issue #164).
+  # Sourced by watchdog.sh at boot so the container it launches carries
+  # --security-opt=no-new-privileges:true, --cap-drop=ALL, --pids-limit
+  # and --init. The contract lives next to the image it describes (the
+  # agent package) so the dev tasks in mise.toml can source the very
+  # same file from the repo. The final copy to /usr/local/bin/ is done
+  # by 02-systemd.sh.
+  provisioner "file" {
+    source      = "${path.root}/../../../packages/images/agent/container-hardening.env"
+    destination = "/tmp/blitzlog-container-hardening.env"
+  }
+
   # 2. Bake the blitzlog-agent container image
   provisioner "shell" {
     environment_vars = [
