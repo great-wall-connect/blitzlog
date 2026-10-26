@@ -848,7 +848,7 @@ When local is configured, the bootstrap script:
 - **Does not** render the `minimax-coding-plan` provider block in `opencode.json`. There is no cloud provider to address.
 - **Defensively** unsets `OPENCODE_API_KEY`, `HTTPS_PROXY`, and `HTTP_PROXY` at startup. A root-level agent can re-introduce these, but the path of least resistance is closed.
 
-> **Residual risk**: an agent could rewrite its own `opencode.json` and re-introduce a cloud provider block. Since issue #164 the agent runs as an unprivileged uid (`blitzlog`, 1000) inside a container with a read-only rootfs, so it can no longer rewrite the binaries it runs and can only write to an explicit list of paths (see `docs/DOCKER.md`). The remaining network path is closed separately by the `nftables` egress lockdown tracked in [#38](https://github.com/great-wall-connect/blitzlog/issues/38).
+> **Residual risk**: an agent could rewrite its own `opencode.json` and re-introduce a cloud provider block. Since issue #164 the container's capability set is empty (`--cap-drop=ALL`), so the agent cannot mount, bypass file permissions, make raw sockets or escalate — but it does run as uid 0 with a writable rootfs, because `dpkg` needs both to install a project's build dependencies (issue #174). The remaining network path is closed separately by the `nftables` egress lockdown tracked in [#38](https://github.com/great-wall-connect/blitzlog/issues/38), and the container cannot reach the instance metadata service (see `docs/DOCKER.md` → *Runtime hardening*).
 
 ### Transports — keep the tunnel up all the time
 

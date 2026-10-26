@@ -262,12 +262,11 @@ COPY install-mise.sh /usr/local/bin/install-mise.sh
 # tool, no idle watchdog, no session archiver, etc.
 #
 # Issue #164: they are baked into /opt/blitzlog/opencode, NOT into
-# $HOME/.config/opencode. The container's HOME is a tmpfs (the
-# rootfs is read-only), so anything baked under $HOME would be
-# shadowed by the tmpfs at runtime. The entrypoint copies these three
-# directories into $HOME/.config/opencode/ on startup — still baked
-# into the image, still present from the first startup, no network and
-# no runtime npm install.
+# $HOME/.config/opencode. The container's HOME is a tmpfs, so anything
+# baked under $HOME would be shadowed by the tmpfs at runtime. The
+# entrypoint copies these three directories into $HOME/.config/opencode/
+# on startup — still baked into the image, still present from the first
+# startup, no network and no runtime npm install.
 COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/
 COPY opencode/tools/ /opt/blitzlog/opencode/tools/
 COPY opencode/lib/ /opt/blitzlog/opencode/lib/

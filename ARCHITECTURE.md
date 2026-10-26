@@ -63,12 +63,14 @@ Packer-baked Ubuntu 26.04 with two systemd services:
 
 ### Container (`packages/images/agent/`)
 - **`Dockerfile`** — bakes plugins, tools, and `lib/` helpers into
-  `/opt/blitzlog/opencode/{plugins,tools,lib}/`, creates the
-  unprivileged `blitzlog` user (uid 1000) and declares `USER blitzlog`.
+  `/opt/blitzlog/opencode/{plugins,tools,lib}/`, and creates the
+  `blitzlog` user (uid 1000) that owns the image's `HOME`. The
+  container itself runs as uid 0 — `dpkg` needs root to install a
+  project's build dependencies (issue #174) — but with **no
+  capabilities at all** (`--cap-drop=ALL`), which is what bounds it.
 - **`install-opencode-plugins.sh`** — copies the baked components into the
   agent's `HOME` (`$HOME/.config/opencode/`) on boot. The HOME is a
-  tmpfs (the rootfs is read-only), so anything baked under `$HOME`
-  would be shadowed.
+  tmpfs, so anything baked under `$HOME` would be shadowed.
 - **`entrypoint.sh`** — points git and `gh` at the host's read-only
   credential mounts, renders `opencode.json`, boots services.
 - **`opencode/plugins/`**:

@@ -25,8 +25,10 @@ plus host extras (`awscli`, `git`, `jq`) and the host-side watchdog
 - **Tags**: semver (`2.1.0`) for prod; `latest` mirrors the most recent push
 - **Architecture**: `linux/arm64`
 - **Base**: `python:3.12-slim` (debian, glibc) — multi-stage build
-- **User**: `blitzlog` (uid/gid 1000), `HOME=/home/blitzlog` — the image
-  does **not** run as root (see [the container boundary](#security-the-container-boundary))
+- **User**: the container runs as uid 0 — `dpkg` needs root to install a
+  project's build dependencies (issue #174) — but with **no capabilities**
+  (`--cap-drop=ALL`). `HOME=/home/blitzlog` (see [the container
+  boundary](#security-the-container-boundary))
 - **Contents**:
   - whisper.cpp prebuilt aarch64-linux-gnu CLI (pinned to `v1.7.6`)
   - `pywhispercpp`, `python-multipart`, `imageio-ffmpeg` (Python deps)
