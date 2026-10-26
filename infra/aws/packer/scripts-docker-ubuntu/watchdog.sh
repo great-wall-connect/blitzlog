@@ -71,7 +71,7 @@ sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
 mkdir -p /workspace/.blitzlog
 touch /workspace/.idle
 
-# Issue #164: the container runs as an unprivileged uid
+# Issue #164: the container runs as a specific uid
 # (BLITZLOG_CONTAINER_UID, see the hardening contract). A bind mount
 # preserves the SOURCE's ownership, so the host paths the container
 # writes to must be owned by that uid — otherwise the agent's first
