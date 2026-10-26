@@ -188,6 +188,36 @@ fi
 """
 ```
 
+## Inside the agent container
+
+The recipes above are written for a normal machine, where
+`apt-get install` really installs. Inside the Blitzlog agent container
+it does too — that is the point of the `bootstrap` task: the project
+declares its build dependencies, and the agent gets them.
+
+A few things are worth knowing about the environment the task runs in:
+
+- **The container can install system packages.** It runs as root with a
+  writable root filesystem, because `dpkg` needs both: it unpacks
+  files into `/usr`, writes its own database in `/var/lib/dpkg` and
+  runs maintainer scripts. What keeps that bounded is the container's
+  *capability* set, not its uid — the agent runs with no capabilities
+  at all (see [`DOCKER.md`](DOCKER.md) → *Runtime hardening*).
+- **The agent image ships no compiler.** The build toolchain belongs to
+  the project, not to the platform: a Rust project needs `cc` and the
+  libc headers, a Node project needs `node-gyp` and a C toolchain, and
+  a project that needs neither should not pay for one. The image's
+  smoke test asserts that no compiler is baked in, so the toolchain
+  really does come from the task below.
+- **The image is Debian-based**, so the `dnf` branch of the recipes
+  never runs and the `apt-get` branch is the one that does.
+
+If the install fails, the bootstrap task fails with it, and the agent
+does not start. That is deliberate: a project that cannot install its
+own build dependencies is misconfigured, and the failure is far easier
+to diagnose at that point than as a baffling `linker 'cc' not found`
+half-way through the agent's work.
+
 ## Minimal example
 
 A project that needs nothing more than the language toolchains

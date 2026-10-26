@@ -39,8 +39,8 @@ sudo rm -rf /var/lib/apt/lists/*
 # Load the module and create the device node explicitly — we do not
 # rely on udev to do it, because udev is not guaranteed to be running
 # on the minimal image at bake time. The device node is 0666 so the
-# container's non-root user can open it when the run enables the
-# Tailnet path (`--device /dev/net/tun`).
+# container can open it when the run enables the Tailnet path
+# (`--device /dev/net/tun`).
 sudo modprobe tun || true
 if [ ! -e /dev/net/tun ]; then
     sudo mkdir -p /dev/net

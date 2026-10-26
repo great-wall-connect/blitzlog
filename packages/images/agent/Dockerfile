@@ -151,19 +151,17 @@ RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sou
 #   E: setgroups 0 failed - setgroups (1: Operation not permitted)
 #   E: Method https has died unexpectedly!
 #
-# Run the methods as root instead. The packages come from the same
-# signed Debian archive the image itself was built from, so the
-# privilege drop bought no trust and cost the platform its ability to
-# install build dependencies.
+# Run the methods as root instead. The container runs as root (dpkg
+# needs it to unpack a package and write its own database), the
+# packages come from the same signed Debian archive the image itself
+# was built from, and the privilege drop bought no trust — it only
+# cost the platform its ability to install the toolchain the agent is
+# supposed to install. The alternative (re-granting SETUID/SETGID/CHOWN
+# on every agent run) would put those capabilities back on every run,
+# including the ones that never install a package.
 #
-# Note that this config is installed in the RUNTIME stage, so it also
-# governs apt inside the running container. The container itself runs
-# as a non-root uid on a read-only rootfs (see the USER directive
-# below), so a runtime `apt-get install` cannot write /var/lib/dpkg or
-# /var/cache/apt and cannot escalate to root for a dpkg maintainer
-# script — the pin keeps the image's own build and any root-run apt
-# correct; it does not make runtime package installation viable. See
-# docs/DOCKER.md.
+# This config is installed in the RUNTIME stage, so it governs apt
+# inside the running container as well as during the image build.
 RUN printf 'APT::Sandbox::User "root";\nAPT::Sandbox::Group "root";\n' \
     > /etc/apt/apt.conf.d/99-no-sandbox
 
@@ -172,24 +170,11 @@ ARG NODE_VERSION
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=UTC \
-    # Issue #164: the rootfs is read-only, so a system-wide
-    # `pip install` (which every repo's `bootstrap` task does) would
-    # fail with EROFS. PIP_USER=1 makes pip install into the user
-    # site-packages — $HOME/.local/lib/python3.12/site-packages —
-    # which lives on the writable HOME tmpfs and is already on
-    # sys.path. The system site-packages (pip itself, setuptools, the
-    # whisper shim's deps) stays read-only and intact.
-    #
-    # Known limitation: `pip install --user` is rejected inside a
-    # virtualenv, so a target repo whose bootstrap creates a venv
-    # before installing will fail. See docs/DOCKER.md.
-    PIP_USER=1 \
-    # Issue #164: the agent no longer runs as root, so HOME moves off
-    # /root. Every path the agent used to write under /root (the
-    # global git config, mise's toolchain, the npm cache, opencode's
-    # config + state, the telegram bot's config) now lives under
-    # /home/blitzlog. The container's HOME is a tmpfs, so it is
-    # writable even with --read-only.
+    # The agent's HOME. It is a tmpfs at runtime (see
+    # packages/images/agent/container-hardening.env), so the global git
+    # config, mise's toolchain, the npm cache, opencode's config and
+    # state and the telegram bot's config never land in the container's
+    # writable layer.
     HOME=/home/blitzlog \
     # /usr/sbin is added so tailscaled (Debian package puts the daemon
     # there, not the CLI) is on PATH for the local-test Tailscale
@@ -287,21 +272,24 @@ COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/
 COPY opencode/tools/ /opt/blitzlog/opencode/tools/
 COPY opencode/lib/ /opt/blitzlog/opencode/lib/
 
-# Issue #164: the unprivileged runtime user. uid/gid 1000 match
-# BLITZLOG_CONTAINER_UID / BLITZLOG_CONTAINER_GID in
-# packages/images/agent/container-hardening.env — the host-side
-# watchdog chowns the bind mounts it exposes to the container to this
-# uid, because a bind mount preserves the SOURCE's ownership (a
-# root-owned 0700 directory is unreadable to a non-root container
-# user).
+# The agent's HOME directory. The `blitzlog` user owns it in the image,
+# but the container itself runs as uid 0 (see the note at the bottom of
+# this file) — the user exists so that HOME is a real, owned directory
+# rather than a bare mkdir.
 RUN groupadd --gid 1000 blitzlog \
     && useradd --uid 1000 --gid 1000 --home-dir /home/blitzlog \
         --create-home --shell /bin/sh blitzlog
 
-# Layout that the entrypoint expects
+# Layout that the entrypoint expects.
+#
+# The two writable directories stay owned by root: the container runs as
+# uid 0 with NO capabilities (--cap-drop=ALL), so it has no
+# CAP_DAC_OVERRIDE — a directory owned by another uid would be writable
+# only through its "other" permission bits. The host-side watchdog
+# chowns the bind-mount sources to BLITZLOG_CONTAINER_UID (0), which
+# keeps the dev path and the production path identical.
 RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/opencode \
         /var/log/blitzlog /workspace \
-    && chown blitzlog:blitzlog /var/log/blitzlog /workspace \
     && chmod -R a+rX /opt/blitzlog/opencode \
     && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh \
         /usr/local/bin/install-opencode-plugins.sh \
@@ -315,12 +303,31 @@ RUN /usr/local/bin/whisper-cli --help >/dev/null \
 
 WORKDIR /workspace
 
-# Issue #164: drop root. Every process in the container — including the
-# agent's bash tool — now runs as uid 1000. Combined with
-# --cap-drop=ALL and --read-only (both set by the caller from
-# packages/images/agent/container-hardening.env), a compromise of the
-# agent cannot escalate, cannot tamper with the binaries it runs, and
-# cannot write outside the explicitly documented writable paths.
-USER blitzlog
+# Issue #174: the container runs as uid 0, deliberately.
+#
+# dpkg needs root: it unpacks packages into /usr, writes its own
+# database in /var/lib/dpkg and runs maintainer scripts. A project's
+# `bootstrap` task installs its own build dependencies with apt — the
+# documented pattern in docs/BOOTSTRAP.md — so the container has to be
+# able to install packages. A read-only rootfs and a non-root uid make
+# that impossible, and the first agent run after issue #164 died with
+#
+#   E: List directory /var/lib/apt/lists/partial is missing.
+#      - Acquire (30: Read-only file system)
+#   [bootstrap] ERROR task failed
+#
+# before the agent ever started.
+#
+# uid 0 here is a CAPABILITY-LESS root: the caller passes
+# --cap-drop=ALL and --security-opt=no-new-privileges:true (see
+# packages/images/agent/container-hardening.env), so the agent cannot
+# escalate, cannot mount anything (no CAP_SYS_ADMIN), cannot bypass
+# file permissions (no CAP_DAC_OVERRIDE) and cannot make raw sockets
+# (no CAP_NET_RAW). The container also holds no AWS credentials, sees
+# the GitHub credential store read-only, and shares only the agent's
+# own workspace and log directory with the host.
+#
+# The `blitzlog` user above still exists: it owns the image's HOME
+# directory, which is a tmpfs at runtime.
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

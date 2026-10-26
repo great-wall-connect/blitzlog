@@ -59,12 +59,16 @@ DOCKER_IMAGES_WORKFLOW = REPO_ROOT / ".github/workflows/docker-images.yml"
 # so that changing the contract is a deliberate act that has to
 # update this test too — a contract that silently loses --cap-drop
 # must not be able to redefine "correct" at the same time.
+#
+# `--read-only` is deliberately NOT here (issue #174): a project's
+# `bootstrap` task installs its own build dependencies, and dpkg
+# cannot unpack a package into a read-only /usr. The capability drop
+# is what bounds the agent instead.
 EXPECTED_HARDENING_FLAGS = [
     "--security-opt=no-new-privileges:true",
     "--cap-drop=ALL",
     "--pids-limit=1024",
     "--init",
-    "--read-only",
 ]
 
 # The one and only capability relaxation in the project.
@@ -543,9 +547,13 @@ class TestWritablePathContract(unittest.TestCase):
         tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
         self.assertIn("--tmpfs /tmp:", tmpfs)
         self.assertIn("/home/blitzlog:", tmpfs)
-        # The tmpfs must be owned by the container's unprivileged uid,
-        # otherwise the agent cannot write its own HOME.
-        self.assertIn("uid=1000,gid=1000", tmpfs)
+        # The tmpfs must be owned by the container's runtime uid.
+        # The container has no CAP_DAC_OVERRIDE, so a uid-0 process
+        # cannot write into a directory owned by another uid (the
+        # kernel applies the "other" permission bits to it).
+        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
+        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
+        self.assertIn(f"uid={uid},gid={gid}", tmpfs)
 
     def test_tmpfs_mounts_are_exec_able(self):
         """Docker's `--tmpfs` defaults to `noexec` — and the agent's
@@ -602,16 +610,14 @@ class TestWritablePathContract(unittest.TestCase):
         Docker creates the missing parent of a bind mount as
         `root:root 0755`. The gh CLI config is bind-mounted at
         `$HOME/.config/gh`, so Docker creates `$HOME/.config` itself —
-        owned by root, inside the $HOME tmpfs. The agent runs as uid
-        1000 and then cannot create `$HOME/.config/opencode` under it:
-
-            mkdir: cannot create directory '/home/blitzlog/.config/opencode':
-            Permission denied
-
-        which aborted the entrypoint before the agent ever started.
-        Mounting a tmpfs at $HOME/.config with the agent's own uid/gid
-        makes the mountpoint uid-owned; Docker then mounts the
+        owned by root, inside the $HOME tmpfs. Mounting a tmpfs at
+        $HOME/.config with the container's own uid/gid makes the
+        mountpoint uid-owned; Docker then mounts the
         `$HOME/.config/gh` bind INSIDE it (parents before children).
+
+        The ownership is not cosmetic: the container runs with
+        --cap-drop=ALL, so it has no CAP_DAC_OVERRIDE — a uid-0
+        process cannot write into a directory owned by another uid.
         """
         tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
         self.assertIn(
@@ -619,18 +625,18 @@ class TestWritablePathContract(unittest.TestCase):
             tmpfs,
             "$HOME/.config MUST have its own tmpfs. Docker creates the "
             "missing parent of the $HOME/.config/gh bind mount as "
-            "root:root 0755, and the agent (uid 1000) then cannot "
-            "create $HOME/.config/opencode — the entrypoint aborts with "
-            "'Permission denied' before the agent starts.",
+            "root:root 0755, and the mount point then has an owner the "
+            "agent cannot rely on.",
         )
-        # ...and it must be owned by the agent's uid, not root.
+        # ...and it must be owned by the container's runtime uid.
         config_tmpfs = tmpfs.split("--tmpfs /home/blitzlog/.config:")[1]
+        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
+        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
         self.assertIn(
-            "uid=1000,gid=1000",
+            f"uid={uid},gid={gid}",
             config_tmpfs,
             "the $HOME/.config tmpfs must be owned by the container's "
-            "unprivileged uid (1000), or the agent cannot write its own "
-            "config dir",
+            "runtime uid, or the agent cannot write its own config dir",
         )
 
     def test_smoke_test_asserts_the_config_dir_is_writable(self):
@@ -679,8 +685,9 @@ class TestWritablePathContract(unittest.TestCase):
                 )
 
 
-class TestContainerRunsAsNonRoot(unittest.TestCase):
-    """The image must not run the agent as uid 0."""
+class TestContainerRuntimeIdentity(unittest.TestCase):
+    """The container runs as uid 0 — dpkg needs root — and the
+    capability drop is what keeps that bounded (issue #174)."""
 
     @classmethod
     def setUpClass(cls):
@@ -688,29 +695,27 @@ class TestContainerRunsAsNonRoot(unittest.TestCase):
         cls.entrypoint = _read(ENTRYPOINT)
         cls.smoke = _read(SMOKE_TEST)
 
-    def test_dockerfile_declares_a_non_root_user(self):
+    def test_dockerfile_does_not_declare_a_non_root_user(self):
+        """A `USER blitzlog` directive would break every project's
+        bootstrap task: dpkg needs root to unpack a package and to
+        write its own database."""
         users = re.findall(r"(?m)^USER\s+(\S+)", self.dockerfile)
-        self.assertTrue(users, "the Dockerfile has no USER directive")
         for user in users:
-            self.assertNotEqual(
+            self.assertIn(
                 user,
-                "root",
-                "the image's USER directive must not be root",
+                ("root",),
+                "the container must not declare a non-root USER: dpkg "
+                "needs root to install a project's build dependencies "
+                "(issue #174)",
             )
-        self.assertEqual(
-            users[-1],
-            "blitzlog",
-            "the image's final USER directive must be the unprivileged "
-            "`blitzlog` user",
-        )
 
-    def test_dockerfile_creates_the_blitzlog_user_with_the_contract_ids(self):
-        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
-        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
-        self.assertIn(f"--uid {uid}", self.dockerfile)
-        self.assertIn(f"--gid {gid}", self.dockerfile)
+    def test_dockerfile_creates_the_blitzlog_user_for_the_home_directory(self):
+        """The `blitzlog` user owns the image's HOME directory. It is
+        not the runtime user — the container runs as uid 0 — but the
+        directory has to exist and be owned by somebody."""
         self.assertIn("useradd", self.dockerfile)
         self.assertIn("groupadd", self.dockerfile)
+        self.assertIn("--home-dir /home/blitzlog", self.dockerfile)
 
     def test_dockerfile_sets_home_to_the_contract_home(self):
         home = _source_contract('"$BLITZLOG_CONTAINER_HOME"').strip()
@@ -720,17 +725,17 @@ class TestContainerRunsAsNonRoot(unittest.TestCase):
             "the Dockerfile must set HOME to the contract's container home",
         )
 
-    def test_dockerfile_installs_pip_into_the_writable_home(self):
-        """A repo's `bootstrap` task does a system-wide
-        `pip install`, which fails with EROFS on a read-only rootfs.
-        PIP_USER=1 sends it to the user site-packages on the writable
-        HOME tmpfs instead."""
-        self.assertIn(
+    def test_dockerfile_does_not_force_pip_into_the_user_site_packages(self):
+        """`PIP_USER=1` was a read-only-rootfs workaround. It is also
+        rejected inside a virtualenv ("Can not perform a '--user'
+        install"), which breaks the bootstrap task of any repo that
+        creates a venv — and the rootfs is writable now."""
+        self.assertNotIn(
             "PIP_USER=1",
             self.dockerfile,
-            "the image must set PIP_USER=1 — a repo's bootstrap task "
-            "would otherwise fail to install its Python dependencies on "
-            "the read-only rootfs",
+            "the image must not set PIP_USER=1 — `pip install --user` is "
+            "rejected inside a virtualenv, so a repo whose bootstrap "
+            "creates a venv would fail (issue #174)",
         )
 
     def test_dockerfile_bakes_the_opencode_components_outside_home(self):
@@ -778,16 +783,30 @@ class TestContainerRunsAsNonRoot(unittest.TestCase):
         self.assertIn("cp -R ", src)
         self.assertNotIn("cp -a ", src)
 
-    def test_smoke_test_asserts_a_non_root_uid(self):
+    def test_smoke_test_asserts_the_container_has_no_capabilities(self):
+        """uid 0 is only safe because the capability set is empty.
+
+        The smoke test asserts the effective capability mask, so a run
+        that loses --cap-drop=ALL fails the image instead of silently
+        handing the agent Docker's default capability set.
+        """
         self.assertIn(
-            "AGENT_UID=$(id -u)",
+            "CapEff:",
             self.smoke,
-            "the image's smoke test must assert the runtime uid",
+            "the image's smoke test must assert the effective capability "
+            "mask — that is the invariant that bounds the uid-0 "
+            "container (issue #174)",
         )
         self.assertIn(
-            'if [ "$AGENT_UID" = "0" ]',
+            "AGENT_CAPS=$(awk",
             self.smoke,
-            "the image's smoke test must fail when the container runs as " "root",
+            "the image's smoke test must read CapEff from " "/proc/self/status",
+        )
+        self.assertIn(
+            'if [ "$AGENT_CAPS" != "0000000000000000" ]',
+            self.smoke,
+            "the image's smoke test must fail when the container has "
+            "effective capabilities",
         )
 
     def test_smoke_test_does_not_mkdir_on_a_read_only_rootfs(self):

@@ -94,11 +94,14 @@ jobs:
             | awk '$1 ~ /GB/ { split($1, parts, "G"); if (parts[1] + 0 > 2.0) { print "REJECTED (too big): " $0; exit 1 } }'
           echo "Image size OK"
 
-      # Issue #164: the image must boot as a non-root user, with a
-      # read-only rootfs and only the documented writable paths. The
-      # smoke test asserts the runtime uid and that the baked opencode
-      # components land in the agent's HOME — a static test cannot
-      # prove either, so the container is actually run here.
+      # Issue #164/#174: the image must boot with the documented
+      # capability set and writable paths, and it must be able to
+      # install a package — a project's `bootstrap` task does exactly
+      # that, and it is how the agent got stuck after #164. The smoke
+      # test asserts the effective capability mask, that the image ships
+      # no compiler, and that `apt-get install` works inside the
+      # container. A static test cannot prove any of that, so the
+      # container is actually run here.
       #
       # The flags come from the canonical hardening contract, so CI
       # exercises exactly the posture production uses.
@@ -108,7 +111,7 @@ jobs:
       # directory (Docker creates the missing parent of a bind mount as
       # root:root 0755). Without that mount the agent's config dir is
       # created by the agent itself and the failure mode below is
-      # invisible — which is exactly how a broken non-root image got
+      # invisible — which is exactly how a broken image got
       # merged: CI was green, and the first real run died with
       #
       #   mkdir: cannot create directory '/home/blitzlog/.config/opencode':

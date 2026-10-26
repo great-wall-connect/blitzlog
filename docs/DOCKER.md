@@ -194,7 +194,6 @@ production.
 | `--cap-drop=ALL` | Drops Docker's default capability set (`CAP_NET_RAW`, `CAP_SYS_CHROOT`, `CAP_DAC_OVERRIDE`, `CAP_MKNOD`, `CAP_SETUID`/`CAP_SETGID`). The base agent path needs none of them. |
 | `--pids-limit=1024` | Bounds the process count so a fork bomb cannot exhaust the host's PIDs. |
 | `--init` | Runs `docker-init` as PID 1 so orphaned grandchildren are reaped instead of accumulating as zombies for the life of the run. |
-| `--read-only` | Makes the container's rootfs read-only, so the agent cannot rewrite the binaries it runs (`/usr/local/bin/{opencode,git,gh,whisper-cli}`) and serve a tampered copy for the rest of the session. |
 
 **The one capability exemption.** When — and only when —
 `TAILSCALE_AUTH_KEY` is set, the run additionally gets
@@ -206,28 +205,63 @@ run gets `--cap-drop=ALL` and nothing else.
 > project — the Lambda bootstrap no longer installs or joins Tailscale on
 > the host. Before issue #164 the capability flags were passed
 > *without* `--device /dev/net/tun`, so the join could never establish a
-> tunnel: it logged `WARNING: tailscale up failed` and the local-LLM
+> tunnel: it logged "WARNING: tailscale up failed" and the local-LLM
 > preflight fell back to cloud. The AMI now loads the `tun` module and
 > creates `/dev/net/tun` (`infra/aws/packer/scripts-docker-ubuntu/01-system.sh`).
 
-### The container runs as a non-root user
+### The container runs as uid 0 — and what keeps that safe
 
-The image creates an unprivileged `blitzlog` user (uid/gid **1000**),
-sets `HOME=/home/blitzlog` and declares `USER blitzlog`. Every process
-in the container — including the agent's bash tool — runs as that uid.
-The host-side watchdog `chown`s the bind mounts it exposes to uid 1000,
-because a bind mount preserves the *source*'s ownership: a root-owned
-`0700` directory is unreadable from inside a non-root container.
+The container runs as **root**, and that is deliberate (issue #174).
 
-`id -u` is asserted by `packages/images/agent/smoke-test.sh`, so an
-image that loses its `USER` directive fails the smoke test instead of
-quietly running the agent as root.
+A project's `bootstrap` task installs its own build dependencies — the
+documented pattern in [`BOOTSTRAP.md`](BOOTSTRAP.md) is
+`apt-get update && apt-get install -y build-essential pkg-config
+libssl-dev` — and `dpkg` needs both root (to run maintainer scripts)
+and a writable `/usr` and `/var/lib/dpkg`. The first agent run after
+issue #164's read-only-rootfs slice died with:
+
+```
+E: List directory /var/lib/apt/lists/partial is missing.
+   - Acquire (30: Read-only file system)
+[bootstrap] ERROR task failed
+```
+
+before the agent ever started. The alternative — baking a compiler into
+the agent image — would put a C toolchain in every container for a
+project that may not need one; the build toolchain is the *project's*
+responsibility, and the container's package manager is what makes it
+available.
+
+uid 0 is safe here because of what surrounds it:
+
+- **`--cap-drop=ALL`** — the agent has *no* capabilities: it cannot
+  mount anything (`CAP_SYS_ADMIN`), cannot bypass file permissions
+  (`CAP_DAC_OVERRIDE`), cannot make raw sockets (`CAP_NET_RAW`) and
+  cannot escalate (`CAP_SETUID`/`CAP_SETGID`).
+  `CapEff` is asserted by the image's smoke test, so a run that loses
+  the flag fails the image instead of quietly handing the agent
+  Docker's default capability set.
+- **No AWS credentials in the container** — no IAM role, no keys, no
+  `aws` CLI. The host does all SSM/S3 work.
+- **Read-only credential mounts** — the GitHub token and the `gh` config
+  are owned by the host and mounted read-only, so the agent can use
+  them but cannot tamper with the host's copy.
+- **A disposable filesystem** — the container's writable layer is thrown
+  away when it exits, so a tampered binary does not outlive the run.
+  Only `/workspace` (the agent's own clone) and `/var/log/blitzlog` are
+  shared with the host, and both belong to the agent.
+
+The image's `HOME` is a tmpfs and its writable directories are root-owned
+— with `--cap-drop=ALL` there is no `CAP_DAC_OVERRIDE`, so uid 0 cannot
+write into a directory owned by another uid. The host-side watchdog
+`chown`s the bind-mount sources to the container's uid for the same
+reason: a bind mount preserves the *source*'s ownership.
 
 ### Writable paths
 
-The rootfs is read-only, so every path the agent legitimately writes to
-is carved out explicitly. **This list is the complete set** — a
-read-only rootfs with an implicit hole is worse than no flag at all.
+The rootfs is writable (see above), so this list is not "every path the
+agent may write to" — it is the set of paths kept **out of the
+container's writable layer**.
 `tests/test_container_hardening.py` asserts that this table matches
 `BLITZLOG_WRITABLE_PATHS` / `BLITZLOG_READONLY_MOUNTS` in
 `packages/images/agent/container-hardening.env`, so the list cannot
@@ -255,7 +289,9 @@ Read-only (the agent may read these, but cannot write them):
 <!-- readonly-paths:end -->
 
 Everything else — `/usr/local/bin`, `/opt/blitzlog/opencode`, `/etc`,
-`/usr` — is read-only image content.
+`/usr` — is ordinary image content. The agent can write to it for the
+life of the run (that is what dpkg needs), but the container's writable
+layer is discarded when the container exits, so nothing persists.
 
 > **The tmpfs mounts are `exec`, and that is not Docker's default.**
 > Docker mounts every `--tmpfs` with `noexec,nosuid,nodev` unless the
@@ -289,46 +325,31 @@ Everything else — `/usr/local/bin`, `/opt/blitzlog/opencode`, `/etc`,
 > creates the *missing parent* of a bind mount as `root:root 0755`. The
 > gh CLI config is bind-mounted at `$HOME/.config/gh`, so Docker creates
 > `$HOME/.config` itself — owned by root, inside the `$HOME` tmpfs. The
-> agent runs as uid 1000 and could not create `$HOME/.config/opencode`
-> under it:
+> mount point then has an owner the agent cannot rely on: with
+> `--cap-drop=ALL` there is no `CAP_DAC_OVERRIDE`, so a uid-0 process
+> cannot write into a directory owned by somebody else.
 >
-> ```
-> mkdir: cannot create directory '/home/blitzlog/.config/opencode': Permission denied
-> ```
->
-> which aborted the entrypoint before the agent ever started. The
-> contract therefore mounts a second tmpfs at `$HOME/.config` owned by
-> the agent's uid; Docker mounts parents before children, so the
+> The contract therefore mounts a second tmpfs at `$HOME/.config` owned by
+> the container's uid; Docker mounts parents before children, so the
 > `$HOME/.config/gh` bind then lands *inside* it (still root-owned and
 > read-only, which is correct — that one is an input).
 >
 > The rule this encodes: **any mount point under `$HOME` needs its own
-> uid-owned tmpfs**, because Docker will otherwise create its parent as
-> root. The image's smoke test asserts `$HOME/.config` is writable by
-> the runtime uid, and the CI smoke-test step mounts a gh config at the
+> tmpfs**, because Docker will otherwise create its parent as root. The
+> image's smoke test asserts `$HOME/.config` is writable by the
+> runtime uid, and the CI smoke-test step mounts a gh config at the
 > same path production does — without that mount the assertion cannot
-> see the failure mode, which is how a broken non-root image was merged
+> see the failure mode, which is how a broken image was merged
 > with a green CI run.
 
-> **The toolchain bootstrap still works on a read-only rootfs.** Every
-> repo's `bootstrap` task installs its Python dependencies, which would
-> normally write to the system site-packages — read-only here. The image
-> sets `PIP_USER=1`, so `pip install` writes to the user
-> site-packages (`$HOME/.local/lib/python3.12/site-packages`) on the
-> writable HOME tmpfs, which is already on `sys.path`. The system
-> site-packages (pip itself, setuptools, the whisper shim's
-> dependencies) stays read-only and intact.
->
-> A repo whose bootstrap creates a **virtualenv** before installing is
-> the one known gap: `pip install --user` is rejected inside a
-> virtualenv. Such a repo's bootstrap needs a small adjustment (install
-> into the venv, or drop the venv) — the agent has write access to the
-> clone and can make that change.
->
-> The symlink a bootstrap task may create under `/usr/local/bin` hits
-> the same wall; this repo's own `bootstrap` task falls back to
-> `$HOME/.local/bin` (already on the container's `PATH`) when
-> `/usr/local/bin` is read-only.
+> **The project installs its own toolchain.** Every repo's `bootstrap`
+> task installs its build dependencies with apt, and the container can
+> do that: it runs as root with a writable rootfs (dpkg needs both),
+> and apt's sandbox is pinned to root in the image so the download
+> methods do not need the capabilities the contract drops. The image
+> itself ships no compiler — the toolchain is the project's
+> responsibility, and the image's smoke test proves the install path
+> works inside the container under the production hardening flags.
 
 > **Why the opencode plugins are baked outside `$HOME`.** The
 > plugins (`idle_watchdog`, `periodic_autosave`, `session_archive`,
@@ -404,21 +425,20 @@ cost the platform its ability to install the toolchain the agent is
 back on every agent run, including the ones that never install a
 package.
 
-> **A runtime `apt-get install` is not possible in the hardened
-> container.** The container runs as a non-root uid on a read-only
-> rootfs, so apt cannot write its own database (`/var/lib/dpkg`) or
-> cache (`/var/cache/apt`), and it cannot escalate to root to run a
-> `dpkg` maintainer script. The sandbox pin above therefore keeps the
-> *image's own build* working and keeps a root-run `apt` inside the
-> image correct — it does not make `apt-get install` viable at runtime.
-> A target repo whose `bootstrap` task needs system packages has to
-> install them in the image or use a toolchain that does not need root;
-> `pip` installs work (see the `PIP_USER=1` note above).
+> **A runtime `apt-get install` works.** The container runs as root on a
+> writable rootfs (dpkg needs both), and the sandbox pin above stops
+> apt from trying to drop privileges it does not have. A project's
+> `bootstrap` task therefore installs its build dependencies exactly as
+> [`BOOTSTRAP.md`](BOOTSTRAP.md) documents — the image's smoke test
+> proves it inside the container, under the production hardening flags.
+>
+> The image itself ships **no compiler**: the toolchain belongs to the
+> project, and a C toolchain in every container would be dead weight for
+> the projects that do not need one.
 
 **Known limitation.** `--cap-drop=ALL` also breaks anything else that
 drops privileges on purpose — `useradd`/`adduser` (they call `setuid`),
 `su`, and `dpkg` maintainer scripts that create system users. A project
 bootstrap that does more than `apt-get install` needs the capability
-set re-granted for that run; that is part of the non-root /
-read-only-rootfs slice of issue #164, not something the runtime
-hardening can paper over.
+set re-granted for that run; that is a consequence of the capability
+drop, not something the runtime hardening can paper over.

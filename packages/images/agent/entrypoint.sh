@@ -47,8 +47,7 @@ MODE="${MODE:-autonomous}"
 
 # --- Project-side bootstrap: mise ---
 #
-# The container runs as an unprivileged uid (issue #164), and the mise
-# bootstrap has two failure modes that only show up at runtime:
+# The mise bootstrap has two failure modes that only show up at runtime:
 #
 #   1. Docker's `--tmpfs` mounts a tmpfs with `noexec` unless the
 #      option string says otherwise, and mise's toolchain lives on the
@@ -383,11 +382,9 @@ fi
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     log "TAILSCALE_AUTH_KEY set; starting tailscaled and joining Tailnet..."
     # Issue #164: tailscaled's state file and control socket live under
-    # /tmp, which is a tmpfs. The container's rootfs is read-only and
-    # the daemon runs as an unprivileged user, so it can neither write
-    # its state under /var nor create a control socket under /var/run.
-    # Both the daemon and the `tailscale` CLI are pointed at the same
-    # socket.
+    # /tmp, which is a tmpfs — so the daemon's state never lands in the
+    # container's writable layer. Both the daemon and the `tailscale`
+    # CLI are pointed at the same socket.
     TAILSCALE_DIR="/tmp/tailscale"
     TAILSCALE_SOCKET="$TAILSCALE_DIR/tailscaled.sock"
     mkdir -p "$TAILSCALE_DIR"

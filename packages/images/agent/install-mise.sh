@@ -4,8 +4,8 @@
 #
 # Why this is a separate script (issue #164):
 #
-#   The container runs as an unprivileged uid, and there are two ways
-#   the mise bootstrap can end with a mise that cannot be run:
+#   There are two ways the mise bootstrap can end with a mise that
+#   cannot be run:
 #
 #   1. Docker's `--tmpfs` mounts a tmpfs with `noexec` unless the
 #      option string says otherwise, and mise lives on the HOME tmpfs
@@ -23,9 +23,8 @@
 #
 #        if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
 #
-#      As the container's unprivileged uid the installed binary can
-#      keep whatever mode the tarball carried. This script does the
-#      chmod itself.
+#      Without that chmod the installed binary can keep whatever mode
+#      the tarball carried. This script does the chmod itself.
 #
 #   Either way the result is a mise that cannot be executed, so this
 #   script VERIFIES that the binary runs: a broken toolchain must fail
