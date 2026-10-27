@@ -1058,3 +1058,68 @@ def test_watchdog_teardown_aws_state_runs_before_terminate_instances() -> None:
         f"schedule-group delete (pos {sched_pos}) must run BEFORE "
         f"terminate-instances (pos {term_pos}); same reason."
     )
+
+
+def test_watchdog_teardown_deletes_the_group_before_the_ssm_token() -> None:
+    """The schedule-group delete MUST run before the SSM-token delete.
+
+    The refresh chain writes the token into SSM. Deleting the SSM
+    parameter first leaves a window in which a firing chain
+    iteration re-creates it — a zombie token that outlives the run.
+    Deleting the group first stops the chain, so the token delete
+    is the last word.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    ssm_pos = src.find("aws ssm delete-parameter")
+    sched_pos = src.find("aws scheduler delete-schedule-group")
+    assert ssm_pos > 0, "aws ssm delete-parameter not present in watchdog.sh"
+    assert (
+        sched_pos > 0
+    ), "aws scheduler delete-schedule-group not present in watchdog.sh"
+    assert sched_pos < ssm_pos, (
+        f"schedule-group delete (pos {sched_pos}) must run BEFORE the "
+        f"SSM delete (pos {ssm_pos}); the chain writes the token into "
+        "SSM, so deleting the token first leaves a window in which a "
+        "firing iteration re-creates it."
+    )
+
+
+def test_watchdog_teardown_reports_a_failed_group_delete() -> None:
+    """A failed schedule-group delete must be LOGGED, not discarded.
+
+    The teardown used to swallow the failure with `2>/dev/null || true`.
+    That is exactly what hid a broken IAM grant for ten days: every
+    teardown failed with AccessDenied, the group survived the run,
+    and the next run's first CreateSchedule collided with the
+    leftover iter-0 — so the chain never started and the agent's
+    token died 1 h after the launch-time mint.
+
+    The delete must stay non-fatal (teardown continues to
+    terminate-instances), but its error must reach the watchdog log.
+    """
+    cleaned = _strip_comments_and_continuations(_read(WATCHDOG))
+    command = _group_delete_command(cleaned)
+    assert "2>/dev/null" not in command, (
+        "watchdog.sh's schedule-group delete must not swallow its "
+        "stderr with 2>/dev/null — a failed delete has to reach the "
+        "watchdog log, otherwise a broken IAM grant is invisible."
+    )
+    assert "2>&1" in command, (
+        "watchdog.sh's schedule-group delete must capture the AWS "
+        "error text (2>&1) so the failure can be logged."
+    )
+    assert "failed to delete schedule group" in cleaned, (
+        "watchdog.sh must log a failed schedule-group delete — the "
+        "teardown stays non-fatal, but the operator has to see it."
+    )
+
+
+def _group_delete_command(cleaned_src: str) -> str:
+    """The single (continuation-stripped) line that invokes the
+    schedule-group delete."""
+    for line in cleaned_src.splitlines():
+        if "aws scheduler delete-schedule-group" in line:
+            return line
+    raise AssertionError(
+        "aws scheduler delete-schedule-group not present in watchdog.sh"
+    )

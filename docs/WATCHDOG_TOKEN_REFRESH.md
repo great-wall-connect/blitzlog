@@ -69,19 +69,21 @@ Two separate defects hid it:
 | Log line | Meaning |
 |---|---|
 | `Failed to schedule initial token refresh …` | `CreateSchedule` was denied — the chain never started. Check the Lambda's `iam:PassRole` grant on the scheduler role. |
+| `Failed to schedule initial token refresh … ConflictException: Schedule refresh-issue-<N>-iter-0 already exists` | A leftover schedule from a **previous** run is still in the group. The watchdog's teardown is supposed to delete the group; it didn't. Check the EC2 role's `scheduler:DeleteSchedule` grant (see below) and look for `WARNING: failed to delete schedule group` in the instance's `/var/log/backend-bootstrap.log`. |
 | `Scheduling refresh event: … fire_at=…` and then silence | The schedule was created but the event never fired. |
 | `Refresh event received: issue=… iteration=…` | The chain ran. If it is followed by `mint failed` / `ssm put failed`, the failure is in the mint or the SSM write, not the schedule. |
+| `Instance <id> is no longer alive — stopping the token-refresh chain` | The chain outlived its run (the teardown's group delete failed). The chain stopped on purpose; no token was written. |
 
 ### Instance teardown: one-call group delete
 
 The watchdog's post-container cleanup block cascade-deletes every
 chain event for the instance in a single AWS API call. The flow:
 
-1. `aws ssm delete-parameter` on the per-issue token
-   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
-2. `aws scheduler delete-schedule-group` on the per-issue group
+1. `aws scheduler delete-schedule-group` on the per-issue group
    (`blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`) —
    cascade-deletes all 10 chain events for this instance
+2. `aws ssm delete-parameter` on the per-issue token
+   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
 3. `aws ec2 terminate-instances`
 
 The per-issue group name is hashed from
@@ -90,17 +92,57 @@ instances in the same env never share a group. One instance's
 cleanup cannot nuke another instance's chain. The per-issue scope
 also matches the per-issue SSM namespace shape.
 
-The order matters: steps 1 and 2 run **before** step 3. Once
-`terminate-instances` is called, the instance is shutting down and
-subsequent AWS calls from this script may fail. (The dev-spot
+**The order matters twice.** Steps 1 and 2 both run **before** step 3:
+once `terminate-instances` is called, the instance is shutting down
+and subsequent AWS calls from this script may fail. (The dev-spot
 test's cleanup function at `scripts/test-dev-spot.sh` doesn't have
 this constraint because it runs **outside** the instance; the
-watchdog runs **inside** it.)
+watchdog runs **inside** it.) And step 1 precedes step 2 because the
+chain *writes* the token into SSM — deleting the parameter first
+leaves a window in which a firing iteration re-creates it, leaving a
+zombie token that outlives the run. Deleting the group first stops
+the chain, so the token delete is the last word.
+
+#### The group delete needs two IAM grants
+
+`scheduler:DeleteScheduleGroup` on the group is **not** enough.
+EventBridge Scheduler authorises the group delete against every
+schedule it cascades over, so the caller also needs
+`scheduler:DeleteSchedule` on the child schedules:
+
+```
+not authorized to perform: scheduler:DeleteSchedule on resource:
+arn:aws:scheduler:<region>:<acct>:schedule/<group>/* because no
+identity-based policy allows the scheduler:DeleteSchedule action
+```
+
+Without the second grant every teardown fails, the group survives
+the run, and the next run for the same `(env, repo, issue)` is
+doomed. That is not a cosmetic problem: EventBridge Scheduler does
+**not** delete a one-time `at()` schedule after it fires, so the
+previous run's `refresh-issue-<N>-iter-0` lingers in the group and
+the next run's first `CreateSchedule` fails with
+`ConflictException`. The chain then never starts and the agent's
+token dies 1 h after the launch-time mint.
+
+The EC2 agent role therefore carries **both** grants
+(`infra/aws/modules/core/iam.tf`), scoped to the per-issue group
+and its schedules.
+
+#### Fallback: the Lambda sweeps a leftover group
+
+The teardown is the primary cleanup path. The Lambda also deletes a
+leftover group when a chain starts (`_sweep_stale_schedule_group`),
+so a run whose predecessor died without a teardown can still start.
+The sweep is best-effort: a failure is logged and the chain starts
+anyway.
 
 Pinned by `tests/test_watchdog_credential_poll_e2e.py`:
 `test_watchdog_teardown_deletes_ssm_token`,
 `test_watchdog_teardown_deletes_per_issue_schedule_group`,
-`test_watchdog_teardown_aws_state_runs_before_terminate_instances`.
+`test_watchdog_teardown_aws_state_runs_before_terminate_instances`,
+`test_watchdog_teardown_deletes_the_group_before_the_ssm_token`,
+`test_watchdog_teardown_reports_a_failed_group_delete`.
 
 ## Testing levels
 

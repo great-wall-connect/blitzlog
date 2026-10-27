@@ -483,14 +483,14 @@ resource "aws_iam_role_policy" "deploy" {
         Resource = "*"
       },
       {
-        # EventBridge Scheduler (issue #145). The core module
-        # creates one per-env schedule group
-        # (`blitzlog-<env>-token-refresh`) in
-        # infra/aws/modules/core/scheduler.tf:69; Terraform needs
-        # to manage its lifecycle + tag set at plan/apply time.
-        # The Lambda mints the actual schedules at runtime
-        # via its own IAM role (infra/aws/modules/core/iam.tf:160-172);
-        # this Sid is for Terraform only.
+        # EventBridge Scheduler (issue #145). Terraform does NOT
+        # create the per-issue refresh groups — the Lambda creates
+        # them at runtime (see infra/aws/modules/core/iam.tf), named
+        # `blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`.
+        # This Sid exists so an operator (or a `terraform destroy` of
+        # a straggling group) can inspect and clean them up; the
+        # runtime path uses the Lambda's and the EC2 agent's own
+        # roles, not this one.
         Sid    = "SchedulerScheduleGroupManagement"
         Effect = "Allow"
         Action = [
@@ -503,7 +503,7 @@ resource "aws_iam_role_policy" "deploy" {
           "scheduler:TagResource",
           "scheduler:UntagResource",
         ]
-        Resource = "arn:aws:scheduler:${var.aws_region}:${data.aws_caller_identity.current.account_id}:schedule-group/blitzlog-*-token-refresh"
+        Resource = "arn:aws:scheduler:${var.aws_region}:${data.aws_caller_identity.current.account_id}:schedule-group/blitzlog-*-token-refresh-*"
       },
       {
         # S3: read access to the shared `agent-logs` and

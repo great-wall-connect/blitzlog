@@ -514,17 +514,35 @@ sudo docker rm -f blitzlog-agent || true
 # subsequent AWS calls from this script may fail. Both cleanups are
 # idempotent (the SSM delete is per-issue; the schedule group delete
 # cascade-deletes every refresh-event schedule for this instance).
+#
+# ORDER MATTERS: the schedule group is deleted FIRST so the refresh
+# chain cannot fire another iteration. The chain writes the token
+# into SSM, so deleting the SSM parameter first would leave a window
+# in which a firing iteration re-creates it — a zombie token that
+# outlives the run.
+#
+# The group delete needs BOTH `scheduler:DeleteScheduleGroup` (on the
+# group) and `scheduler:DeleteSchedule` (on each child schedule)
+# because EventBridge Scheduler authorises the cascade against the
+# schedules. The EC2 role carries both grants; without the second
+# one the delete fails with AccessDenied and the group survives the
+# run, which makes the NEXT run's first CreateSchedule collide with
+# the leftover iter-0 (ConflictException) — no chain, and the agent's
+# token dies 1 h after the launch-time mint.
 log "Tearing down instance-owned AWS state"
+if [ -n "${GITHUB_TOKEN_SCHED_GROUP:-}" ]; then
+    log "Deleting schedule group ${GITHUB_TOKEN_SCHED_GROUP} (cascade-deletes all chain events)"
+    if ! sched_out=$(aws scheduler delete-schedule-group \
+        --name "${GITHUB_TOKEN_SCHED_GROUP}" \
+        --region "$REGION" 2>&1); then
+        log "WARNING: failed to delete schedule group ${GITHUB_TOKEN_SCHED_GROUP}: ${sched_out}"
+        log "WARNING: the refresh chain may outlive this run. The next run's first CreateSchedule can collide with a leftover schedule (ConflictException) and the chain will not start."
+    fi
+fi
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
     log "Deleting SSM token at ${GITHUB_TOKEN_SSM_PARAM}"
     aws ssm delete-parameter \
         --name "${GITHUB_TOKEN_SSM_PARAM}" \
-        --region "$REGION" 2>/dev/null || true
-fi
-if [ -n "${GITHUB_TOKEN_SCHED_GROUP:-}" ]; then
-    log "Deleting schedule group ${GITHUB_TOKEN_SCHED_GROUP} (cascade-deletes all chain events)"
-    aws scheduler delete-schedule-group \
-        --name "${GITHUB_TOKEN_SCHED_GROUP}" \
         --region "$REGION" 2>/dev/null || true
 fi
 

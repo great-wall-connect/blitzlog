@@ -33,6 +33,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 from datetime import UTC, datetime, timedelta
 
 import boto3
@@ -49,7 +50,7 @@ from bot_pool import (
     get_local_llm_config,
     get_telegram_user_id,
 )
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from ec2 import launch_ec2_spot_instance
 from provider import get_secrets
 
@@ -71,6 +72,14 @@ TOKEN_REFRESH_MAX_ITERATIONS = 10
 # slack for clock skew on the watchdog's 5-min poll loop.
 TOKEN_REFRESH_INTERVAL_SECONDS = 3000  # 50 min
 
+# Issue #145: how many times to retry a `CreateSchedule` that failed
+# for a recoverable reason (the group is mid-deletion, the schedule
+# name is still held by a leftover). Each retry sleeps at most
+# `SCHEDULE_CREATE_MAX_BACKOFF_SECONDS`; the whole loop must finish
+# well inside the Lambda's 180 s timeout.
+SCHEDULE_CREATE_MAX_ATTEMPTS = 6
+SCHEDULE_CREATE_MAX_BACKOFF_SECONDS = 8
+
 # Module-level boto3 clients. Same rationale as the singletons in
 # `lambda/provider/__init__.py` — the Lambda runtime re-uses a warm
 # container for up to ~15 min, and a fresh client per call would
@@ -78,6 +87,7 @@ TOKEN_REFRESH_INTERVAL_SECONDS = 3000  # 50 min
 # test that doesn't touch the refresh path doesn't pay the cost.
 _scheduler_client = None
 _sts_client = None
+_ec2_client = None
 _account_id_cache: str | None = None
 
 
@@ -86,6 +96,13 @@ def _get_scheduler_client():
     if _scheduler_client is None:
         _scheduler_client = boto3.client("scheduler")
     return _scheduler_client
+
+
+def _get_ec2_client():
+    global _ec2_client
+    if _ec2_client is None:
+        _ec2_client = boto3.client("ec2")
+    return _ec2_client
 
 
 def _get_account_id() -> str:
@@ -391,6 +408,79 @@ def _refresh_schedule_name(issue: int, iteration: int) -> str:
     return f"refresh-issue-{issue}-iter-{iteration}"
 
 
+def _schedule_create_kwargs(
+    *,
+    schedule_name: str,
+    schedule_group: str,
+    fire_at: datetime,
+    target_arn: str,
+    scheduler_role_arn: str,
+    input_payload: str,
+) -> dict:
+    """The `CreateSchedule` argument bag.
+
+    Factored out so the retry paths (group-create, conflict-recovery)
+    cannot drift apart from the happy path.
+    """
+    return {
+        "Name": schedule_name,
+        "GroupName": schedule_group,
+        "ScheduleExpression": f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
+        "ScheduleExpressionTimezone": "UTC",
+        "FlexibleTimeWindow": {"Mode": "OFF"},
+        "Target": {
+            "Arn": target_arn,
+            "RoleArn": scheduler_role_arn,
+            "Input": input_payload,
+        },
+        "State": "ENABLED",
+    }
+
+
+def _sweep_stale_schedule_group(schedule_group: str) -> None:
+    """FALLBACK cleanup — delete a leftover per-issue schedule group.
+
+    The watchdog's teardown is the PRIMARY cleanup path: it deletes
+    the group when the agent run ends (see
+    `infra/aws/packer/scripts-docker-ubuntu/watchdog.sh`). This sweep
+    only matters when that teardown did not happen — the instance was
+    killed hard, or the EC2 role was missing the
+    `scheduler:DeleteSchedule` grant that the group delete needs.
+
+    A surviving group is not harmless. EventBridge Scheduler does NOT
+    delete a one-time `at()` schedule after it fires, so the previous
+    run's `refresh-issue-<N>-iter-0` lingers in the group and the
+    next run's first `CreateSchedule` fails with `ConflictException`.
+    The chain then never starts and the agent's token dies 1 h after
+    the launch-time mint.
+
+    Best-effort by design: a failure here must not stop the chain
+    from starting, so every error is logged and swallowed.
+    """
+    client = _get_scheduler_client()
+    try:
+        client.delete_schedule_group(Name=schedule_group)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code == "ResourceNotFoundException":
+            # The healthy case: the watchdog's teardown already
+            # removed the group. Nothing to sweep.
+            return
+        logger.warning(
+            "Could not sweep leftover schedule group %s (%s) — continuing; "
+            "the first CreateSchedule may collide with a leftover schedule.",
+            schedule_group,
+            code or e,
+        )
+        return
+    logger.info(
+        "Swept leftover schedule group %s — the watchdog teardown should "
+        "have removed it; check the EC2 role's scheduler:DeleteSchedule "
+        "grant (see docs/WATCHDOG_TOKEN_REFRESH.md).",
+        schedule_group,
+    )
+
+
 def schedule_next_refresh(
     *,
     issue: int,
@@ -448,51 +538,131 @@ def schedule_next_refresh(
         fire_at.isoformat(),
         iteration,
     )
-    # Idempotent group-create: on the first schedule for a given
-    # (env, repo, issue), the per-issue group doesn't exist yet, so
-    # CreateSchedule returns ResourceNotFoundException. We catch that
-    # specific error, CreateScheduleGroup, and retry CreateSchedule
-    # once. The retry is safe because the only thing that could
-    # have raced us in between is another Lambda invocation for the
-    # same issue, which would have created the same group + schedule
-    # under a different iteration (unique by name) and would now
-    # succeed too.
+    create_kwargs = _schedule_create_kwargs(
+        schedule_name=schedule_name,
+        schedule_group=schedule_group,
+        fire_at=fire_at,
+        target_arn=target_arn,
+        scheduler_role_arn=scheduler_role_arn,
+        input_payload=input_payload,
+    )
+
     client = _get_scheduler_client()
-    try:
-        client.create_schedule(
-            Name=schedule_name,
-            GroupName=schedule_group,
-            ScheduleExpression=f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
-            ScheduleExpressionTimezone="UTC",
-            FlexibleTimeWindow={"Mode": "OFF"},
-            Target={
-                "Arn": target_arn,
-                "RoleArn": scheduler_role_arn,
-                "Input": input_payload,
-            },
-            State="ENABLED",
-        )
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+
+    # FALLBACK cleanup. The watchdog's teardown is the primary path
+    # (see `_sweep_stale_schedule_group`'s docstring); this only
+    # covers the case where it did not run. Only the first hop
+    # sweeps — iterations 1..9 ARE the chain and must not delete
+    # the group they live in.
+    if iteration == 0:
+        _sweep_stale_schedule_group(schedule_group)
+
+    # Idempotent create. Three failure modes are recoverable, and
+    # each one is a race with the scheduler's own bookkeeping:
+    #
+    #   ResourceNotFoundException — the per-issue group doesn't
+    #     exist yet (first run for this issue, or the fallback
+    #     sweep above just removed it). Create it, then retry.
+    #   ConflictException — a schedule with this name already
+    #     exists: a leftover from a previous run whose teardown
+    #     never happened. Delete it, then retry.
+    #   ValidationException ("... is being deleted") — the group
+    #     delete is still in flight. EventBridge Scheduler is
+    #     eventually consistent here; wait it out, then retry.
+    #
+    # Anything else propagates so the chain's failure logging in
+    # `_handle_refresh` fires.
+    last_error: ClientError | None = None
+    for attempt in range(1, SCHEDULE_CREATE_MAX_ATTEMPTS + 1):
+        try:
+            client.create_schedule(**create_kwargs)
+            return
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            message = e.response.get("Error", {}).get("Message", "") or ""
+            last_error = e
+            if code == "ResourceNotFoundException":
+                logger.info(
+                    "Schedule group %s not found; creating then retrying CreateSchedule",
+                    schedule_group,
+                )
+                try:
+                    client.create_schedule_group(Name=schedule_group)
+                except ClientError as group_error:
+                    if (
+                        group_error.response.get("Error", {}).get("Code")
+                        != "ConflictException"
+                    ):
+                        raise
+                continue
+            if code == "ConflictException":
+                logger.warning(
+                    "Schedule %s already exists; deleting the leftover and retrying",
+                    schedule_name,
+                )
+                try:
+                    client.delete_schedule(Name=schedule_name, GroupName=schedule_group)
+                except ClientError as delete_error:
+                    if (
+                        delete_error.response.get("Error", {}).get("Code")
+                        != "ResourceNotFoundException"
+                    ):
+                        raise
+                continue
+            if code == "ValidationException" and "being deleted" in message:
+                delay = min(2**attempt, SCHEDULE_CREATE_MAX_BACKOFF_SECONDS)
+                logger.info(
+                    "Schedule group %s is still being deleted; retrying in %ds",
+                    schedule_group,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
             raise
-        logger.info(
-            "Schedule group %s not found; creating then retrying CreateSchedule",
-            schedule_group,
+    raise last_error  # pragma: no cover - the loop always returns or raises
+
+
+def _instance_is_alive(instance: str) -> bool | None:
+    """Is the agent's EC2 instance still alive?
+
+    Returns True/False, or None when the check itself failed. The
+    caller treats None as "don't know" and carries on — a transient
+    EC2 error must never kill the refresh chain, because a dead
+    chain costs the agent its GitHub access.
+
+    A terminated instance is reported as False: EC2 keeps it visible
+    for ~1 h after termination and then answers
+    `InvalidInstanceID.NotFound`, which means the same thing.
+    """
+    try:
+        response = _get_ec2_client().describe_instances(InstanceIds=[instance])
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code == "InvalidInstanceID.NotFound":
+            # The instance is gone (terminated long enough ago that
+            # EC2 no longer describes it).
+            return False
+        logger.warning(
+            "Could not describe instance %s (continuing the refresh "
+            "chain anyway): %s",
+            instance,
+            e,
         )
-        client.create_schedule_group(Name=schedule_group)
-        client.create_schedule(
-            Name=schedule_name,
-            GroupName=schedule_group,
-            ScheduleExpression=f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})",
-            ScheduleExpressionTimezone="UTC",
-            FlexibleTimeWindow={"Mode": "OFF"},
-            Target={
-                "Arn": target_arn,
-                "RoleArn": scheduler_role_arn,
-                "Input": input_payload,
-            },
-            State="ENABLED",
+        return None
+    except BotoCoreError as e:
+        # No credentials, throttling, endpoint trouble — "don't know".
+        logger.warning(
+            "Could not describe instance %s (continuing the refresh "
+            "chain anyway): %s",
+            instance,
+            e,
         )
+        return None
+    for reservation in response.get("Reservations", []):
+        for inst in reservation.get("Instances", []):
+            state = inst.get("State", {}).get("Name")
+            return state in ("pending", "running")
+    return False
 
 
 def _handle_refresh(event: dict) -> dict:
@@ -529,6 +699,27 @@ def _handle_refresh(event: dict) -> dict:
         iteration,
         repo,
     )
+
+    # Instance-liveness guard. The watchdog's teardown deletes the
+    # schedule group, so the chain normally dies with the run. But
+    # if that cleanup failed (or the instance was killed hard), the
+    # chain would keep re-minting tokens into SSM for hours after
+    # the agent is gone — a zombie token nobody uses. If the
+    # instance is no longer alive, stop the chain here: no token
+    # write, no next hop.
+    alive = _instance_is_alive(instance)
+    if alive is False:
+        logger.info(
+            "Instance %s is no longer alive — stopping the token-refresh "
+            "chain (iteration=%d). Not writing a token, not scheduling "
+            "the next hop.",
+            instance,
+            iteration,
+        )
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"status": "instance-gone"}),
+        }
 
     try:
         new_token = get_github_app_token(repo)
