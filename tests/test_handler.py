@@ -502,6 +502,74 @@ class TestRefreshBranch(unittest.TestCase):
         mock_secrets.return_value.put.assert_called_once()  # token still written
         mock_schedule.assert_not_called()  # chain ends
 
+    @patch("handler.schedule_next_refresh")
+    @patch("handler.get_github_app_token")
+    @patch("handler.get_secrets")
+    def test_refresh_branch_keeps_the_old_token_and_chains_on_when_the_mint_fails(
+        self, mock_secrets, mock_mint, mock_schedule
+    ):
+        """A failed mint must NOT overwrite the token in SSM, and the
+        chain must keep going.
+
+        Why: the token already in SSM is the previous one and it is
+        still valid — the chain mints its replacement 30 min before
+        the current one expires. Overwriting it with nothing (or with
+        a broken value) would cost the agent its GitHub access, and
+        ending the chain would mean it never gets another chance.
+
+        The old code returned 500 and stopped, so ONE transient GitHub
+        error killed the refresh for the rest of the run.
+        """
+        from handler import lambda_handler
+
+        mock_secrets.return_value.put = MagicMock()
+        mock_mint.side_effect = RuntimeError("boom")
+
+        result = lambda_handler(self._make_event(iteration=3), None)
+
+        self.assertEqual(result["statusCode"], 500)
+        # The token in SSM is untouched: the previous one is still
+        # valid and must stay there.
+        mock_secrets.return_value.put.assert_not_called()
+        # ...and the chain carries on so the next hop can retry.
+        mock_schedule.assert_called_once_with(
+            issue=145,
+            instance="i-0b076c604585b01be",
+            iteration=4,
+            repo="octocat/Hello-World",
+        )
+
+    def test_refresh_interval_leaves_overlap_headroom(self):
+        """The rotation interval must leave enough overlap for a
+        replacement token to become usable.
+
+        GitHub caps installation tokens at 1 h. The chain mints the
+        next one `TOKEN_REFRESH_INTERVAL_SECONDS` after the current
+        one, so the published token's remaining life at any moment is
+        (60 min - age). With a 30-min interval the token in SSM ALWAYS
+        has at least 30 min of life left.
+
+        That headroom is what lets the watchdog's poll loop hold back
+        a freshly minted token whose per-repository grant has not
+        materialised yet (GitHub did this to one mint of five on
+        2026-10-27, for ~20 min) while the PREVIOUS token — still
+        valid — keeps the agent's git working. The old 50-min
+        interval left only 10 min of overlap, which is not enough.
+        """
+        from handler import TOKEN_REFRESH_INTERVAL_SECONDS
+
+        self.assertEqual(
+            TOKEN_REFRESH_INTERVAL_SECONDS,
+            1800,
+            "the rotation interval must be 30 min: with GitHub's 1 h "
+            "token cap that guarantees >= 30 min of overlap, so a "
+            "replacement whose repo grant has not materialised yet can "
+            "be held back without stranding the agent",
+        )
+        # It must also be shorter than the 1 h cap, or the token would
+        # expire before its replacement arrived.
+        self.assertLess(TOKEN_REFRESH_INTERVAL_SECONDS, 3600)
+
     def test_refresh_schedule_group_name_is_per_issue(self):
         """The schedule group name must be per-(env, repo, issue) so the
         watchdog's per-instance cleanup (delete-schedule-group) only

@@ -223,16 +223,42 @@ local_llm_model="${LOCAL_LLM_MODEL:-}"
 local_llm_api_key="${LOCAL_LLM_API_KEY:-}"
 local_llm_fallback="${LOCAL_LLM_FALLBACK:-closed}"
 
-# Agent block for the build agent. In assisted mode we add a
-# comma + prompt field hinting at the shutdown tool (so the bot
-# knows it can ask for shutdown). In autonomous mode the prompt
-# is omitted to keep the config minimal. Mirrors the lambda's
-# _write_opencode_config_script in lambda/scripts/_common.py:455.
+# Agent block for the build agent.
+#
+# The prompt field carries the agent's system prompt. Two parts:
+#
+#   1. The GitHub-auth facts. The credential in this container is a
+#      GitHub App INSTALLATION token, not a user token. It has no user
+#      identity, so `gh api /user` answers 403 "Resource not
+#      accessible by integration" and `gh auth status` shows an empty
+#      account — both are expected, and an agent that reads them as a
+#      broken credential spends its run debugging a non-problem. (On
+#      2026-10-27 an agent burned 40 minutes chasing exactly that,
+#      and then misdiagnosed a genuinely broken git as "the app lost
+#      its contents permission" and proposed re-granting permissions
+#      the installation already had.) The same paragraph also tells
+#      the agent what "remote: Repository not found" means on a
+#      private repo — it is GitHub's way of saying "this token cannot
+#      read this repo", NOT "the repo is gone" and NOT "the token
+#      expired" (an expired token fails with 401 Bad credentials).
+#
+#   2. The shutdown-tool hint, assisted mode only (the bot needs to
+#      know it can ask for shutdown). In autonomous mode the prompt
+#      is omitted to keep the config minimal.
+#
+# Mirrors the lambda's _write_opencode_config_script in
+# lambda/scripts/_common.py:455.
+#
+# The prompt text is interpolated into a double-quoted shell string
+# below, so it must not contain " $ or a backtick.
+github_auth_prompt='Your GitHub credential is a GitHub App installation token (ghs_...), scoped to the target repository only. It has no user identity, so the gh api /user endpoint returns HTTP 403 (Resource not accessible by integration) and gh auth status shows an empty account. Both are expected and do NOT mean the credential is broken. To check access, use gh api repos/OWNER/REPO for metadata and git ls-remote for contents. On a private repository, git reports remote: Repository not found when the token cannot read it; that is not the repository being deleted, and an expired token fails with 401 Bad credentials instead.'
+
 if [ "${MODE:-autonomous}" = "assisted" ]; then
     agent_prompt=',
-      "prompt": "You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
+      "prompt": "'"$github_auth_prompt"' You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
 else
-    agent_prompt=""
+    agent_prompt=',
+      "prompt": "'"$github_auth_prompt"'"'
 fi
 
 mkdir -p "$HOME/.config/opencode"

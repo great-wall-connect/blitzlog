@@ -20,7 +20,7 @@ Receives two flavours of invocation:
      rewrites the bind-mounted credential files. The refresh handler
      re-uses `get_github_app_token()` (the same path the webhook
      uses) and reschedules itself until iteration 9 — a 10-iteration
-     chain gives ~8.3 h of token freshness, well over the longest
+     chain gives ~5 h of token freshness, well over the longest
      realistic assisted run, with a hard upper bound so a buggy
      schedule can't accumulate indefinitely.
 
@@ -62,15 +62,27 @@ from scripts import build_assisted_user_data, build_autonomous_user_data
 
 logger.info("blitzlog-agent %s", get_version())
 
-# Issue #145: how many one-time refresh events to chain. 10 × 50 min =
-# ~8.3 h of token freshness — well over the longest realistic assisted
+# Issue #145: how many one-time refresh events to chain. 10 × 30 min =
+# ~5 h of token freshness — well over the longest realistic assisted
 # run (the EC2 `timeout` + the `idle_watchdog` 3 h hard-shutdown).
 # Hard upper bound so a buggy schedule cannot accumulate indefinitely.
 TOKEN_REFRESH_MAX_ITERATIONS = 10
-# Gap between the current refresh and the next scheduled event. Sized
-# to land ~10 min before the new token would expire (1 h cap), with
-# slack for clock skew on the watchdog's 5-min poll loop.
-TOKEN_REFRESH_INTERVAL_SECONDS = 3000  # 50 min
+# Gap between the current refresh and the next scheduled event.
+#
+# GitHub caps installation tokens at 1 h regardless of the requested
+# lifetime, so the published token's remaining life at any moment is
+# (60 min - age). A 30-min gap therefore guarantees the token in SSM
+# ALWAYS has at least 30 min of life left — and that headroom is
+# load-bearing, not cosmetic: GitHub occasionally hands out a token
+# whose per-repository grant has not fully materialised (the token
+# authenticates, but `contents` is missing, so `git` fails with
+# "remote: Repository not found"). The watchdog's poll loop holds
+# such a token back until it is usable, and the previous token stays
+# valid throughout — but only if the previous token still has life
+# left when the replacement arrives. A 50-min gap left just 10 min of
+# overlap, which is not enough to cover the observed materialisation
+# lag. 30 min does.
+TOKEN_REFRESH_INTERVAL_SECONDS = 1800  # 30 min
 
 # Issue #145: how many times to retry a `CreateSchedule` that failed
 # for a recoverable reason (the group is mid-deletion, the schedule
@@ -665,6 +677,46 @@ def _instance_is_alive(instance: str) -> bool | None:
     return False
 
 
+def _schedule_next_hop(
+    *,
+    issue: int,
+    instance: str,
+    iteration: int,
+    repo: str,
+) -> None:
+    """Schedule the chain's next hop, if there is one.
+
+    Kept separate from `_handle_refresh` so BOTH the success path and
+    the mint-failure path can chain onwards: a transient mint failure
+    must not end the chain, otherwise the agent loses GitHub access
+    when the current token expires.
+    """
+    if iteration >= TOKEN_REFRESH_MAX_ITERATIONS - 1:
+        logger.info(
+            "Refresh: chain ended at iteration %d (TOKEN_REFRESH_MAX_ITERATIONS=%d)",
+            iteration,
+            TOKEN_REFRESH_MAX_ITERATIONS,
+        )
+        return
+    try:
+        schedule_next_refresh(
+            issue=issue,
+            instance=instance,
+            iteration=iteration + 1,
+            repo=repo,
+        )
+    except ClientError as e:
+        # The token is already written (or, on the mint-failure path,
+        # the previous one is still in SSM and still valid); we just
+        # couldn't schedule the next hop. Log loudly so an operator
+        # notices a misconfigured scheduler policy.
+        logger.error(
+            "Refresh: failed to schedule next iteration "
+            "(the current token is still good for the rest of its life): %s",
+            e,
+        )
+
+
 def _handle_refresh(event: dict) -> dict:
     """Handle a direct EventBridge Scheduler invocation.
 
@@ -724,7 +776,23 @@ def _handle_refresh(event: dict) -> dict:
     try:
         new_token = get_github_app_token(repo)
     except Exception as e:  # noqa: BLE001
-        logger.exception("Refresh: get_github_app_token failed")
+        # The token already in SSM is the previous one, and it is
+        # still valid: the chain mints its replacement 30 min before
+        # the current one expires. So a failed mint must NOT
+        # overwrite SSM — and the chain must keep going, otherwise a
+        # single transient GitHub error kills the refresh and the
+        # agent loses GitHub access when the current token does
+        # expire. The next hop retries the mint.
+        logger.exception(
+            "Refresh: get_github_app_token failed — keeping the current "
+            "token in SSM and retrying on the next hop"
+        )
+        _schedule_next_hop(
+            issue=issue,
+            instance=instance,
+            iteration=iteration,
+            repo=repo,
+        )
         return {
             "statusCode": 500,
             "body": json.dumps({"error": f"mint failed: {e}"}),
@@ -747,30 +815,11 @@ def _handle_refresh(event: dict) -> dict:
 
     logger.info("Refresh: wrote token to %s (iteration=%d)", ephemeral_param, iteration)
 
-    if iteration < TOKEN_REFRESH_MAX_ITERATIONS - 1:
-        try:
-            schedule_next_refresh(
-                issue=issue,
-                instance=instance,
-                iteration=iteration + 1,
-                repo=repo,
-            )
-        except ClientError as e:
-            # The token is already written; we just couldn't schedule
-            # the next hop. The watchdog will keep using the current
-            # token for up to 1 h; the next refresh would only be 50
-            # min away anyway. Log loudly so an operator notices a
-            # misconfigured scheduler policy.
-            logger.error(
-                "Refresh: failed to schedule next iteration "
-                "(token is written; current value still good for 1 h): %s",
-                e,
-            )
-    else:
-        logger.info(
-            "Refresh: chain ended at iteration %d " "(TOKEN_REFRESH_MAX_ITERATIONS=%d)",
-            iteration,
-            TOKEN_REFRESH_MAX_ITERATIONS,
-        )
+    _schedule_next_hop(
+        issue=issue,
+        instance=instance,
+        iteration=iteration,
+        repo=repo,
+    )
 
     return {"statusCode": 200, "body": json.dumps({"status": "refreshed"})}

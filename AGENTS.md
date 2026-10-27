@@ -142,13 +142,15 @@ The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAI
 
 ## GitHub Token Freshness (Issue #145)
 
-GitHub App installation tokens are capped to **1 hour** regardless of the requested `expires_at` — the 8 h default the Lambda historically requested is silently clamped. The agent's `git push` and `gh` calls are now backed by a token **at most 50 minutes old**, even on multi-hour assisted runs, because:
+GitHub App installation tokens are capped to **1 hour** regardless of the requested `expires_at` — the 8 h default the Lambda historically requested is silently clamped. The agent's `git push` and `gh` calls are now backed by a token **at most 30 minutes old**, even on multi-hour assisted runs, because:
 
 1. The Lambda mints a fresh token at webhook time and writes it to `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>` (per-(env, owner, repo, issue) so two issues numbered the same in different repos don't collide).
-2. Right after the EC2 launch, the Lambda schedules a chain of 10 one-time EventBridge Scheduler events, 50 min apart, each of which re-mints the token (via the existing `get_github_app_token` path) and overwrites the same SecureString.
+2. Right after the EC2 launch, the Lambda schedules a chain of 10 one-time EventBridge Scheduler events, 30 min apart, each of which re-mints the token (via the existing `get_github_app_token` path) and overwrites the same SecureString.
 3. The watchdog on the EC2 instance runs a 5-min background poll loop (`infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh`, started from `watchdog.sh`) that re-reads SSM and rewrites the host-side credential files — `/root/.git-credentials.d/github` and `/root/gh-config/<instance>/hosts.yml` — whenever the value changes. The container picks up the new credentials on the next `git push` / `gh` invocation — no process restart.
 
 Since issue #164 those two files are mounted **read-only** into the container (at `$HOME/.git-credentials.d/github` and `$HOME/.config/gh/hosts.yml`): the host is the only writer, so the agent cannot tamper with the host's copy of the token, and the token is no longer passed to the container as an env var.
+
+**The poll loop verifies a new token before swapping it in.** GitHub sometimes issues an installation token whose per-repository grant has not fully materialised: the token authenticates, but `contents` is missing, so `git` against a private repo fails with `remote: Repository not found` (GitHub's 404 for "you cannot read this repo" — *not* the repo being deleted; an expired token fails with 401). The loop probes the new token against the git smart-HTTP endpoint and holds it back until it works, keeping the previous — still valid — token in place. The 30-min interval is what makes that possible: with GitHub's 1 h cap, the published token always has ≥30 min of life left, so a slow-to-materialise replacement never leaves the agent without a usable credential. The repository the probe targets comes from `BLITZLOG_TOKEN_REPO` (the watchdog exports it from `REPO`); when it is unset the loop rotates unverified and says so.
 
 **No agent-side code change is required.** The chain is fully Lambda-owned (no per-instance state, no continuous schedule); if the EC2 instance dies before the chain ends, the remaining events fire and no-op against the missing SSM parameter.
 

@@ -165,6 +165,73 @@ class TestEntrypointReadiness(unittest.TestCase):
         self.assertNotIn("GIT_USER_NAME", self.text)
         self.assertNotIn("GIT_USER_EMAIL", self.text)
 
+    def test_agent_prompt_explains_the_app_installation_token(self):
+        """The agent's system prompt must tell it that its credential
+        is a GitHub App installation token, and what that implies.
+
+        Why: an installation token has no user identity, so
+        `gh api /user` answers 403 "Resource not accessible by
+        integration" and `gh auth status` shows an empty account.
+        An agent that does not know this reads both as a broken
+        credential — on 2026-10-27 one burned 40 minutes of its run
+        debugging them, then misdiagnosed a genuinely broken git as
+        "the app lost its contents permission" and proposed
+        re-granting permissions the installation already had.
+
+        The prompt must also say what "remote: Repository not found"
+        means on a private repo (the token cannot read it — NOT the
+        repo being deleted, and NOT an expired token, which fails with
+        401).
+        """
+        self.assertIn(
+            "github_auth_prompt",
+            self.text,
+            "the entrypoint must define a shared prompt fragment that "
+            "explains the GitHub App installation token to the agent",
+        )
+        i = self.text.index("github_auth_prompt=")
+        prompt = self.text[i : i + 2000]
+        for needle in (
+            "installation token",
+            "gh api /user",
+            "403",
+            "gh auth status",
+            "git ls-remote",
+            "Repository not found",
+            "401",
+        ):
+            self.assertIn(
+                needle,
+                prompt,
+                f"the agent's system prompt must mention {needle!r} — "
+                "without it the agent treats the expected 403 on /user as "
+                "a broken credential and burns its run on it",
+            )
+
+    def test_agent_prompt_is_in_both_modes(self):
+        """The GitHub-auth prompt must reach the agent in BOTH modes.
+
+        Autonomous mode has no Telegram user to explain anything to,
+        so the system prompt is the only channel — and an autonomous
+        agent that misreads the 403 has no way to recover.
+        """
+        i = self.text.index("github_auth_prompt=")
+        block = self.text[i : i + 3000]
+        # Both branches of the mode switch must interpolate the shared
+        # prompt.
+        self.assertIn(
+            'github_auth_prompt"',
+            block,
+            "both the assisted and the autonomous branch must interpolate "
+            "the shared github_auth_prompt",
+        )
+        self.assertGreaterEqual(
+            block.count('github_auth_prompt"'),
+            2,
+            "the shared prompt must be interpolated in BOTH the assisted "
+            "and the autonomous branch",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

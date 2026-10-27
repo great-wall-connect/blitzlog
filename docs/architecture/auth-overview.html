@@ -281,7 +281,7 @@
     <div class="section-label">
       <span class="layer-num tone-orange">3</span>
       <span>Chain self-perpetuation</span>
-      <span class="badge">50-min cycle · up to 10 hops</span>
+      <span class="badge">30-min cycle · up to 10 hops</span>
     </div>
     <div class="row">
       <article class="card tone-orange">
@@ -333,8 +333,8 @@
         <p>Same SSM parameter, <code>Version</code> incremented.
         New <code>iat</code> = fire-time, new <code>exp</code> = +1&nbsp;h.
         The next <code>schedule_next_refresh</code> queues the
-        following 50-min event, so the chain keeps itself alive
-        for up to ~8.3&nbsp;h per instance (10 hops).
+        following 30-min event, so the chain keeps itself alive
+        for up to ~5&nbsp;h per instance (10 hops).
         On the first schedule for a given issue,
         <code>create_schedule</code> raises
         <code>ResourceNotFoundException</code> (the per-issue group
@@ -390,7 +390,12 @@
         <h3>Same path, new value</h3>
         <p>The poll loop reads the <em>same</em> SSM parameter the
         chain writes to. If Version has advanced since the last
-        read, the bind mount is rewritten in place.</p>
+        read, the bind mount is rewritten in place — but only once
+        the new token has been <em>probed</em> against the git
+        smart-HTTP endpoint, because GitHub sometimes issues a
+        token whose per-repository grant has not materialised yet.
+        A token that cannot push is held back; the previous (still
+        valid) one stays in place until it works.</p>
       </article>
 
       <div class="arrow-inline" aria-label="rewrite">

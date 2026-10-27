@@ -1031,9 +1031,95 @@ def test_watchdog_teardown_deletes_per_issue_schedule_group() -> None:
     )
 
 
+def test_poll_loop_verifies_a_new_token_before_swapping_it_in() -> None:
+    """The poll loop must PROBE a newly observed token before writing
+    it into the credential files.
+
+    Why: GitHub occasionally issues an installation token whose
+    per-repository grant has not fully materialised. The token
+    authenticates, but the `contents` grant is missing — so git
+    against a private repo fails with "remote: Repository not
+    found", which reads like the repository had been deleted. Swapping
+    such a token in takes the agent's GitHub access away for as long
+    as the grant takes to settle.
+
+    The loop must therefore probe the token (against the same
+    git-upload-pack endpoint `git` itself uses) and keep the PREVIOUS
+    token until the new one works. The previous token is still valid
+    because the chain mints its replacement 30 min before the current
+    one expires.
+    """
+    src = _strip_comments_and_continuations(_read(POLL_LIB))
+    assert "_bl_tokenpoll_token_usable" in src, (
+        "the poll loop must verify a newly observed token before "
+        "swapping it into the credential files"
+    )
+    # The probe must hit the endpoint git itself uses.
+    assert "info/refs?service=git-upload-pack" in src, (
+        "the probe must hit the git smart-HTTP endpoint that `git` uses "
+        "for a fetch, with the same credential shape — a probe of some "
+        "other endpoint would not prove that `git push` works"
+    )
+    # The probe must run BEFORE the credential files are written.
+    probe_pos = src.find("_bl_tokenpoll_token_usable")
+    write_pos = src.find("_bl_tokenpoll_write_git_creds")
+    assert probe_pos > 0, "the probe function is missing"
+    assert write_pos > 0, "the credential-file writer is missing"
+    assert probe_pos < write_pos, (
+        "the probe must run before the credential files are written — "
+        "writing first is what swaps an unusable token into the agent's "
+        "hands"
+    )
+    # And the loop must be able to hold a token back.
+    assert "BLITZLOG_TOKEN_PENDING" in src, (
+        "the loop must remember a token it is holding back so it can "
+        "re-probe it on the next tick and swap it in once it works"
+    )
+
+
+def test_watchdog_exports_the_repo_the_token_is_verified_against() -> None:
+    """The watchdog must tell the poll loop which repository the token
+    has to be able to read.
+
+    Without it the loop cannot verify anything and falls back to
+    rotating unverified — the pre-verification behaviour, which is the
+    safe degradation but not the fix.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    assert "BLITZLOG_TOKEN_REPO" in src, (
+        "watchdog.sh must export BLITZLOG_TOKEN_REPO (the <owner>/<repo> "
+        "the token must be able to read) so the poll loop can verify a "
+        "new token before swapping it in"
+    )
+    assert "BLITZLOG_TOKEN_REPO" in _read(
+        POLL_LIB
+    ), "the poll loop must read BLITZLOG_TOKEN_REPO"
+
+
+def test_poll_loop_does_not_claim_the_chain_is_dead_on_a_near_expiry() -> None:
+    """The poll loop must not say "the chain is not refreshing it"
+    merely because the observed token is close to expiry.
+
+    With the old 50-min rotation interval the token was minted 50 min
+    before it expired and lived 60 min, so the last 10 min of every
+    cycle tripped that warning — it fired twice an hour on a perfectly
+    healthy chain (observed at 06:40:54, 07:31:03, 08:21:10, 08:26:11
+    and 09:16:19 on 2026-10-27) and told the agent and the operator
+    that the chain was dead while it was rotating normally. A warning
+    that is always on is not a warning.
+    """
+    src = _strip_comments_and_continuations(_read(POLL_LIB))
+    assert "the chain is not refreshing it" not in src, (
+        "the poll loop must not claim the chain is dead just because the "
+        "observed token is near expiry — with a 30-min rotation interval "
+        "the published token always has >= 30 min of life left, so a "
+        "near-expiry token really is anomalous, but the loop cannot know "
+        "that the chain is dead; it can only report what the token says"
+    )
+
+
 def test_watchdog_teardown_aws_state_runs_before_terminate_instances() -> None:
-    """Order matters: the SSM delete + schedule-group delete MUST
-    appear before `aws ec2 terminate-instances` in the watchdog
+    """Order matters: the SSM delete + schedule-group delete MUST    appear before `aws ec2 terminate-instances` in the watchdog
     source. Once terminate-instances is called, the instance is
     shutting down and subsequent AWS calls from this script may
     fail. The dev-spot test's cleanup function (scripts/test-dev-spot.sh)

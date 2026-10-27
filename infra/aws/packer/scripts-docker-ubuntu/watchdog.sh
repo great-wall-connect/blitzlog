@@ -292,12 +292,23 @@ WATCHER_PID=$!
 # (i.e. when the Lambda's refresh event has just fired). The loop
 # runs for the full lifetime of the container; it has no per-run
 # state of its own. The chain of 10 scheduled refresh events
-# covers ~8.3 h — well over the longest realistic assisted run —
+# covers ~5 h — well over the longest realistic assisted run —
 # so the loop cannot run forever even if the schedule is buggy.
 # Poll interval is 300s (5 min) — same cadence as the existing
 # host-side SESSION_ARCHIVE_BUCKET and S3_LOG_PREFIX exports, so
 # operators only need to remember one number.
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    # The poll loop verifies a newly observed token against this
+    # repository BEFORE swapping it into the credential files: GitHub
+    # occasionally issues an installation token whose per-repository
+    # grant has not fully materialised, and such a token makes git
+    # fail with "remote: Repository not found" against a private repo.
+    # Holding it back keeps the previous (still valid) token in place
+    # until the new one works. REPO is "<owner>/<repo>"; when it is
+    # empty the loop cannot verify and falls back to rotating
+    # unverified (the pre-verification behaviour).
+    BLITZLOG_TOKEN_REPO="${REPO:-}"
+    export BLITZLOG_TOKEN_REPO
     # `blitzlog_start_token_poll_loop` writes the subshell's PID to
     # the global `BLITZLOG_TOKEN_POLL_PID`. We use a global instead
     # of `$(...)` capture because bash's `wait` for a non-direct
@@ -311,7 +322,7 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
         /root/.git-credentials.d/github \
         "/root/gh-config/${INSTANCE_ID}/hosts.yml" \
         "${BLITZLOG_TOKEN_POLL_INTERVAL:-300}"
-    log "Started token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s)"
+    log "Started token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s, verify_repo=${BLITZLOG_TOKEN_REPO:-none})"
 fi
 
 # Defense in depth: clear any stale .shutdown left over from a crashed
