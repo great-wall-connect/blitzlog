@@ -145,17 +145,23 @@ RUN mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sou
 # apt runs its download methods as the unprivileged `_apt` user, which
 # needs CAP_SETUID + CAP_SETGID + CAP_CHOWN. The agent container's
 # hardening contract drops ALL capabilities (see
-# packages/images/agent/container-hardening.env), so a project bootstrap
-# that runs `apt-get install` — the documented pattern in
-# docs/BOOTSTRAP.md — died with:
+# packages/images/agent/container-hardening.env), so an `apt-get install`
+# — the documented pattern in docs/BOOTSTRAP.md — died with:
 #
 #   E: setgroups 0 failed - setgroups (1: Operation not permitted)
 #   E: Method https has died unexpectedly!
 #
-# Run the methods as root instead. The container already runs as root
-# and the packages come from the same signed Debian archive the image
-# itself was built from, so the privilege drop bought no trust and cost
-# the platform its ability to install build dependencies at runtime.
+# Run the methods as root instead. The container runs as root (dpkg
+# needs it to unpack a package and write its own database), the
+# packages come from the same signed Debian archive the image itself
+# was built from, and the privilege drop bought no trust — it only
+# cost the platform its ability to install the toolchain the agent is
+# supposed to install. The alternative (re-granting SETUID/SETGID/CHOWN
+# on every agent run) would put those capabilities back on every run,
+# including the ones that never install a package.
+#
+# This config is installed in the RUNTIME stage, so it governs apt
+# inside the running container as well as during the image build.
 RUN printf 'APT::Sandbox::User "root";\nAPT::Sandbox::Group "root";\n' \
     > /etc/apt/apt.conf.d/99-no-sandbox
 
@@ -164,6 +170,12 @@ ARG NODE_VERSION
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=UTC \
+    # The agent's HOME. It is a tmpfs at runtime (see
+    # packages/images/agent/container-hardening.env), so the global git
+    # config, mise's toolchain, the npm cache, opencode's config and
+    # state and the telegram bot's config never land in the container's
+    # writable layer.
+    HOME=/home/blitzlog \
     # /usr/sbin is added so tailscaled (Debian package puts the daemon
     # there, not the CLI) is on PATH for the local-test Tailscale
     # flow in entrypoint.sh. Other daemons that might land in /usr/sbin
@@ -227,25 +239,94 @@ COPY --from=build /usr/local/bin/opencode-telegram /usr/local/bin/opencode-teleg
 COPY server.py /opt/whisper-stt/server.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY assisted-shutdown.sh /usr/local/bin/assisted-shutdown.sh
+# Issue #164: installs the baked opencode components into the agent's
+# HOME (which is a tmpfs, so anything baked under $HOME would be
+# shadowed). Shared by the entrypoint and the image's smoke test.
+COPY install-opencode-plugins.sh /usr/local/bin/install-opencode-plugins.sh
+# Issue #164: the read-only GitHub credential helper. The credential
+# file is owned by the host and mounted read-only into the container,
+# and `git credential-store` rewrites that file under a lock when git
+# approves a credential ("unable to get credential storage lock ...
+# Read-only file system"). This helper implements `get` only and never
+# writes the file.
+COPY blitzlog-credential-helper /usr/local/bin/blitzlog-credential-helper
+# Issue #164: installs mise and makes sure the installed binary is
+# actually executable. mise's own installer only chmods the binary
+# when it runs as root, and the container no longer runs as root.
+COPY install-mise.sh /usr/local/bin/install-mise.sh
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown). These are baked directly into
 # the opencode config dirs so they're present from the first startup —
 # no runtime copy needed. Without these, the agent has no shutdown
 # tool, no idle watchdog, no session archiver, etc.
-COPY opencode/plugins/ /root/.config/opencode/plugins/
-COPY opencode/tools/ /root/.config/opencode/tools/
-COPY opencode/lib/ /root/.config/opencode/lib/
+#
+# Issue #164: they are baked into /opt/blitzlog/opencode, NOT into
+# $HOME/.config/opencode. The container's HOME is a tmpfs, so anything
+# baked under $HOME would be shadowed by the tmpfs at runtime. The
+# entrypoint copies these three directories into $HOME/.config/opencode/
+# on startup — still baked into the image, still present from the first
+# startup, no network and no runtime npm install.
+COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/
+COPY opencode/tools/ /opt/blitzlog/opencode/tools/
+COPY opencode/lib/ /opt/blitzlog/opencode/lib/
 
-# Layout that the entrypoint expects
-RUN mkdir -p /opt/whisper-stt/models /workspace /var/log/blitzlog \
-    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh
+# The agent's HOME directory. The `blitzlog` user owns it in the image,
+# but the container itself runs as uid 0 (see the note at the bottom of
+# this file) — the user exists so that HOME is a real, owned directory
+# rather than a bare mkdir.
+RUN groupadd --gid 1000 blitzlog \
+    && useradd --uid 1000 --gid 1000 --home-dir /home/blitzlog \
+        --create-home --shell /bin/sh blitzlog
 
-# Sanity checks
+# Layout that the entrypoint expects.
+#
+# The two writable directories stay owned by root: the container runs as
+# uid 0 with NO capabilities (--cap-drop=ALL), so it has no
+# CAP_DAC_OVERRIDE — a directory owned by another uid would be writable
+# only through its "other" permission bits. The host-side watchdog
+# chowns the bind-mount sources to BLITZLOG_CONTAINER_UID (0), which
+# keeps the dev path and the production path identical.
+RUN mkdir -p /opt/whisper-stt/models /opt/blitzlog/opencode \
+        /var/log/blitzlog /workspace \
+    && chmod -R a+rX /opt/blitzlog/opencode \
+    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/assisted-shutdown.sh \
+        /usr/local/bin/install-opencode-plugins.sh \
+        /usr/local/bin/blitzlog-credential-helper \
+        /usr/local/bin/install-mise.sh
+
+# Sanity checks (still root — this runs at build time)
 RUN /usr/local/bin/whisper-cli --help >/dev/null \
     && python3 -c "import pywhispercpp, multipart, imageio_ffmpeg; print('python deps ok')" \
     && opencode --version
 
 WORKDIR /workspace
+
+# Issue #174: the container runs as uid 0, deliberately.
+#
+# dpkg needs root: it unpacks packages into /usr, writes its own
+# database in /var/lib/dpkg and runs maintainer scripts. A project's
+# `bootstrap` task installs its own build dependencies with apt — the
+# documented pattern in docs/BOOTSTRAP.md — so the container has to be
+# able to install packages. A read-only rootfs and a non-root uid make
+# that impossible, and the first agent run after issue #164 died with
+#
+#   E: List directory /var/lib/apt/lists/partial is missing.
+#      - Acquire (30: Read-only file system)
+#   [bootstrap] ERROR task failed
+#
+# before the agent ever started.
+#
+# uid 0 here is a CAPABILITY-LESS root: the caller passes
+# --cap-drop=ALL and --security-opt=no-new-privileges:true (see
+# packages/images/agent/container-hardening.env), so the agent cannot
+# escalate, cannot mount anything (no CAP_SYS_ADMIN), cannot bypass
+# file permissions (no CAP_DAC_OVERRIDE) and cannot make raw sockets
+# (no CAP_NET_RAW). The container also holds no AWS credentials, sees
+# the GitHub credential store read-only, and shares only the agent's
+# own workspace and log directory with the host.
+#
+# The `blitzlog` user above still exists: it owns the image's HOME
+# directory, which is a tmpfs at runtime.
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

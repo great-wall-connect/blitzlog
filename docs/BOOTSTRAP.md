@@ -57,6 +57,27 @@ Concretely, the lifecycle is:
 
 1. **Cloud-init** clones the target repository into `/workspace/repo`.
 2. **`mise` is installed** if `mise.toml` or `.tool-versions` is present.
+   The install runs inside the container, as the container's
+   unprivileged uid, and it has two failure modes that only show up at
+   runtime:
+
+   - Docker mounts every `--tmpfs` with `noexec` unless the option
+     string says otherwise, and mise lives on the agent's HOME tmpfs.
+     With `noexec` in place the first `mise` call dies with
+     `mise: Permission denied` (exit 126). The tmpfs mounts therefore
+     carry `exec` explicitly — see the container-boundary section of
+     [`DOCKER.md`](DOCKER.md).
+   - mise's own install script only makes the binary executable when it
+     runs as *root*:
+
+     ```sh
+     if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+     ```
+
+     The container's entrypoint therefore does the `chmod +x` itself and
+     then verifies that the binary actually runs, so a mis-installed
+     mise fails with a readable message instead of
+     `mise: Permission denied`.
 3. **`mise install`** provisions the language toolchains declared in
    `[tools]` (Python, Node, Rust, Go, …).
 4. **Bootstrap check** — `mise tasks --name-only` is filtered for an
@@ -166,6 +187,36 @@ elif command -v apt-get >/dev/null 2>&1; then
 fi
 """
 ```
+
+## Inside the agent container
+
+The recipes above are written for a normal machine, where
+`apt-get install` really installs. Inside the Blitzlog agent container
+it does too — that is the point of the `bootstrap` task: the project
+declares its build dependencies, and the agent gets them.
+
+A few things are worth knowing about the environment the task runs in:
+
+- **The container can install system packages.** It runs as root with a
+  writable root filesystem, because `dpkg` needs both: it unpacks
+  files into `/usr`, writes its own database in `/var/lib/dpkg` and
+  runs maintainer scripts. What keeps that bounded is the container's
+  *capability* set, not its uid — the agent runs with no capabilities
+  at all (see [`DOCKER.md`](DOCKER.md) → *Runtime hardening*).
+- **The agent image ships no compiler.** The build toolchain belongs to
+  the project, not to the platform: a Rust project needs `cc` and the
+  libc headers, a Node project needs `node-gyp` and a C toolchain, and
+  a project that needs neither should not pay for one. The image's
+  smoke test asserts that no compiler is baked in, so the toolchain
+  really does come from the task below.
+- **The image is Debian-based**, so the `dnf` branch of the recipes
+  never runs and the `apt-get` branch is the one that does.
+
+If the install fails, the bootstrap task fails with it, and the agent
+does not start. That is deliberate: a project that cannot install its
+own build dependencies is misconfigured, and the failure is far easier
+to diagnose at that point than as a baffling `linker 'cc' not found`
+half-way through the agent's work.
 
 ## Minimal example
 

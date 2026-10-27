@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LIB = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
 
 
-# --- the fake aws shim -------------------------------------------------
+# --- the fake aws + curl shims ------------------------------------------
 #
 # Returns a configurable SSM value. The first call returns
 # FAKE_SSM_VALUE_OLD, subsequent calls return FAKE_SSM_VALUE_NEW. We
@@ -65,10 +65,24 @@ fi
 exit 0
 """
 
+# The poll loop probes a newly observed token against GitHub before
+# swapping it into the credential files (issue #145). The probe is a
+# `curl` to github.com's git-upload-pack endpoint; the tests stub it
+# with a shim that returns a configurable status code, so the test
+# suite never touches the network.
+CURL_SHIM_BODY = """\
+#!/bin/bash
+LOG="${FAKE_CURL_LOG:-/tmp/blitzlog_test_fake_curl.log}"
+printf '%s\\n' "$*" >> "$LOG"
+printf '%s' "${FAKE_CURL_STATUS:-200}"
+exit 0
+"""
+
 
 @pytest.fixture
 def aws_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Install a fake ``aws`` CLI into PATH for one test.
+    """Install a fake ``aws`` CLI (and a fake ``curl``) into PATH for
+    one test.
 
     Returns ``tmp_path`` so the test can find the per-test
     ``fake_aws.log`` (records every argv the poll loop makes).
@@ -76,14 +90,26 @@ def aws_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shim = tmp_path / "aws"
     shim.write_text(SHIM_BODY)
     shim.chmod(0o755)
+    curl_shim = tmp_path / "curl"
+    curl_shim.write_text(CURL_SHIM_BODY)
+    curl_shim.chmod(0o755)
     log = tmp_path / "fake_aws.log"
     log.write_text("")
+    curl_log = tmp_path / "fake_curl.log"
+    curl_log.write_text("")
     new_marker = tmp_path / "new_marker"
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_AWS_LOG", str(log))
+    monkeypatch.setenv("FAKE_CURL_LOG", str(curl_log))
     monkeypatch.setenv("FAKE_AWS_NEW_MARKER", str(new_marker))
     monkeypatch.setenv("FAKE_SSM_VALUE_OLD", "ghp_token_v1_old")
     monkeypatch.setenv("FAKE_SSM_VALUE_NEW", "ghp_token_v2_new")
+    # The probe target. The loop only probes when this is set, so the
+    # fixture sets it by default: the tests then exercise the
+    # verified path (the production path).
+    monkeypatch.setenv("BLITZLOG_TOKEN_REPO", "example/owner/repo")
+    # The stubbed probe says the token is usable.
+    monkeypatch.setenv("FAKE_CURL_STATUS", "200")
     monkeypatch.setenv("AWS_REGION", "ap-east-1")
     return tmp_path
 
@@ -161,8 +187,13 @@ def test_poll_loop_rewrites_credential_files_when_ssm_value_changes(
         # pick it up.
         sleep 0.3
         touch "{aws_shim}/new_marker"
-        # Wait for two more ticks to land on the new value.
-        sleep 0.3
+        # Wait for the loop to land on the new value. Waiting on the
+        # observable state (rather than sleeping a fixed amount) keeps
+        # the test deterministic when the machine is under load.
+        for _ in $(seq 1 200); do
+            if grep -q "ghp_token_v2_new" "{gh_hosts}" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
         # Stop the loop. We use `kill -0` to confirm the subshell is
         # still alive before sending TERM (the trap should make the
         # exit immediate, but a 200 ms grace period is generous).
@@ -314,6 +345,226 @@ def test_poll_loop_survives_ssm_error_and_keeps_polling(
     ), f"poll loop died on transient SSM error: {result.stdout!r}"
 
 
+def test_poll_loop_holds_back_a_token_that_is_not_usable_yet(
+    aws_shim: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly observed token that GitHub has not finished granting
+    access for must NOT be swapped into the credential files.
+
+    Why: GitHub occasionally issues an installation token whose
+    per-repository grant has not fully materialised. The token
+    authenticates and can read repo metadata and pull requests, but
+    the `contents` grant is missing — so git against a private repo
+    fails with "remote: Repository not found" (GitHub's 404 for "you
+    cannot read this repo"). Swapping such a token in takes the
+    agent's GitHub access away for as long as the grant takes to
+    settle.
+
+    The loop must therefore keep the PREVIOUS token in the files
+    (which is still valid, because the chain mints its replacement 30
+    min before the current one expires) and re-probe on the next
+    tick.
+
+    Observed on 2026-10-27: one mint of five came back with an
+    incomplete grant for ~20 min, and the agent lost git for that
+    whole window.
+    """
+    # The probe says "no access" — the stubbed git-upload-pack
+    # endpoint answers 404, exactly as GitHub does for a token that
+    # cannot read a private repo.
+    monkeypatch.setenv("FAKE_CURL_STATUS", "404")
+
+    git_creds = aws_shim / "git-creds"
+    gh_hosts = aws_shim / "gh-hosts"
+    log_file = aws_shim / "watchdog.log"
+    # Seed the files with the previous (still valid) token.
+    git_creds.write_text("https://x-access-token:ghp_token_v1_old@github.com\n")
+    gh_hosts.write_text(
+        "github.com:\n    oauth_token: ghp_token_v1_old\n    git_protocol: https\n"
+    )
+
+    snippet = textwrap.dedent(f"""
+        # The watchdog's log() writes to stdout AND tees to a file.
+        # We tee to a file so the test can wait on the log line
+        # instead of sleeping a fixed amount (a tick now costs a
+        # `curl` spawn, so a fixed sleep is not reliably long enough).
+        LOG_FILE="{log_file}"
+        log() {{ printf '[%s] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"; }}
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            0.05
+        # Now the Lambda's refresh fires: the shim returns the new
+        # token from here on.
+        touch "{aws_shim}/new_marker"
+        # Wait for the loop to have tried the new token and held it back.
+        for _ in $(seq 1 200); do
+            if grep -q "not yet usable for git" "$LOG_FILE" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.02
+            done
+        fi
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, result.stderr
+
+    # The previous token must still be in the files.
+    assert "ghp_token_v1_old" in git_creds.read_text()
+    assert "ghp_token_v2_new" not in git_creds.read_text()
+    assert "ghp_token_v1_old" in gh_hosts.read_text()
+    assert "ghp_token_v2_new" not in gh_hosts.read_text()
+
+    # And the operator must be told why.
+    log_text = log_file.read_text()
+    assert "not yet usable for git" in log_text, (
+        "the loop must say that it is holding a token back; otherwise a "
+        f"held-back token looks like a silently broken git. log={log_text!r}"
+    )
+    assert "probe=404" in log_text, (
+        "the log must include the probe's status code so the operator can "
+        f"tell a permission problem from a network one. log={log_text!r}"
+    )
+
+
+def test_poll_loop_applies_a_held_back_token_once_it_becomes_usable(
+    aws_shim: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a held-back token starts working, the loop must swap it
+    in and say so."""
+    monkeypatch.setenv("FAKE_CURL_STATUS", "404")
+
+    git_creds = aws_shim / "git-creds"
+    gh_hosts = aws_shim / "gh-hosts"
+    git_creds.write_text("https://x-access-token:ghp_token_v1_old@github.com\n")
+    gh_hosts.write_text(
+        "github.com:\n    oauth_token: ghp_token_v1_old\n    git_protocol: https\n"
+    )
+
+    # The probe starts failing, then starts working.
+    curl_shim = aws_shim / "curl"
+    curl_shim.write_text(
+        "#!/bin/bash\n"
+        'printf "%s\\n" "$*" >> "${FAKE_CURL_LOG:-/tmp/blitzlog_test_fake_curl.log}"\n'
+        'if [ -f "${FAKE_CURL_OK_MARKER:-/tmp/never}" ]; then\n'
+        '  printf "200"\n'
+        "else\n"
+        '  printf "404"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+    curl_shim.chmod(0o755)
+    ok_marker = aws_shim / "curl_ok_marker"
+    monkeypatch.setenv("FAKE_CURL_OK_MARKER", str(ok_marker))
+    curl_log = aws_shim / "fake_curl.log"
+
+    snippet = textwrap.dedent(f"""
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            0.05
+        # Wait for the first probe to happen before changing anything,
+        # so the ordering is deterministic rather than a race against
+        # the poll interval.
+        for _ in $(seq 1 200); do
+            if [ -s "{curl_log}" ]; then break; fi
+            sleep 0.05
+        done
+        touch "{aws_shim}/new_marker"
+        # Let the loop probe the new token (which still answers 404).
+        sleep 0.4
+        # GitHub finishes granting access to the new token.
+        touch "{ok_marker}"
+        # Wait for the token to be applied.
+        for _ in $(seq 1 200); do
+            if grep -q "ghp_token_v2_new" "{git_creds}"; then break; fi
+            sleep 0.05
+        done
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.02
+            done
+        fi
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, result.stderr
+
+    assert "ghp_token_v2_new" in git_creds.read_text()
+    assert "ghp_token_v2_new" in gh_hosts.read_text()
+    assert "now usable for git" in result.stderr, (
+        "the loop must log that the held-back token became usable; "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_poll_loop_applies_the_token_unverified_when_no_repo_is_known(
+    aws_shim: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``BLITZLOG_TOKEN_REPO`` the loop cannot verify a token.
+
+    It must then fall back to the pre-verification behaviour —
+    apply whatever SSM holds — rather than never rotating at all. A
+    host that cannot verify should degrade to "rotate as before", not
+    "never rotate". It must also say so, once.
+    """
+    monkeypatch.delenv("BLITZLOG_TOKEN_REPO", raising=False)
+
+    git_creds = aws_shim / "git-creds"
+    gh_hosts = aws_shim / "gh-hosts"
+    git_creds.write_text("seed\n")
+    gh_hosts.write_text("seed\n")
+
+    snippet = textwrap.dedent(f"""
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            0.05
+        sleep 0.3
+        touch "{aws_shim}/new_marker"
+        for _ in $(seq 1 200); do
+            if grep -q "ghp_token_v2_new" "{gh_hosts}" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.02
+            done
+        fi
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, result.stderr
+
+    assert "ghp_token_v2_new" in git_creds.read_text()
+    assert "ghp_token_v2_new" in gh_hosts.read_text()
+    assert "BLITZLOG_TOKEN_REPO is unset" in result.stderr, (
+        "the loop must warn that it is rotating without verifying; "
+        f"stderr={result.stderr!r}"
+    )
+
+
 def test_poll_loop_terminates_cleanly_on_sigterm(aws_shim: Path) -> None:
     """The watchdog kills the poll loop with SIGTERM after the
     container exits. The loop's `trap 'exit 0' TERM` must make this
@@ -388,3 +639,145 @@ def test_library_uses_caller_log_when_defined() -> None:
     _run_bash(Path("/tmp"), snippet)  # aws_shim not needed for this test
     assert "test message from poll library" in capture_path.read_text()
     capture_path.unlink()
+
+
+# --- the two gaps that let a dead chain look healthy -------------------
+
+
+def test_poll_loop_does_not_report_a_change_when_the_token_is_unchanged(
+    aws_shim: Path,
+) -> None:
+    """The watchdog's `log()` writes to STDOUT. The poll loop used to
+    capture the helper's stdout into the "last seen token" variable, so
+    the captured value was "<log line>\\n<token>" — which can never
+    equal the token itself. The loop therefore concluded "the token
+    changed" on EVERY tick, rewrote both credential files every 5
+    minutes, and logged "Token change detected" every 5 minutes.
+
+    That log line is the operator's only in-instance signal that the
+    issue-#145 refresh chain is alive, so a false positive on every
+    tick made a DEAD chain indistinguishable from a healthy one. That
+    is exactly what happened in production on 2026-10-26: the instance
+    log showed a steady stream of "Token change detected" while the
+    value in SSM had not changed since the launch-time mint and the
+    token had been expired for hours.
+
+    The existing tests could not catch this because neither of them
+    reproduces the production `log()`: one omits `log()` entirely (so
+    the library's fallback writes to stderr) and the other defines it
+    as a plain file writer. This one defines it exactly the way
+    watchdog.sh does — stdout plus a tee to the log file.
+    """
+    log_file = aws_shim / "watchdog.log"
+    git_creds = aws_shim / "git-creds"
+    gh_hosts = aws_shim / "gh-hosts"
+    marker = aws_shim / "new_marker"
+
+    snippet = textwrap.dedent(f"""
+        LOG_FILE="{log_file}"
+        # EXACTLY the watchdog's log() (infra/aws/packer/scripts-docker-ubuntu/
+        # watchdog.sh): printf | tee -a "$LOG_FILE" — the tee writes to
+        # the file AND to stdout.
+        log() {{ printf '[%s] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"; }}
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{git_creds}" \\
+            "{gh_hosts}" \\
+            0.05
+        # Several ticks with a STABLE ssm value. Nothing changed, so
+        # "Token change detected" must not appear at all.
+        sleep 0.4
+        # Now simulate the Lambda's refresh: the shim starts returning
+        # the new value once the marker exists.
+        touch "{marker}"
+        for _ in $(seq 1 200); do
+            if grep -q "ghp_token_v2_new" "{gh_hosts}" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            kill "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        fi
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, result.stderr
+
+    log_text = log_file.read_text()
+    changes = log_text.count("Token change detected")
+    initialisations = log_text.count("Initialising credential files from SSM")
+
+    assert initialisations == 1, (
+        "the first observation must initialise the credential files "
+        f"exactly once, got {initialisations}: {log_text!r}"
+    )
+    assert changes == 1, (
+        "the poll loop must report a token change EXACTLY once — on the "
+        "genuine rotation. It reported "
+        f"{changes} times. The watchdog's log() writes to stdout and the "
+        "loop used to capture that stdout into the 'last seen token' "
+        "variable, so the comparison could never match and every tick "
+        "looked like a rotation. A dead refresh chain then looks "
+        f"identical to a healthy one: {log_text!r}"
+    )
+
+    # The rotation must still have been applied to the files.
+    assert "ghp_token_v2_new" in git_creds.read_text()
+    assert "ghp_token_v2_new" in gh_hosts.read_text()
+
+
+def test_poll_loop_exits_promptly_on_sigterm_with_a_long_interval(
+    aws_shim: Path,
+) -> None:
+    """SIGTERM must be honoured while the loop is blocked in its sleep.
+
+    The loop used to run `sleep "$poll_interval"` in the foreground.
+    bash defers a trapped signal until the running foreground command
+    returns, so with the production interval (300 s) the `trap 'exit 0'
+    TERM` only fired once the sleep finished — up to five minutes
+    later. The watchdog gives the loop a 100 ms grace period and then
+    SIGKILLs it, so every teardown logged
+
+        Token refresh poll loop did not exit on SIGTERM; sending SIGKILL
+
+    The existing SIGTERM test used a 50 ms interval, so the loop was
+    essentially never blocked in a long sleep when the signal arrived
+    and the trap fired immediately — which is why the bug survived.
+    This one uses a 30 s interval, so the loop IS blocked in the sleep.
+    """
+    snippet = textwrap.dedent(f"""
+        blitzlog_start_token_poll_loop \\
+            "/blitzlog/prod/ephemeral/gh/example/owner/repo/145" \\
+            "ap-east-1" \\
+            "{aws_shim}/git-creds" \\
+            "{aws_shim}/gh-hosts" \\
+            30
+        sleep 0.3
+        if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+            echo "DIED_EARLY"
+            exit 1
+        fi
+        # SIGTERM while the loop is blocked in its 30 s sleep.
+        kill "$BLITZLOG_TOKEN_POLL_PID"
+        for _ in $(seq 1 100); do
+            if ! kill -0 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null; then
+                echo "OK"
+                exit 0
+            fi
+            sleep 0.02
+        done
+        echo "TRAP_DEFERRED"
+        kill -9 "$BLITZLOG_TOKEN_POLL_PID" 2>/dev/null
+        exit 1
+        """)
+    result = _run_bash(aws_shim, snippet)
+    assert result.returncode == 0, (
+        "the poll loop did not exit on SIGTERM while blocked in its "
+        f"sleep: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "OK" in result.stdout, result.stdout
+    assert "TRAP_DEFERRED" not in result.stdout, (
+        "the SIGTERM trap was deferred until the sleep finished — bash "
+        "only runs a trapped signal after the running foreground command "
+        "returns. The loop must background its sleep and `wait` on it, "
+        "because `wait` IS interruptible."
+    )

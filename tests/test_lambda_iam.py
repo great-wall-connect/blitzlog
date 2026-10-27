@@ -68,9 +68,49 @@ def _policy_body_for_inline_lambda_role(iam_tf: str) -> str:
     raise AssertionError("unterminated jsonencode in lambda_policy")
 
 
+def _policy_body_for_inline_ec2_agent_role(iam_tf: str) -> str:
+    """Return the HCL body of the EC2 agent role's inline policy block.
+
+    The EC2 agent role is `aws_iam_role.ec2_agent_role` in
+    `infra/aws/modules/core/iam.tf`. Its inline policy is the
+    `jsonencode({...})` call inside the `aws_iam_role_policy.ec2_agent_policy`
+    resource — the same file, a different resource block from the
+    Lambda's.
+    """
+    start_marker = 'resource "aws_iam_role_policy" "ec2_agent_policy" {'
+    start_idx = iam_tf.find(start_marker)
+    assert start_idx >= 0, f"could not find {start_marker} in {LAMBDA_IAM_TF}"
+    body_open = iam_tf.find("{", start_idx)
+    depth = 0
+    i = body_open
+    while i < len(iam_tf):
+        c = iam_tf[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = iam_tf[body_open + 1 : i]
+    jm = re.search(r"jsonencode\s*\(", body)
+    assert jm, "ec2_agent_policy has no jsonencode(...) call"
+    start = jm.end()
+    depth = 0
+    for j in range(start, len(body)):
+        c = body[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return body[start : j + 1]
+    raise AssertionError("unterminated jsonencode in ec2_agent_policy")
+
+
 def _sid_body(policy_body: str, sid_name: str) -> str:
     """Scope a Sid's body out of the rendered policy. Returns the
-    contents of the `{ Sid = \"<sid_name>\" ... }` Statement.
+    contents of the `{ Sid = "<sid_name>" ... }` Statement.
     """
     idx = re.search(rf'Sid\s*=\s*"{re.escape(sid_name)}"', policy_body)
     assert idx is not None, f"Sid {sid_name!r} not present in policy body"
@@ -209,6 +249,121 @@ class TestLambdaIamRole(unittest.TestCase):
             "(scoped to the per-env refresh group; widening is a "
             "privilege creep that lets a compromised Lambda schedule "
             "workloads anywhere).",
+        )
+
+    def test_scheduler_delete_schedule_group_sid_present(self):
+        """The Lambda MUST have `scheduler:DeleteScheduleGroup`.
+
+        The Lambda's fallback cleanup (`_sweep_stale_schedule_group`)
+        deletes a leftover per-issue schedule group when the chain
+        starts, so a run whose predecessor died without a teardown can
+        still start. Without this grant the sweep silently fails and
+        the chain's first `CreateSchedule` collides with the
+        previous run's leftover `iter-0` (ConflictException) — the
+        chain never starts and the agent's token dies 1 h after the
+        launch-time mint.
+
+        Note: `scheduler:DeleteSchedule` on the child schedules must
+        accompany it; the group delete cascades over them.
+        """
+        body = self.body
+        self.assertIn(
+            '"scheduler:DeleteScheduleGroup"',
+            body,
+            "lambda_policy must grant scheduler:DeleteScheduleGroup "
+            "(the fallback cleanup deletes a leftover per-issue group "
+            "when a chain starts).",
+        )
+        self.assertIn(
+            "schedule-group/blitzlog-*-token-refresh-*",
+            body,
+            "scheduler:DeleteScheduleGroup Resource must be scoped to "
+            "the per-issue refresh groups.",
+        )
+        self.assertNotRegex(
+            body,
+            r"scheduler:DeleteScheduleGroup[\s\S]{0,200}Resource\s*=\s*\"\*\"",
+            'scheduler:DeleteScheduleGroup must NOT have Resource = "*" '
+            "(scoped to the per-issue refresh groups; widening is a "
+            "privilege creep).",
+        )
+
+
+class TestEc2AgentIamRole(unittest.TestCase):
+    """Static checks on the EC2 agent role's inline policy.
+
+    The EC2 agent role is what the watchdog's teardown runs as. Its
+    schedule-group cleanup is the PRIMARY cleanup path for the
+    token-refresh chain (the Lambda's startup sweep is only the
+    fallback), so a missing grant here means every run leaves its
+    schedule group behind.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = LAMBDA_IAM_TF.read_text()
+        cls.body = _policy_body_for_inline_ec2_agent_role(cls.text)
+
+    def test_delete_schedule_group_is_granted(self):
+        """The watchdog's teardown deletes the per-issue schedule
+        group, so the EC2 role must be able to call
+        `scheduler:DeleteScheduleGroup` on it."""
+        self.assertIn(
+            '"scheduler:DeleteScheduleGroup"',
+            self.body,
+            "ec2_agent_policy must grant scheduler:DeleteScheduleGroup "
+            "(the watchdog's teardown deletes the per-issue group — the "
+            "PRIMARY cleanup path for the refresh chain).",
+        )
+        self.assertIn(
+            "schedule-group/blitzlog-*-token-refresh-*",
+            self.body,
+            "scheduler:DeleteScheduleGroup Resource must be scoped to "
+            "the per-issue refresh groups.",
+        )
+
+    def test_delete_schedule_on_child_schedules_is_granted(self):
+        """`scheduler:DeleteSchedule` on the CHILD schedules is
+        required in addition to `scheduler:DeleteScheduleGroup` on
+        the group.
+
+        EventBridge Scheduler authorises the group delete against
+        every schedule it cascades over. With only the group grant,
+        every teardown fails with:
+
+          not authorized to perform: scheduler:DeleteSchedule on
+          resource: arn:aws:scheduler:<region>:<acct>:
+          schedule/<group>/* because no identity-based policy
+          allows the scheduler:DeleteSchedule action
+
+        The group then survives the run. Its fired one-time `at()`
+        schedules linger (EventBridge Scheduler does not delete a
+        one-time schedule after it fires), so the NEXT run for the
+        same (env, repo, issue) fails its first `CreateSchedule`
+        with `ConflictException` — the chain never starts and the
+        agent's token dies 1 h after the launch-time mint.
+        """
+        self.assertIn(
+            '"scheduler:DeleteSchedule"',
+            self.body,
+            "ec2_agent_policy must grant scheduler:DeleteSchedule on the "
+            "child schedules — DeleteScheduleGroup authorises the cascade "
+            "against them, so without it every teardown fails with "
+            "AccessDenied and the group survives the run.",
+        )
+        self.assertIn(
+            "schedule/blitzlog-*-token-refresh-*/*",
+            self.body,
+            "scheduler:DeleteSchedule Resource must be the per-issue "
+            "refresh groups' schedule pattern "
+            "(arn:aws:scheduler:*:*:schedule/<group>/*).",
+        )
+        self.assertNotRegex(
+            self.body,
+            r"scheduler:DeleteSchedule[\s\S]{0,200}Resource\s*=\s*\"\*\"",
+            'scheduler:DeleteSchedule must NOT have Resource = "*" '
+            "(scoped to the per-issue refresh groups; widening is a "
+            "privilege creep).",
         )
 
 

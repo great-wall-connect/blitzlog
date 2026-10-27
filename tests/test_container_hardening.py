@@ -31,8 +31,10 @@ container's runtime shell is ``/bin/sh`` -> dash, and the mise dev
 tasks must be able to source the file under a POSIX shell too.
 """
 
+import os
 import re
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -47,12 +49,21 @@ SYSTEMD_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/02-systemd.sh"
 SYSTEM_SH = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
 ENTRYPOINT = REPO_ROOT / "packages/images/agent/entrypoint.sh"
 DOCKERFILE = REPO_ROOT / "packages/images/agent/Dockerfile"
+SMOKE_TEST = REPO_ROOT / "packages/images/agent/smoke-test.sh"
+INSTALLER = REPO_ROOT / "packages/images/agent/install-opencode-plugins.sh"
+DOCKER_DOC = REPO_ROOT / "docs/DOCKER.md"
+DOCKER_IMAGES_WORKFLOW = REPO_ROOT / ".github/workflows/docker-images.yml"
 
 # The flags every `docker run` of the agent image must carry. Kept as
 # an explicit literal (rather than "whatever the contract file says")
 # so that changing the contract is a deliberate act that has to
 # update this test too — a contract that silently loses --cap-drop
 # must not be able to redefine "correct" at the same time.
+#
+# `--read-only` is deliberately NOT here (issue #174): a project's
+# `bootstrap` task installs its own build dependencies, and dpkg
+# cannot unpack a package into a read-only /usr. The capability drop
+# is what bounds the agent instead.
 EXPECTED_HARDENING_FLAGS = [
     "--security-opt=no-new-privileges:true",
     "--cap-drop=ALL",
@@ -130,6 +141,26 @@ def _source_contract(expr):
             f"could not source {CONTRACT} under /bin/sh: {result.stderr.strip()}"
         )
     return result.stdout
+
+
+def _doc_paths(marker):
+    """Return the backtick-quoted paths in the docs/DOCKER.md table
+    delimited by `<!-- {marker}:start -->` / `<!-- {marker}:end -->`.
+
+    The markers exist so this extraction is deterministic: the writable
+    -path list is the security contract, and a prose paragraph that
+    happened to mention a path must not be able to change it.
+    """
+    text = _read(DOCKER_DOC)
+    start_marker = f"<!-- {marker}:start -->"
+    end_marker = f"<!-- {marker}:end -->"
+    self_contained = text.split(start_marker, 1)
+    if len(self_contained) != 2:
+        raise AssertionError(f"docs/DOCKER.md is missing the {start_marker} marker")
+    body = self_contained[1].split(end_marker, 1)
+    if len(body) != 2:
+        raise AssertionError(f"docs/DOCKER.md is missing the {end_marker} marker")
+    return re.findall(r"`(/[^`\s]+)`", body[0])
 
 
 class TestContainerHardeningContract(unittest.TestCase):
@@ -469,6 +500,701 @@ class TestContractIsWiredIntoTheAmi(unittest.TestCase):
             "02-systemd.sh must copy the contract to "
             "/usr/local/bin/container-hardening.env — that is where the "
             "watchdog sources it from",
+        )
+
+
+class TestWritablePathContract(unittest.TestCase):
+    """The writable-path list is the security contract of the read-only
+    rootfs. It must be explicit, documented, and asserted — a
+    --read-only rootfs with an implicit hole is worse than no flag at
+    all."""
+
+    def test_writable_paths_match_the_documented_table(self):
+        contract = set(_source_contract('"$BLITZLOG_WRITABLE_PATHS"').split())
+        documented = set(_doc_paths("writable-paths"))
+        self.assertEqual(
+            contract,
+            documented,
+            "the writable-path list in "
+            "packages/images/agent/container-hardening.env does not match "
+            "the table in docs/DOCKER.md. A path that can be written but "
+            "is not documented (or vice versa) is exactly the implicit "
+            "hole this contract exists to prevent.",
+        )
+
+    def test_readonly_mounts_match_the_documented_table(self):
+        contract = set(_source_contract('"$BLITZLOG_READONLY_MOUNTS"').split())
+        documented = set(_doc_paths("readonly-paths"))
+        self.assertEqual(
+            contract,
+            documented,
+            "the read-only mount list does not match the table in " "docs/DOCKER.md",
+        )
+
+    def test_the_two_lists_do_not_overlap(self):
+        writable = set(_source_contract('"$BLITZLOG_WRITABLE_PATHS"').split())
+        readonly = set(_source_contract('"$BLITZLOG_READONLY_MOUNTS"').split())
+        self.assertEqual(
+            writable & readonly,
+            set(),
+            "a path is listed as both writable and read-only — the "
+            "container's actual behaviour would be one or the other",
+        )
+
+    def test_tmpfs_mounts_cover_every_non_bind_writable_path(self):
+        """The tmpfs mounts are what back the writable paths that are
+        not host bind mounts (/tmp and the agent's HOME)."""
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        self.assertIn("--tmpfs /tmp:", tmpfs)
+        self.assertIn("/home/blitzlog:", tmpfs)
+        # The tmpfs must be owned by the container's runtime uid.
+        # The container has no CAP_DAC_OVERRIDE, so a uid-0 process
+        # cannot write into a directory owned by another uid (the
+        # kernel applies the "other" permission bits to it).
+        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
+        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
+        self.assertIn(f"uid={uid},gid={gid}", tmpfs)
+
+    def test_tmpfs_mounts_are_exec_able(self):
+        """Docker's `--tmpfs` defaults to `noexec` — and the agent's
+        executables live on these mounts.
+
+        Docker prepends `noexec,nosuid,nodev` to every `--tmpfs`
+        mount and merges the caller's options on top (moby/sys
+        `MergeTmpfsOptions`). With `noexec` in place the first `mise`
+        call died with
+
+            /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+
+        (dash exits 126) — the container died before the agent
+        started. mise's toolchain lives under `$HOME`, the opencode
+        tools under `$HOME/.config`, and pip/npm/node-gyp run scripts
+        out of `/tmp`, so all three mounts have to be exec-able.
+        """
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        mounts = [m for m in tmpfs.split("--tmpfs ") if m.strip()]
+        self.assertEqual(
+            len(mounts),
+            3,
+            f"expected three tmpfs mounts (/tmp, $HOME, $HOME/.config), got {tmpfs!r}",
+        )
+        for mount in mounts:
+            with self.subTest(mount=mount):
+                self.assertIn(
+                    "exec",
+                    mount.split(":", 1)[1].split(","),
+                    f"tmpfs mount {mount!r} is not exec-able — Docker's "
+                    "--tmpfs defaults to noexec, so the agent could not "
+                    "run mise, its toolchain, or the opencode tools",
+                )
+                self.assertNotIn(
+                    "noexec",
+                    mount,
+                    f"tmpfs mount {mount!r} explicitly disables exec",
+                )
+
+    def test_smoke_test_proves_the_tmpfs_is_exec_able(self):
+        """The image's smoke test installs a binary under /tmp and runs
+        it — the only way to catch a `noexec` mount, which no static
+        check can see."""
+        self.assertIn(
+            "install-mise.sh",
+            _read(SMOKE_TEST),
+            "the smoke test must run a binary from a tmpfs, or a noexec "
+            "mount ships unnoticed",
+        )
+
+    def test_agent_config_dir_has_its_own_uid_owned_tmpfs(self):
+        """$HOME/.config needs its OWN tmpfs, not just the $HOME one.
+
+        Docker creates the missing parent of a bind mount as
+        `root:root 0755`. The gh CLI config is bind-mounted at
+        `$HOME/.config/gh`, so Docker creates `$HOME/.config` itself —
+        owned by root, inside the $HOME tmpfs. Mounting a tmpfs at
+        $HOME/.config with the container's own uid/gid makes the
+        mountpoint uid-owned; Docker then mounts the
+        `$HOME/.config/gh` bind INSIDE it (parents before children).
+
+        The ownership is not cosmetic: the container runs with
+        --cap-drop=ALL, so it has no CAP_DAC_OVERRIDE — a uid-0
+        process cannot write into a directory owned by another uid.
+        """
+        tmpfs = _source_contract('"$BLITZLOG_TMPFS_MOUNTS"')
+        self.assertIn(
+            "--tmpfs /home/blitzlog/.config:",
+            tmpfs,
+            "$HOME/.config MUST have its own tmpfs. Docker creates the "
+            "missing parent of the $HOME/.config/gh bind mount as "
+            "root:root 0755, and the mount point then has an owner the "
+            "agent cannot rely on.",
+        )
+        # ...and it must be owned by the container's runtime uid.
+        config_tmpfs = tmpfs.split("--tmpfs /home/blitzlog/.config:")[1]
+        uid = _source_contract('"$BLITZLOG_CONTAINER_UID"').strip()
+        gid = _source_contract('"$BLITZLOG_CONTAINER_GID"').strip()
+        self.assertIn(
+            f"uid={uid},gid={gid}",
+            config_tmpfs,
+            "the $HOME/.config tmpfs must be owned by the container's "
+            "runtime uid, or the agent cannot write its own config dir",
+        )
+
+    def test_smoke_test_asserts_the_config_dir_is_writable(self):
+        """The image's smoke test must assert $HOME/.config is writable.
+
+        This assertion is only meaningful when the container actually
+        has a Docker-created $HOME/.config — i.e. when a gh config is
+        bind-mounted under it, the way production does it. Without
+        both halves the failure mode is invisible: CI was green while
+        the first real production run died on 'Permission denied'.
+        """
+        smoke = _read(SMOKE_TEST)
+        self.assertIn(
+            '$HOME/.config"',
+            smoke,
+            "the smoke test must assert that $HOME/.config is writable "
+            "by the runtime uid — that is the invariant the non-root "
+            "read-only-rootfs design depends on",
+        )
+        for path, label in (
+            (DOCKER_IMAGES_WORKFLOW, "the CI smoke-test step"),
+            (MISE_TOML, "the local mise image-* tasks"),
+        ):
+            with self.subTest(path=path.name):
+                src = _read(path)
+                self.assertIn(
+                    ".config/gh:ro",
+                    src,
+                    f"{label} must bind-mount a gh config at "
+                    "$HOME/.config/gh — that mount is what makes Docker "
+                    "create $HOME/.config as root, which is the topology "
+                    "the smoke test must be exercised against",
+                )
+
+    def test_every_docker_run_expands_the_tmpfs_mounts(self):
+        """A --read-only rootfs without its tmpfs mounts would leave
+        the agent unable to write anything at all."""
+        for path in (WATCHDOG, MISE_TOML):
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    "$BLITZLOG_TMPFS_MOUNTS",
+                    _read(path),
+                    f"{path.name} does not expand the tmpfs mounts — a "
+                    "read-only rootfs with no writable paths would break "
+                    "the agent",
+                )
+
+
+class TestContainerRuntimeIdentity(unittest.TestCase):
+    """The container runs as uid 0 — dpkg needs root — and the
+    capability drop is what keeps that bounded (issue #174)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.smoke = _read(SMOKE_TEST)
+
+    def test_dockerfile_does_not_declare_a_non_root_user(self):
+        """A `USER blitzlog` directive would break every project's
+        bootstrap task: dpkg needs root to unpack a package and to
+        write its own database."""
+        users = re.findall(r"(?m)^USER\s+(\S+)", self.dockerfile)
+        for user in users:
+            self.assertIn(
+                user,
+                ("root",),
+                "the container must not declare a non-root USER: dpkg "
+                "needs root to install a project's build dependencies "
+                "(issue #174)",
+            )
+
+    def test_dockerfile_creates_the_blitzlog_user_for_the_home_directory(self):
+        """The `blitzlog` user owns the image's HOME directory. It is
+        not the runtime user — the container runs as uid 0 — but the
+        directory has to exist and be owned by somebody."""
+        self.assertIn("useradd", self.dockerfile)
+        self.assertIn("groupadd", self.dockerfile)
+        self.assertIn("--home-dir /home/blitzlog", self.dockerfile)
+
+    def test_dockerfile_sets_home_to_the_contract_home(self):
+        home = _source_contract('"$BLITZLOG_CONTAINER_HOME"').strip()
+        self.assertIn(
+            f"HOME={home}",
+            self.dockerfile,
+            "the Dockerfile must set HOME to the contract's container home",
+        )
+
+    def test_dockerfile_does_not_force_pip_into_the_user_site_packages(self):
+        """`PIP_USER=1` was a read-only-rootfs workaround. It is also
+        rejected inside a virtualenv ("Can not perform a '--user'
+        install"), which breaks the bootstrap task of any repo that
+        creates a venv — and the rootfs is writable now."""
+        self.assertNotIn(
+            "PIP_USER=1",
+            self.dockerfile,
+            "the image must not set PIP_USER=1 — `pip install --user` is "
+            "rejected inside a virtualenv, so a repo whose bootstrap "
+            "creates a venv would fail (issue #174)",
+        )
+
+    def test_dockerfile_bakes_the_opencode_components_outside_home(self):
+        """They must NOT be baked under $HOME — HOME is a tmpfs and
+        would shadow them."""
+        home = _source_contract('"$BLITZLOG_CONTAINER_HOME"').strip()
+        self.assertIn(
+            "COPY opencode/plugins/ /opt/blitzlog/opencode/plugins/", self.dockerfile
+        )
+        self.assertIn(
+            "COPY opencode/tools/ /opt/blitzlog/opencode/tools/", self.dockerfile
+        )
+        self.assertIn("COPY opencode/lib/ /opt/blitzlog/opencode/lib/", self.dockerfile)
+        self.assertNotIn(
+            f"COPY opencode/plugins/ {home}/",
+            self.dockerfile,
+            "the opencode components are baked under $HOME, which is a "
+            "tmpfs — they would be shadowed at runtime",
+        )
+
+    def test_entrypoint_installs_the_baked_components_into_home(self):
+        self.assertIn(
+            "/usr/local/bin/install-opencode-plugins.sh",
+            self.entrypoint,
+            "the entrypoint must install the baked opencode components "
+            "into the agent's HOME",
+        )
+
+    def test_installer_is_copied_into_the_image_and_executable(self):
+        self.assertIn(
+            "COPY install-opencode-plugins.sh /usr/local/bin/install-opencode-plugins.sh",
+            self.dockerfile,
+        )
+        self.assertIn(
+            "/usr/local/bin/install-opencode-plugins.sh",
+            self.dockerfile,
+            "the installer must be made executable in the image",
+        )
+
+    def test_installer_uses_cp_r_not_cp_a(self):
+        """`cp -a` preserves ownership, which a non-root user cannot
+        do — GNU cp exits non-zero when it fails to, and the entrypoint
+        runs under `set -e`."""
+        src = _read(INSTALLER)
+        self.assertIn("cp -R ", src)
+        self.assertNotIn("cp -a ", src)
+
+    def test_smoke_test_asserts_the_container_has_no_capabilities(self):
+        """uid 0 is only safe because the capability set is empty.
+
+        The smoke test asserts the effective capability mask, so a run
+        that loses --cap-drop=ALL fails the image instead of silently
+        handing the agent Docker's default capability set.
+        """
+        self.assertIn(
+            "CapEff:",
+            self.smoke,
+            "the image's smoke test must assert the effective capability "
+            "mask — that is the invariant that bounds the uid-0 "
+            "container (issue #174)",
+        )
+        self.assertIn(
+            "AGENT_CAPS=$(awk",
+            self.smoke,
+            "the image's smoke test must read CapEff from " "/proc/self/status",
+        )
+        self.assertIn(
+            'if [ "$AGENT_CAPS" != "0000000000000000" ]',
+            self.smoke,
+            "the image's smoke test must fail when the container has "
+            "effective capabilities",
+        )
+
+    def test_smoke_test_does_not_mkdir_on_a_read_only_rootfs(self):
+        """`mkdir -p` on a read-only rootfs fails with EROFS — the
+        smoke test must assert existence, not create it."""
+        self.assertNotIn(
+            'mkdir -p "$d"',
+            self.smoke,
+            "the smoke test creates directories, which fails on the "
+            "read-only rootfs — it should assert they exist",
+        )
+
+
+class TestCredentialMounts(unittest.TestCase):
+    """The host owns the GitHub credentials.
+
+    The two credential paths are deliberately ASYMMETRIC:
+
+      * git's credential store is read-only, because
+        `git credential-store` rewrites it on every authenticated
+        operation — the container ships a get-only helper instead;
+      * gh's config is writable, because gh 2.x migrates its own config
+        on first use and would fail against a read-only mount
+        (issue #176). The alternative — a copied config — goes stale
+        and breaks the token refresh it is meant to demonstrate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.watchdog_src = _read(WATCHDOG)
+
+    def test_the_git_credential_store_is_read_only(self):
+        mount = (
+            '-v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}'
+            '/.git-credentials.d:ro"'
+        )
+        self.assertIn(
+            mount,
+            self.watchdog_src,
+            "the GitHub credential store must be mounted read-only — "
+            "`git credential-store` rewrites it, which is why the "
+            "container ships a get-only credential helper",
+        )
+
+    def test_the_gh_config_is_writable(self):
+        """gh migrates its own config on first use and would fail
+        against a read-only mount (issue #176)."""
+        writable = (
+            '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
+            '/.config/gh"'
+        )
+        read_only = (
+            '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
+            '/.config/gh:ro"'
+        )
+        self.assertIn(
+            writable,
+            self.watchdog_src,
+            "the gh config must be mounted writable — gh 2.x migrates its "
+            "own config on first use and fails against a read-only mount "
+            "(issue #176)",
+        )
+        self.assertNotIn(
+            read_only,
+            self.watchdog_src,
+            "the gh config must not be mounted read-only (issue #176)",
+        )
+
+    def test_watchdog_chowns_the_credential_paths_to_the_container_uid(self):
+        self.assertIn(
+            'chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \\\n'
+            '            /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"',
+            self.watchdog_src,
+            "the watchdog must chown the credential paths to the "
+            "container's uid — a bind mount preserves the source's "
+            "ownership, so a root-owned 0600 file is unreadable from "
+            "inside a non-root container",
+        )
+
+    def test_watchdog_chowns_the_writable_bind_mounts(self):
+        for path in ("/workspace", "/var/log/blitzlog"):
+            with self.subTest(path=path):
+                self.assertIn(
+                    f'chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" {path}',
+                    self.watchdog_src,
+                    f"the watchdog must chown {path} to the container's "
+                    "uid, or the agent's first write fails with EACCES",
+                )
+
+    def test_github_token_is_not_passed_to_the_container(self):
+        """The token reaches the agent through the read-only mounts —
+        it must not also sit in the container's environment, where
+        `docker inspect` and every same-uid process could read it."""
+        self.assertNotIn(
+            '-e "GITHUB_TOKEN=$GITHUB_TOKEN"',
+            self.watchdog_src,
+            "the GitHub token must not be passed to the container as an "
+            "env var — the host owns the credential files",
+        )
+
+    def test_entrypoint_does_not_write_the_credential_mount_unconditionally(self):
+        """The write is the local-dev fallback; the production path
+        finds the file already mounted read-only."""
+        entrypoint = _read(ENTRYPOINT)
+        self.assertIn(
+            'if [ ! -d "$HOME/.git-credentials.d" ] || '
+            '[ -w "$HOME/.git-credentials.d" ]; then',
+            entrypoint,
+            "the entrypoint must only materialise the credential file "
+            "when the target is not a read-only host mount",
+        )
+        self.assertIn(
+            'if [ ! -f "$GH_HOSTS_FILE" ]; then',
+            entrypoint,
+            "the entrypoint must only run `gh auth login` when the host "
+            "has not already mounted a hosts.yml",
+        )
+
+
+class TestCredentialHelperIsReadOnly(unittest.TestCase):
+    """git must not try to WRITE the host's credential file.
+
+    The credential file is a read-only bind mount, and
+    `git credential-store` is not read-only in practice: after a
+    successful authentication git calls the helper's `store` operation,
+    and credential-store rewrites the file under a lock:
+
+        fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+
+    git ignores a helper's exit status, so the clone still succeeds —
+    but every run logs a spurious "fatal:" that reads like a failed
+    clone, and the credential can never be updated. The container
+    therefore ships a get-only helper instead.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.helper = REPO_ROOT / "packages/images/agent/blitzlog-credential-helper"
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.smoke_test = _read(SMOKE_TEST)
+
+    def test_helper_is_baked_into_the_image(self):
+        self.assertTrue(
+            self.helper.is_file(),
+            f"missing {self.helper} — the container needs a get-only "
+            "credential helper to use the host's read-only credential file",
+        )
+        self.assertIn(
+            "COPY blitzlog-credential-helper /usr/local/bin/blitzlog-credential-helper",
+            self.dockerfile,
+            "the credential helper must be baked into the image — the "
+            "rootfs is read-only, so it cannot be written at runtime",
+        )
+        self.assertIn(
+            "/usr/local/bin/blitzlog-credential-helper",
+            self.dockerfile.split("chmod +x")[-1],
+            "the credential helper must be chmod +x in the image",
+        )
+
+    def test_entrypoint_points_git_at_the_read_only_helper(self):
+        self.assertTrue(
+            "'!/usr/local/bin/blitzlog-credential-helper'" in self.entrypoint,
+            "the entrypoint must configure the get-only credential helper",
+        )
+        self.assertNotIn(
+            'credential.helper "store --file',
+            self.entrypoint,
+            "the entrypoint must NOT use `git credential-store` against "
+            "the host's read-only credential file — credential-store "
+            "rewrites the file under a lock when git approves a "
+            "credential, which fails with 'unable to get credential "
+            "storage lock ... Read-only file system'",
+        )
+
+    def test_helper_only_answers_get(self):
+        """`store` and `erase` must be no-ops."""
+        helper_src = _read(self.helper)
+        self.assertIn(
+            '[ "$op" = "get" ] || exit 0',
+            helper_src,
+            "the helper must ignore every operation except `get` — the "
+            "credential file is a read-only mount",
+        )
+
+    def test_helper_never_writes_the_credential_file(self):
+        helper_src = _read(self.helper)
+        # Strip the comments so the prose cannot trip the check, then
+        # look for anything that could write: a redirection (other than
+        # /dev/null) or a command that mutates a file.
+        code = "\n".join(
+            line
+            for line in helper_src.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        code = code.replace(">/dev/null", "").replace("2>&1", "")
+        for forbidden in (
+            ">",
+            "rm ",
+            "mv ",
+            "cp ",
+            "dd ",
+            "tee ",
+            "truncate",
+            "chmod ",
+            "install ",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    code,
+                    "the credential helper must never write the "
+                    "credential file — that is the whole point of it",
+                )
+
+    def test_helper_returns_the_token(self):
+        """Functional: the helper must hand git the token."""
+        with tempfile.TemporaryDirectory() as tmp:
+            creds = Path(tmp) / "github"
+            creds.write_text(
+                "https://x-access-token:ghp_TESTTOKEN123@github.com\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(self.helper),
+                    "get",
+                ],
+                input="protocol=https\nhost=github.com\n\n",
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "BLITZLOG_GIT_CREDENTIAL_FILE": str(creds),
+                },
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("username=x-access-token", result.stdout)
+            self.assertIn("password=ghp_TESTTOKEN123", result.stdout)
+
+    def test_helper_does_not_touch_the_file_on_store_or_erase(self):
+        """Functional: the write paths must leave the file byte-identical."""
+        with tempfile.TemporaryDirectory() as tmp:
+            creds = Path(tmp) / "github"
+            original = "https://x-access-token:ghp_TESTTOKEN123@github.com\n"
+            creds.write_text(original, encoding="utf-8")
+            for op in ("store", "erase"):
+                with self.subTest(op=op):
+                    result = subprocess.run(
+                        ["sh", str(self.helper), op],
+                        input=(
+                            "protocol=https\nhost=github.com\n"
+                            "username=x-access-token\npassword=other\n\n"
+                        ),
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "BLITZLOG_GIT_CREDENTIAL_FILE": str(creds),
+                        },
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(
+                        creds.read_text(encoding="utf-8"),
+                        original,
+                        f"the helper modified the credential file on {op}",
+                    )
+
+    def test_smoke_test_exercises_the_helper(self):
+        self.assertIn(
+            "blitzlog-credential-helper",
+            self.smoke_test,
+            "the image smoke test must exercise the credential helper — a "
+            "helper that cannot read the host's file would only fail at "
+            "clone time, in production",
+        )
+
+
+class TestMiseIsRunnableAsAnUnprivilegedUid(unittest.TestCase):
+    """mise's installer only makes the binary executable when it runs as
+    root, and the container no longer runs as root (issue #164).
+
+    Without the exec bit the first `mise` call fails with
+
+        /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+
+    and dash exits 126 — the container dies before the agent starts.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.installer = REPO_ROOT / "packages/images/agent/install-mise.sh"
+        cls.entrypoint = _read(ENTRYPOINT)
+        cls.dockerfile = _read(DOCKERFILE)
+        cls.smoke_test = _read(SMOKE_TEST)
+
+    def test_installer_is_baked_into_the_image(self):
+        self.assertTrue(
+            self.installer.is_file(),
+            f"missing {self.installer} — the entrypoint needs a mise "
+            "installer that works as an unprivileged uid",
+        )
+        self.assertIn(
+            "COPY install-mise.sh /usr/local/bin/install-mise.sh",
+            self.dockerfile,
+            "the mise installer must be baked into the image — the "
+            "rootfs is read-only, so it cannot be written at runtime",
+        )
+        self.assertIn(
+            "/usr/local/bin/install-mise.sh",
+            self.dockerfile.split("chmod +x")[-1],
+            "the mise installer must be chmod +x in the image",
+        )
+
+    def test_entrypoint_uses_the_installer(self):
+        self.assertTrue(
+            "/usr/local/bin/install-mise.sh" in self.entrypoint,
+            "the entrypoint must install mise through install-mise.sh — "
+            "mise's own installer only chmods the binary as root",
+        )
+
+    def test_installer_makes_the_binary_executable(self):
+        installer = _read(self.installer)
+        self.assertIn(
+            'chmod +x "$MISE_BIN"',
+            installer,
+            "the installer must chmod +x the mise binary — mise's own "
+            "installer only does that when it runs as root",
+        )
+
+    def test_installer_verifies_that_mise_actually_runs(self):
+        installer = _read(self.installer)
+        self.assertIn(
+            '"$MISE_BIN" --version',
+            installer,
+            "the installer must probe that mise actually runs, so a "
+            "broken toolchain fails with a diagnosable message instead "
+            "of an exec error three lines later",
+        )
+
+    def test_entrypoint_calls_mise_by_absolute_path(self):
+        """A PATH lookup would turn a missing/unusable mise into the
+        same cryptic 'Permission denied'."""
+        self.assertNotIn(
+            "        mise install -y\n",
+            self.entrypoint,
+            "mise must be invoked through $MISE_BIN, not through a PATH " "lookup",
+        )
+        self.assertIn('"$MISE_BIN" install -y', self.entrypoint)
+
+    def test_installer_makes_a_non_executable_binary_runnable(self):
+        """Functional: the exact bug this fixes.
+
+        A binary that is present but NOT executable is what mise's
+        installer leaves behind when it runs as a non-root user. The
+        installer must make it runnable.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_mise = Path(tmp) / "mise"
+            fake_mise.write_text('#!/bin/sh\necho "mise 0.0.0"\n', encoding="utf-8")
+            fake_mise.chmod(0o644)
+            self.assertFalse(
+                os.access(fake_mise, os.X_OK),
+                "the fake mise should not be executable before the fix",
+            )
+            result = subprocess.run(
+                ["sh", str(self.installer), str(fake_mise)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(fake_mise))
+            self.assertTrue(
+                os.access(fake_mise, os.X_OK),
+                "the installer must make a non-executable mise runnable",
+            )
+
+    def test_smoke_test_exercises_the_mise_installer(self):
+        self.assertIn(
+            "install-mise.sh",
+            self.smoke_test,
+            "the image smoke test must exercise the mise installer — a "
+            "non-executable mise only failed at runtime, in production",
         )
 
 
