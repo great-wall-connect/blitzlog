@@ -168,12 +168,11 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
             "/root/gh-config/${INSTANCE_ID}/hosts.yml"
         git config --global credential.helper \
             'store --file /root/.git-credentials.d/github'
-        # Issue #164: hand the credential files to the container's
-        # unprivileged uid. A bind mount preserves the source's
-        # ownership, so a root-owned 0600 file would be unreadable
-        # from inside the container. The poll loop's rewrites
-        # truncate these files in place, so the ownership survives
-        # every refresh.
+        # Issue #164: hand the credential files to the container's uid. A
+        # bind mount preserves the source's ownership, so a root-owned
+        # 0600 file would be unreadable from inside a container that
+        # does not run as root. The poll loop's rewrites truncate these
+        # files in place, so the ownership survives every refresh.
         chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \
             /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"
     fi
@@ -328,6 +327,28 @@ rm -f /workspace/.shutdown
 # TMPFS_ARGS above), so the two credential paths are bind-mounted
 # INSIDE it.
 #
+# Issue #176: the gh config is the ONE credential path that is NOT
+# read-only, and deliberately so. gh 2.x migrates its config on first
+# use: with no `config.yml` next to it (the host's poll loop writes
+# only `hosts.yml`), gh wants to WRITE the file — and against a
+# read-only mount every `gh` call in the container fails with
+#
+#   error: failed to write config: open /home/blitzlog/.config/gh/hosts.yml:
+#   read-only file system
+#
+# The agent worked around it by copying the config to a writable
+# directory — which silently breaks the thing this repo was created to
+# test: the copy is a snapshot, and the host refreshes the token every
+# ~50 min (issue #145), so the copy goes stale and `gh` starts
+# failing with 401s mid-task.
+#
+# Making the mount writable costs nothing: the AMI's host extras are
+# awscli/git/jq (no `gh` of its own), so that directory exists only
+# for the container, and the agent already holds the token. The
+# GIT credential store stays READ-ONLY — `git credential-store`
+# genuinely rewrites that file, which is why the container ships a
+# get-only credential helper instead.
+#
 # `set -e` is active, so a non-zero `docker run` aborted the script
 # right here — before the cleanup below (log upload, bot-lock release,
 # SSM/schedule teardown, instance terminate) could run. A failed agent
@@ -380,7 +401,7 @@ run_agent_container() {
         "${COMMON_ARGS[@]}" \
         -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
         -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
-        -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro" \
+        -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh" \
         -v /workspace:/workspace \
         -v /var/log/blitzlog:/var/log/blitzlog \
         "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"

@@ -104,10 +104,21 @@ Blitzlog is designed around a few hardening principles — review these before p
   agent's own state lives on tmpfs mounts (`$HOME`, `/tmp`), and the
   only paths shared with the host are `/workspace` (the agent's own
   clone) and `/var/log/blitzlog` — both of which belong to the agent.
-- **Read-only credential mounts** — the GitHub token and the `gh` CLI
-  config are owned by the host and mounted read-only, so the agent can
-  use them but cannot tamper with the host's copy. The token is also
-  kept out of the container's environment entirely.
+- **The GitHub credential store is a read-only mount** — the token is
+  owned by the host and mounted read-only, so the agent can use it but
+  cannot tamper with the host's copy. `git credential-store` rewrites
+  that file on every authenticated operation, so the container ships a
+  get-only credential helper instead of using the store. The token is
+  also kept out of the container's environment entirely.
+- **The `gh` CLI config is host-owned but writable** — the host
+  refreshes `hosts.yml` in place on every token rotation, so the agent
+  always sees a current token. It is writable because gh 2.x migrates
+  its own config on first use and would fail against a read-only mount
+  (issue #176); the alternative — a copied config — silently goes
+  stale and breaks the token refresh it is meant to demonstrate. It
+  costs nothing: the host runs no `gh` of its own, so that directory
+  exists only for the container, and the agent already holds the
+  token.
 - **apt's sandbox is pinned to root in the image** — apt's own privilege
   drop to the `_apt` user needs `CAP_SETUID`/`CAP_SETGID`/`CAP_CHOWN`,
   which `--cap-drop=ALL` removes. The image pins apt's sandbox to root

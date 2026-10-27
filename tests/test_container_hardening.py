@@ -820,32 +820,60 @@ class TestContainerRuntimeIdentity(unittest.TestCase):
         )
 
 
-class TestCredentialMountsAreReadOnly(unittest.TestCase):
-    """The host owns the GitHub credentials; the agent may read them
-    but must not be able to tamper with the host's copy."""
+class TestCredentialMounts(unittest.TestCase):
+    """The host owns the GitHub credentials.
+
+    The two credential paths are deliberately ASYMMETRIC:
+
+      * git's credential store is read-only, because
+        `git credential-store` rewrites it on every authenticated
+        operation — the container ships a get-only helper instead;
+      * gh's config is writable, because gh 2.x migrates its own config
+        on first use and would fail against a read-only mount
+        (issue #176). The alternative — a copied config — goes stale
+        and breaks the token refresh it is meant to demonstrate.
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.watchdog_src = _read(WATCHDOG)
 
-    def test_credential_bind_mounts_are_read_only(self):
-        for mount in (
-            (
-                '-v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}'
-                '/.git-credentials.d:ro"'
-            ),
-            (
-                '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
-                '/.config/gh:ro"'
-            ),
-        ):
-            with self.subTest(mount=mount):
-                self.assertIn(
-                    mount,
-                    self.watchdog_src,
-                    "the GitHub credential bind mounts must be read-only — "
-                    "the host is the only writer of those files",
-                )
+    def test_the_git_credential_store_is_read_only(self):
+        mount = (
+            '-v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}'
+            '/.git-credentials.d:ro"'
+        )
+        self.assertIn(
+            mount,
+            self.watchdog_src,
+            "the GitHub credential store must be mounted read-only — "
+            "`git credential-store` rewrites it, which is why the "
+            "container ships a get-only credential helper",
+        )
+
+    def test_the_gh_config_is_writable(self):
+        """gh migrates its own config on first use and would fail
+        against a read-only mount (issue #176)."""
+        writable = (
+            '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
+            '/.config/gh"'
+        )
+        read_only = (
+            '-v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}'
+            '/.config/gh:ro"'
+        )
+        self.assertIn(
+            writable,
+            self.watchdog_src,
+            "the gh config must be mounted writable — gh 2.x migrates its "
+            "own config on first use and fails against a read-only mount "
+            "(issue #176)",
+        )
+        self.assertNotIn(
+            read_only,
+            self.watchdog_src,
+            "the gh config must not be mounted read-only (issue #176)",
+        )
 
     def test_watchdog_chowns_the_credential_paths_to_the_container_uid(self):
         self.assertIn(

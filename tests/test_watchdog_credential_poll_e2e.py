@@ -299,35 +299,38 @@ def test_watchdog_poll_loop_start_args_match_container_bind_mounts() -> None:
 
 def test_watchdog_bind_mount_gh_config_source_matches_write_path() -> None:
     """The host-side ``-v /root/gh-config/${INSTANCE_ID}:
-    ${BLITZLOG_CONTAINER_HOME}/.config/gh:ro`` bind mount is the bridge
+    ${BLITZLOG_CONTAINER_HOME}/.config/gh`` bind mount is the bridge
     between ``_bl_tokenpoll_write_gh_hosts_yml`` (which writes to
     ``/root/gh-config/${INSTANCE_ID}/hosts.yml``) and the container's
     gh CLI (which reads ``$HOME/.config/gh/hosts.yml``). If the source
     ever stops matching the write path, the poll loop will rewrite a
-    file the container never reads.
+    file the container never reads — and the agent's gh would go stale
+    on every token rotation, which is exactly what this repo exists to
+    exercise.
 
     Issue #164 changed the container-side half of the mount: the
     container no longer runs as root, so its HOME moved to
     ``$BLITZLOG_CONTAINER_HOME`` (``/home/blitzlog``). The HOST-side
     half is unchanged — it is still the host's ``/root/gh-config``.
 
-    The mount is also READ-ONLY now: the host is the only writer of
-    the credential files, so the agent cannot tamper with the host's
-    copy of the token.
+    Issue #176 changed the mount MODE: it is writable again, because
+    gh 2.x migrates its own config on first use and fails against a
+    read-only mount. The git credential store stays read-only — see
+    ``tests/test_container_hardening.py``.
     """
     src = _strip_comments_and_continuations(_read(WATCHDOG))
 
     # The bind mount is the one with `gh-config` in the source
     # half of the `:`. The container-side `${BLITZLOG_CONTAINER_HOME}
-    # /.config/gh` must be the dest, and the mount must be `:ro`.
+    # /.config/gh` must be the dest.
     pattern = (
         r'-v\s*"/root/gh-config/\$\{INSTANCE_ID\}'
-        r':\$\{BLITZLOG_CONTAINER_HOME\}/\.config/gh:ro"'
+        r':\$\{BLITZLOG_CONTAINER_HOME\}/\.config/gh"'
     )
     assert re.search(pattern, src), (
         "watchdog.sh's gh-config bind mount does not map "
         "/root/gh-config/${INSTANCE_ID} (host) onto "
-        "${BLITZLOG_CONTAINER_HOME}/.config/gh (container), read-only. "
+        "${BLITZLOG_CONTAINER_HOME}/.config/gh (container). "
         "The poll loop's rewrites of hosts.yml would land on a path "
         "the container never reads."
     )

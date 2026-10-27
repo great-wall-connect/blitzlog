@@ -304,6 +304,7 @@ Writable:
 | `/home/blitzlog` | rw | tmpfs | The agent's `HOME`: the global git config, mise's toolchain, the npm/npx cache, opencode's config + state, and the telegram bot's config. |
 | `/var/log/blitzlog` | rw | bind mount | The entrypoint's and the services' logs. The watchdog uploads them to S3 after the run. |
 | `/workspace` | rw | bind mount | The cloned repository, plus the `.blitzlog/` session artifacts and the `.idle` / `.shutdown` signal files. |
+| `/home/blitzlog/.config/gh` | rw | bind mount | The `gh` CLI's config. The host owns it and rewrites `hosts.yml` in place on every token rotation, so the agent always sees a current token. Writable because gh migrates its own config on first use — see below. |
 <!-- writable-paths:end -->
 
 Read-only (the agent may read these, but cannot write them):
@@ -312,7 +313,6 @@ Read-only (the agent may read these, but cannot write them):
 | Path | Source | Why read-only |
 |---|---|---|
 | `/home/blitzlog/.git-credentials.d` | host credential store | The host owns the GitHub token and the token-refresh poll loop rewrites it there (issue #145). The agent must not be able to tamper with the host's copy. |
-| `/home/blitzlog/.config/gh` | host gh config | Same — the host's `hosts.yml` is the only writer's copy. |
 | `/opt/whisper-stt/models` | host whisper models | The Whisper model file is an input, never an output. |
 <!-- readonly-paths:end -->
 
@@ -423,6 +423,42 @@ always current — and never writes it. The entrypoint wires it up with:
 git config --global credential.helper \
     '!/usr/local/bin/blitzlog-credential-helper'
 ```
+
+### The `gh` config is writable — deliberately, and unlike git's store
+
+The two credential paths are asymmetric on purpose.
+
+**git's credential store is read-only** because `git credential-store`
+writes it on every authenticated operation — hence the get-only helper
+above. The container never writes it.
+
+**gh's config is writable** because gh 2.x *migrates its own config* on
+first use: the host's poll loop writes only `hosts.yml`, so there is no
+`config.yml` version marker next to it, and gh's migration wants to
+rewrite `hosts.yml`. Against a read-only mount that fails, and the
+failure is fatal to every `gh` call in the container:
+
+```
+error: failed to write config: open /home/blitzlog/.config/gh/hosts.yml:
+read-only file system
+```
+
+The first agent to hit this worked around it by copying the config to a
+writable directory — which quietly defeats the point: the copy is a
+snapshot, while the host refreshes the token every ~50 minutes
+(issue #145). The agent's `gh` then starts failing with 401s part-way
+through a long task, and the token-refresh chain it was supposed to be
+exercising is not.
+
+Making the mount writable costs nothing:
+
+- the host runs no `gh` of its own (the AMI's extras are
+  `awscli`/`git`/`jq`), so that directory exists only for the container;
+- the agent already holds the token — it can read it out of the
+  read-only credential store — so "tampering" with the gh config buys
+  it nothing;
+- the host's poll loop rewrites `hosts.yml` **in place**, so the
+  container keeps seeing a current token.
 
 ### apt's sandbox is pinned to root in the image
 
