@@ -162,6 +162,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "scheduler:CreateSchedule",
           "scheduler:DeleteSchedule",
           "scheduler:CreateScheduleGroup",
+          "scheduler:DeleteScheduleGroup",
         ]
         # Issue #145: the Lambda mints a fresh GitHub App token every
         # 50 min via a chain of one-time EventBridge Scheduler events.
@@ -174,6 +175,17 @@ resource "aws_iam_role_policy" "lambda_policy" {
         # creation on first schedule (the Lambda's
         # try/except ResourceNotFoundException → CreateScheduleGroup
         # → retry path).
+        #
+        # `scheduler:DeleteScheduleGroup` + `scheduler:DeleteSchedule`
+        # are the FALLBACK cleanup path: the watchdog's teardown
+        # deletes the group when the run ends, but the Lambda also
+        # sweeps a leftover group at the start of a chain so a run
+        # whose predecessor died without a teardown can still start
+        # (a surviving group means the first CreateSchedule collides
+        # with the previous run's fired iter-0 → ConflictException →
+        # no chain → the token expires 1 h after the launch mint).
+        # DeleteSchedule is required alongside DeleteScheduleGroup
+        # because the group delete cascades over the child schedules.
         Resource = [
           "arn:aws:scheduler:*:*:schedule-group/blitzlog-*-token-refresh-*",
           "arn:aws:scheduler:*:*:schedule/blitzlog-*-token-refresh-*/*",
@@ -243,14 +255,37 @@ resource "aws_iam_role_policy" "ec2_agent_policy" {
         # resources are scoped to the per-issue namespace so a
         # compromised EC2 role can only delete its own chain state,
         # not another instance's.
+        #
+        # `scheduler:DeleteSchedule` on the CHILD schedules is
+        # required in addition to `scheduler:DeleteScheduleGroup`
+        # on the group: EventBridge Scheduler authorises the group
+        # delete against each schedule it cascades over. With only
+        # the group grant, every teardown fails with:
+        #
+        #   not authorized to perform: scheduler:DeleteSchedule on
+        #   resource: arn:aws:scheduler:<region>:<acct>:
+        #   schedule/<group>/* because no identity-based policy
+        #   allows the scheduler:DeleteSchedule action
+        #
+        # The group then survives the run, its fired one-time
+        # schedules linger (EventBridge Scheduler does not delete a
+        # one-time `at()` schedule after it fires), and the NEXT
+        # run for the same (env, repo, issue) fails its first
+        # CreateSchedule with ConflictException — so the refresh
+        # chain never starts and the agent's token dies 1 h after
+        # the launch-time mint. That is the regression this grant
+        # fixes (see the `ConflictException` symptom in
+        # docs/WATCHDOG_TOKEN_REFRESH.md).
         Effect = "Allow"
         Action = [
           "ssm:DeleteParameter",
           "scheduler:DeleteScheduleGroup",
+          "scheduler:DeleteSchedule",
         ]
         Resource = [
           "arn:aws:ssm:*:*:parameter/blitzlog/${var.environment}/ephemeral/gh/*",
           "arn:aws:scheduler:*:*:schedule-group/blitzlog-*-token-refresh-*",
+          "arn:aws:scheduler:*:*:schedule/blitzlog-*-token-refresh-*/*",
         ]
       },
       {

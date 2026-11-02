@@ -72,7 +72,14 @@ EnvironmentFile=/etc/blitzlog.env
 ExecStart=/usr/local/bin/watchdog.sh
 Restart=no
 TimeoutStopSec=7200
-StandardOutput=append:/var/log/backend-bootstrap.log
+# stdout goes to the journal, NOT to the log file: the watchdog's own
+# `log()` already appends every message to /var/log/backend-bootstrap.log
+# (`printf ... | tee -a "$LOG_FILE"`). With stdout ALSO appended to the
+# same file, every single line landed there twice — the instance log
+# showed each message in duplicate. stderr still appends to the file,
+# so anything the watchdog writes outside `log()` is still captured.
+# The journal keeps the full stdout stream either way.
+StandardOutput=journal
 StandardError=append:/var/log/backend-bootstrap.log
 
 [Install]

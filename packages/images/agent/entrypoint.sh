@@ -45,6 +45,40 @@ log() {
 
 MODE="${MODE:-autonomous}"
 
+# --- Project-side bootstrap: mise ---
+#
+# The mise bootstrap has two failure modes that only show up at runtime:
+#
+#   1. Docker's `--tmpfs` mounts a tmpfs with `noexec` unless the
+#      option string says otherwise, and mise's toolchain lives on the
+#      HOME tmpfs. With `noexec` in place the first `mise` call dies
+#      with
+#
+#        /usr/local/bin/entrypoint.sh: 653: mise: Permission denied
+#
+#      (dash exits 126) — the container died before the agent started.
+#      The tmpfs mounts now carry `exec` (see
+#      packages/images/agent/container-hardening.env).
+#
+#   2. mise's own install script only makes the binary executable when
+#      it runs as root:
+#
+#        if [ "$(id -u)" = "0" ]; then chown 0:0 mise/bin/mise; chmod 755 mise/bin/mise; fi
+#
+# install-mise.sh does the chmod itself and then verifies that the
+# binary actually runs, so a broken mise fails with a diagnosable
+# message instead of an exec error three lines later.
+MISE_BIN=""
+
+install_mise() {
+    mise_path="$(/usr/local/bin/install-mise.sh)" || {
+        log "ERROR: mise is not usable — the project toolchain cannot be installed (see the container log for the reason)."
+        exit 1
+    }
+    MISE_BIN="$mise_path"
+    export PATH="$(dirname "$MISE_BIN"):$PATH"
+}
+
 shutdown() {
     log "Caught signal; graceful shutdown"
     if [ -n "${SHIM_PID:-}" ]; then
@@ -60,7 +94,25 @@ shutdown() {
 }
 trap shutdown TERM INT
 
-# --- 1. Configure git credentials (mounted from host) ---
+# --- 1. Configure git credentials ---
+#
+# Issue #164: the credential files are owned by the HOST and mounted
+# READ-ONLY into the container; the host's token-refresh poll loop
+# (issue #145) rewrites them there. The container must not be able to
+# tamper with the host's copy, so in the production path we only
+# POINT git and gh at the mounted files — we never write them.
+#
+# The local/dev path has no host-side credential mount: there the
+# token arrives via $GITHUB_TOKEN and the entrypoint materialises the
+# two files itself, inside its own writable HOME.
+GIT_CRED_FILE="$HOME/.git-credentials.d/github"
+GH_HOSTS_FILE="$HOME/.config/gh/hosts.yml"
+
+# gh reads its config from $GH_CONFIG_DIR (default $HOME/.config/gh).
+# Set it explicitly so the read-only host mount is found even if HOME
+# is overridden by the caller.
+export GH_CONFIG_DIR="$HOME/.config/gh"
+
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     # Capture into a local var so we can unset the env var before
     # piping the token to `gh auth login --with-token`. gh refuses
@@ -69,11 +121,15 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     # stored credentials (not env), so leaving the env vars unset is
     # safe — no code downstream reads GITHUB_TOKEN from env.
     local_token="$GITHUB_TOKEN"
-    mkdir -p /root/.git-credentials.d
-    printf 'https://x-access-token:%s@github.com\n' "$local_token" \
-        > /root/.git-credentials.d/github
-    chmod 600 /root/.git-credentials.d/github
-    git config --global credential.helper 'store --file /root/.git-credentials.d/github'
+    # Only materialise the credentials if the target is NOT already a
+    # read-only host mount. A read-only bind mount fails the `-w` test;
+    # a path that does not exist yet is ours to create.
+    if [ ! -d "$HOME/.git-credentials.d" ] || [ -w "$HOME/.git-credentials.d" ]; then
+        mkdir -p "$HOME/.git-credentials.d"
+        printf 'https://x-access-token:%s@github.com\n' "$local_token" \
+            > "$GIT_CRED_FILE"
+        chmod 600 "$GIT_CRED_FILE"
+    fi
     # Authenticate gh CLI for `gh issue view` etc. gh does not support
     # unauthenticated access for any repo (public or private), so
     # without this it exits non-zero and aborts the entrypoint under
@@ -82,19 +138,52 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     # via stdin to keep it out of argv. We don't restore the env vars —
     # git uses the credential helper, gh reads from its stored
     # credentials.
-    unset GITHUB_TOKEN GH_TOKEN
-    printf '%s\n' "$local_token" | gh auth login --with-token --hostname github.com >/dev/null
+    #
+    # If the host already mounted a hosts.yml, gh is authenticated by
+    # it and we must NOT try to write to the read-only mount.
+    if [ ! -f "$GH_HOSTS_FILE" ]; then
+        unset GITHUB_TOKEN GH_TOKEN
+        printf '%s\n' "$local_token" | gh auth login --with-token --hostname github.com >/dev/null
+    fi
+fi
+
+# Point git at the credential file. In production the file is the
+# host's read-only mount; in the dev path it is the file we just wrote.
+#
+# We deliberately do NOT use `git credential-store` here. That helper is
+# not read-only in practice: after a successful authentication git
+# calls the helper's `store` operation, and credential-store REWRITES
+# the file under a lock. On the host's read-only mount that fails with
+#
+#   fatal: unable to get credential storage lock in 1000 ms: Read-only file system
+#
+# git ignores a helper's exit status, so the clone still succeeds — but
+# every run logs a spurious "fatal:" that reads like a failed clone.
+#
+# The container ships a get-only helper instead
+# (/usr/local/bin/blitzlog-credential-helper): it reads the host's file
+# on every call — the host's token-refresh poll loop rewrites that file
+# in place, so the token is always current — and never writes it.
+if [ -f "$GIT_CRED_FILE" ]; then
+    git config --global credential.helper \
+        '!/usr/local/bin/blitzlog-credential-helper'
 fi
 if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
     git config --global user.name "${GIT_AUTHOR_NAME}"
     git config --global user.email "${GIT_AUTHOR_EMAIL:-}"
 fi
 
-# --- 2. (plugins/tools baked into the image by the Dockerfile) ---
-# opencode plugins (idle_watchdog, periodic_autosave, session_archive,
-# spot_watchdog) and tools (shutdown) are placed directly into
-# /root/.config/opencode/{plugins,tools}/ by the Dockerfile. No runtime
-# copy needed.
+# --- 2. Install the baked opencode plugins/tools/lib into the HOME ---
+# Issue #164: the plugins (idle_watchdog, periodic_autosave,
+# session_archive, spot_watchdog), the tools (shutdown) and the shared
+# lib are baked into /opt/blitzlog/opencode by the Dockerfile — NOT
+# under $HOME, because the container's HOME is a tmpfs and would
+# shadow them. install-opencode-plugins.sh copies them into
+# $HOME/.config/opencode now, before opencode starts, so they are
+# present from the first startup exactly as before (no network, no
+# runtime npm install). The image's smoke test calls the same script,
+# so the two can never disagree about what "installed" means.
+/usr/local/bin/install-opencode-plugins.sh
 
 # --- 3. Derive model + provider config; write opencode.jsonc/json ---
 # OPENCODE_MODEL is the slash-form "provider/model_id" string (e.g.
@@ -134,22 +223,48 @@ local_llm_model="${LOCAL_LLM_MODEL:-}"
 local_llm_api_key="${LOCAL_LLM_API_KEY:-}"
 local_llm_fallback="${LOCAL_LLM_FALLBACK:-closed}"
 
-# Agent block for the build agent. In assisted mode we add a
-# comma + prompt field hinting at the shutdown tool (so the bot
-# knows it can ask for shutdown). In autonomous mode the prompt
-# is omitted to keep the config minimal. Mirrors the lambda's
-# _write_opencode_config_script in lambda/scripts/_common.py:455.
+# Agent block for the build agent.
+#
+# The prompt field carries the agent's system prompt. Two parts:
+#
+#   1. The GitHub-auth facts. The credential in this container is a
+#      GitHub App INSTALLATION token, not a user token. It has no user
+#      identity, so `gh api /user` answers 403 "Resource not
+#      accessible by integration" and `gh auth status` shows an empty
+#      account — both are expected, and an agent that reads them as a
+#      broken credential spends its run debugging a non-problem. (On
+#      2026-10-27 an agent burned 40 minutes chasing exactly that,
+#      and then misdiagnosed a genuinely broken git as "the app lost
+#      its contents permission" and proposed re-granting permissions
+#      the installation already had.) The same paragraph also tells
+#      the agent what "remote: Repository not found" means on a
+#      private repo — it is GitHub's way of saying "this token cannot
+#      read this repo", NOT "the repo is gone" and NOT "the token
+#      expired" (an expired token fails with 401 Bad credentials).
+#
+#   2. The shutdown-tool hint, assisted mode only (the bot needs to
+#      know it can ask for shutdown). In autonomous mode the prompt
+#      is omitted to keep the config minimal.
+#
+# Mirrors the lambda's _write_opencode_config_script in
+# lambda/scripts/_common.py:455.
+#
+# The prompt text is interpolated into a double-quoted shell string
+# below, so it must not contain " $ or a backtick.
+github_auth_prompt='Your GitHub credential is a GitHub App installation token (ghs_...), scoped to the target repository only. It has no user identity, so the gh api /user endpoint returns HTTP 403 (Resource not accessible by integration) and gh auth status shows an empty account. Both are expected and do NOT mean the credential is broken. To check access, use gh api repos/OWNER/REPO for metadata and git ls-remote for contents. On a private repository, git reports remote: Repository not found when the token cannot read it; that is not the repository being deleted, and an expired token fails with 401 Bad credentials instead.'
+
 if [ "${MODE:-autonomous}" = "assisted" ]; then
     agent_prompt=',
-      "prompt": "You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
+      "prompt": "'"$github_auth_prompt"' You have a shutdown tool available. Use it when the user asks to shut down or terminate the instance."'
 else
-    agent_prompt=""
+    agent_prompt=',
+      "prompt": "'"$github_auth_prompt"'"'
 fi
 
-mkdir -p /root/.config/opencode
+mkdir -p "$HOME/.config/opencode"
 if [ -n "${OPENCODE_CONFIG_JSON:-}" ]; then
     # Lambda pre-rendered the config (production path) — use verbatim
-    printf '%s' "$OPENCODE_CONFIG_JSON" > /root/.config/opencode/opencode.jsonc
+    printf '%s' "$OPENCODE_CONFIG_JSON" > "$HOME/.config/opencode/opencode.jsonc"
 else
     # Fallback: render from env vars (local test path). Mirrors the
     # lambda's _write_opencode_config_script structure (default_agent,
@@ -166,7 +281,7 @@ else
         # already escapes the value).
         log "Configuring opencode for local LLM: $local_llm_endpoint (model=$local_llm_model)"
         if [ -n "$local_llm_api_key" ]; then
-            cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+            cat > "$HOME/.config/opencode/opencode.jsonc" <<OPENCODE_CFG
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "${local_llm_model}",
@@ -193,7 +308,7 @@ else
 }
 OPENCODE_CFG
         else
-            cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+            cat > "$HOME/.config/opencode/opencode.jsonc" <<OPENCODE_CFG
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "${local_llm_model}",
@@ -219,9 +334,9 @@ OPENCODE_CFG
 }
 OPENCODE_CFG
         fi
-        cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+        cp "$HOME/.config/opencode/opencode.jsonc" "$HOME/.config/opencode/opencode.json"
     elif [ -n "$opencode_provider" ] && [ -n "$opencode_api_key" ]; then
-        cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+        cat > "$HOME/.config/opencode/opencode.jsonc" <<OPENCODE_CFG
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "${opencode_model}",
@@ -243,9 +358,9 @@ OPENCODE_CFG
   }
 }
 OPENCODE_CFG
-        cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+        cp "$HOME/.config/opencode/opencode.jsonc" "$HOME/.config/opencode/opencode.json"
     elif [ -n "$opencode_model" ]; then
-        cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+        cat > "$HOME/.config/opencode/opencode.jsonc" <<OPENCODE_CFG
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "${opencode_model}",
@@ -260,7 +375,7 @@ OPENCODE_CFG
   }
 }
 OPENCODE_CFG
-        cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+        cp "$HOME/.config/opencode/opencode.jsonc" "$HOME/.config/opencode/opencode.json"
     fi
     # Mirrors the local-LLM "Configuring opencode for local LLM: ..."
     # log on line 167 so the cloud-success path has the same operator
@@ -272,7 +387,7 @@ OPENCODE_CFG
     # with "bad substitution" under /bin/sh on the python:3.12-slim
     # runtime image (where /bin/sh -> dash). See PR #89.
     api_key_prefix=$(printf '%.8s' "${OPENCODE_API_KEY:-}")
-    log "Wrote /root/.config/opencode/opencode.json: model=$opencode_model, provider=$opencode_provider, api_key_prefix=${api_key_prefix}..."
+    log "Wrote $HOME/.config/opencode/opencode.json: model=$opencode_model, provider=$opencode_provider, api_key_prefix=${api_key_prefix}..."
 fi
 
 # --- 3.5 (optional): join Tailscale Tailnet if TAILSCALE_AUTH_KEY is set ---
@@ -293,11 +408,9 @@ fi
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     log "TAILSCALE_AUTH_KEY set; starting tailscaled and joining Tailnet..."
     # Issue #164: tailscaled's state file and control socket live under
-    # /tmp, which is a tmpfs. The container's rootfs is read-only and
-    # the daemon runs as an unprivileged user, so it can neither write
-    # its state under /var nor create a control socket under /var/run.
-    # Both the daemon and the `tailscale` CLI are pointed at the same
-    # socket.
+    # /tmp, which is a tmpfs — so the daemon's state never lands in the
+    # container's writable layer. Both the daemon and the `tailscale`
+    # CLI are pointed at the same socket.
     TAILSCALE_DIR="/tmp/tailscale"
     TAILSCALE_SOCKET="$TAILSCALE_DIR/tailscaled.sock"
     mkdir -p "$TAILSCALE_DIR"
@@ -419,7 +532,7 @@ for u in data:
             if [ "$has_cloud_key" = "true" ]; then
                 log "User chose cloud fallback; switching inference to cloud"
                 # Re-emit the cloud opencode.json and restart opencode serve
-                cat > /root/.config/opencode/opencode.jsonc <<OPENCODE_CFG
+                cat > "$HOME/.config/opencode/opencode.jsonc" <<OPENCODE_CFG
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "${opencode_model}",
@@ -437,7 +550,7 @@ for u in data:
   }
 }
 OPENCODE_CFG
-                cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json
+                cp "$HOME/.config/opencode/opencode.jsonc" "$HOME/.config/opencode/opencode.json"
                 # Restart opencode serve (assisted mode only)
                 if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
                     kill "$SERVE_PID" 2>/dev/null || true
@@ -523,12 +636,11 @@ if [ "$MODE" = "autonomous" ]; then
 
     # Project-side bootstrap (mirrors the current _install_toolchain_script)
     if [ -f mise.toml ] || [ -f .tool-versions ]; then
-        wget -q -O - https://mise.run | sh || curl -fsSL https://mise.run | sh
-        export PATH="/root/.local/bin:$PATH"
-        mise trust 2>/dev/null || true
-        mise install -y
-        if mise tasks --name-only 2>/dev/null | grep -qx bootstrap; then
-            mise run bootstrap
+        install_mise
+        "$MISE_BIN" trust 2>/dev/null || true
+        "$MISE_BIN" install -y
+        if "$MISE_BIN" tasks --name-only 2>/dev/null | grep -qx bootstrap; then
+            "$MISE_BIN" run bootstrap
         fi
     fi
 
@@ -590,7 +702,7 @@ else
     log "Assisted mode: cloning ${REPO:-<unknown-repo>}"
     # Bot config dir holds settings.json (auto-select below) and .env
     # (bot startup below). Both write paths need the dir to exist.
-    mkdir -p /root/.config/opencode-telegram-bot
+    mkdir -p "$HOME/.config/opencode-telegram-bot"
     cd /workspace
     if [ ! -d repo/.git ]; then
         git clone "https://github.com/${REPO}.git" repo
@@ -605,12 +717,11 @@ else
     # bootstrap). mise installs the toolchain pinned in mise.toml so
     # /workspace/repo can be developed with the same tooling locally.
     if [ -f mise.toml ] || [ -f .tool-versions ]; then
-        wget -q -O - https://mise.run | sh || curl -fsSL https://mise.run | sh
-        export PATH="/root/.local/bin:$PATH"
-        mise trust 2>/dev/null || true
-        mise install -y
-        if mise tasks --name-only 2>/dev/null | grep -qx bootstrap; then
-            mise run bootstrap
+        install_mise
+        "$MISE_BIN" trust 2>/dev/null || true
+        "$MISE_BIN" install -y
+        if "$MISE_BIN" tasks --name-only 2>/dev/null | grep -qx bootstrap; then
+            "$MISE_BIN" run bootstrap
         fi
     fi
 
@@ -668,7 +779,7 @@ else
     # Auto-select project (and session if resuming) in the bot's settings.
     # Matches main's pre-docker-refactor flow: the bootstrap queried
     # opencode serve at /project for a project whose worktree matches
-    # /workspace, and wrote /root/.config/opencode-telegram-bot/settings.json
+    # /workspace, and wrote $HOME/.config/opencode-telegram-bot/settings.json
     # so the bot pre-selects the project when it starts (no /projects
     # prompt required from the user).
     log "Auto-selecting project and session in bot settings..."
@@ -695,24 +806,24 @@ d = json.load(sys.stdin)
 print(json.dumps({'id': d['id'], 'title': d.get('title',''), 'directory': d.get('directory','')}))
 " 2>/dev/null || echo "")
                 if [ -n "$SESSION_TITLE" ]; then
-                    cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+                    cat > "$HOME/.config/opencode-telegram-bot/settings.json" <<SETTINGS_EOF
 {"currentProject": $PROJECT_JSON, "currentSession": $SESSION_TITLE}
 SETTINGS_EOF
                     log "Project and session pre-selected (resumed)"
                 else
-                    cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+                    cat > "$HOME/.config/opencode-telegram-bot/settings.json" <<SETTINGS_EOF
 {"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
                     log "Project pre-selected (new session); session resume unavailable"
                 fi
             else
-                cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+                cat > "$HOME/.config/opencode-telegram-bot/settings.json" <<SETTINGS_EOF
 {"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
                 log "Project pre-selected (new session); resume session ID missing"
             fi
         else
-            cat > /root/.config/opencode-telegram-bot/settings.json <<SETTINGS_EOF
+            cat > "$HOME/.config/opencode-telegram-bot/settings.json" <<SETTINGS_EOF
 {"currentProject": $PROJECT_JSON}
 SETTINGS_EOF
             log "Project pre-selected (new session)"
@@ -731,7 +842,7 @@ SETTINGS_EOF
     # startup validation reads this file directly via dotenv.parse(), so
     # we must seed it before launching — setsid env vars alone are NOT
     # enough to skip the setup wizard.
-    bot_env_dir="/root/.config/opencode-telegram-bot"
+    bot_env_dir="$HOME/.config/opencode-telegram-bot"
     mkdir -p "$bot_env_dir"
     # When LOCAL_LLM_ENDPOINT is set, the bot should ask opencode for the
     # local provider/model — not whatever OPENCODE_MODEL says (which is

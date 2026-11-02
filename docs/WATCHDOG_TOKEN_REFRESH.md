@@ -15,13 +15,13 @@ smoke test wrapped in `scripts/test-dev-spot.sh` (Level 3, ~10 min,
 
 ## Self-perpetuation status (current)
 
-**Healthy** as of PR #154. The chain mints every 50 min as designed;
-the first auto-mint lands at `instance_launch + 50 min`, and the
+**Healthy on dev** as of PR #154. The chain mints every 30 min as designed;
+the first auto-mint lands at `instance_launch + 30 min`, and the
 bind-mount picks it up within the next 5-min poll. A 60-min
 dev-instance monitor will see:
 
-- `Ver=1` for the first ~50 min
-- `Ver=2` with a fresh `iat` at the +50-min mark
+- `Ver=1` for the first ~30 min
+- `Ver=2` with a fresh `iat` at the +30-min mark
 - `match=True` between SSM and bind mount on every iteration
 - The poll-loop log fires "Token change detected" exactly once
   (on the genuine rotation), not on every 5-min tick
@@ -30,16 +30,118 @@ The `iam:PassRole` regression that killed the chain at iteration 0
 on the dev instance is fixed in PR #154 commit `b8152e2` and
 pinned by `tests/test_lambda_iam.py`.
 
+### Why 30 min, and not 50
+
+GitHub caps installation tokens at **1 h** whatever the Lambda asks
+for. The chain mints the next token `TOKEN_REFRESH_INTERVAL_SECONDS`
+after the current one, so the token in SSM has
+`(60 min - age)` of life left at any moment. At a 50-min interval
+that was only **10 min** of headroom — and 10 min is not enough for
+one specific failure (see "a token GitHub has not finished granting"
+below), during which the agent has no usable credential at all.
+
+At 30 min the published token **always** has at least 30 min of life
+left. That is what lets the poll loop hold a replacement back until
+it is usable while the previous one keeps the agent's git working.
+
+### Prod was never verified — and on 2026-10-26 it was not working
+
+Everything above is a **dev** observation. The nightly
+`integration-test.yml` job, `scripts/test-dev-spot.sh` and the
+"60-min dev-instance monitor" all run against the dev account; the prod
+account's chain has never been exercised end to end.
+
+On 2026-10-26 a **prod** instance (issue #164) showed the chain dead:
+
+- the token in SSM was still the launch-time mint (`iat 11:16:37Z`,
+  `exp 12:16:37Z`), and the refreshes scheduled for 12:06 and 12:56
+  never delivered a new one;
+- the poll loop dutifully rewrote the credential files every 5 minutes
+  with that same expired value.
+
+Two separate defects hid it:
+
+1. **The poll loop reported a change on every tick.** The watchdog's
+   `log()` writes to stdout, and the loop captured the helper's stdout
+   into its "last seen token" variable — so the captured value was
+   `"<log line>\n<token>"`, which never equals the token. Every tick
+   therefore looked like a rotation, and the log line that is supposed
+   to prove the chain is alive was pure noise. A dead chain and a
+   healthy one were indistinguishable in the instance log. Fixed by
+   tracking the token in a variable instead of capturing stdout, and
+   by logging the token's own `iat` / `exp` so an expired token says
+   so out loud.
+2. **The prod IAM role may predate the `iam:PassRole` fix.** If prod's
+   last terraform apply predates PR #154, the very first
+   `CreateSchedule` fails with `AccessDeniedException` and the chain
+   dies at iteration 0 — the same fingerprint as the dev regression
+   above, and invisible unless you read the Lambda's CloudWatch log.
+
+**To check prod's chain**, read the prod handler's CloudWatch log
+(`/aws/lambda/blitzlog-prod-handler`) around the launch time:
+
+| Log line | Meaning |
+|---|---|
+| `Failed to schedule initial token refresh …` | `CreateSchedule` was denied — the chain never started. Check the Lambda's `iam:PassRole` grant on the scheduler role. |
+| `Failed to schedule initial token refresh … ConflictException: Schedule refresh-issue-<N>-iter-0 already exists` | A leftover schedule from a **previous** run is still in the group. The watchdog's teardown is supposed to delete the group; it didn't. Check the EC2 role's `scheduler:DeleteSchedule` grant (see below) and look for `WARNING: failed to delete schedule group` in the instance's `/var/log/backend-bootstrap.log`. |
+| `Scheduling refresh event: … fire_at=…` and then silence | The schedule was created but the event never fired. |
+| `Refresh event received: issue=… iteration=…` | The chain ran. If it is followed by `mint failed` / `ssm put failed`, the failure is in the mint or the SSM write, not the schedule. |
+| `Instance <id> is no longer alive — stopping the token-refresh chain` | The chain outlived its run (the teardown's group delete failed). The chain stopped on purpose; no token was written. |
+| `the new token is not yet usable for git (probe=404); keeping the previous token until it is usable` | The poll loop found a new token in SSM that GitHub has not finished granting repo access for. It is holding the token back — the agent keeps the previous (still valid) one. See "a token GitHub has not finished granting" below. |
+| `The token is now usable for git; rewriting credential files` | The held-back token became usable and was swapped in. Normal. |
+| `git` says `remote: Repository not found` on a **private** repo | GitHub's 404 for "this token cannot read this repo". It is NOT the repo being deleted, and NOT an expired token (that fails with 401 Bad credentials). |
+
+### a token GitHub has not finished granting
+
+On 2026-10-27 an agent on `great-wall-connect/blitzlog-example-dev`
+lost `git` for ~15 minutes. The diagnosis was *not* what it looked
+like:
+
+- The token in play (jti `663d6b1c…`, `iat 07:35:53Z`) was the
+  current one in SSM, and the credential files had not been touched
+  since `07:36:03` — byte-identical credentials went from 404 to 200.
+- The GitHub App installation was healthy: `contents: write`,
+  `pull_requests: write`, `issues: write`, `repository_selection:
+  all`, not suspended. Nothing had been re-granted.
+- `permissions: all-false` and `x-accepted-github-permissions:
+  metadata=read` look identical on a **working** token — they are
+  not evidence of a broken grant.
+- The chain itself was fine, and the poll loop had swapped the token
+  in 12 min before the failure.
+
+What had happened: GitHub handed out a token whose per-repository
+`contents` grant had not fully materialised. It affected **one mint
+of five** and cleared itself ~20 min later, with no human action.
+The agent's own conclusion — "the app lost its contents access" —
+was wrong, and the fix it proposed (re-granting permissions the
+installation already had) would have been a no-op.
+
+The mitigation is the poll loop's verification: a new token is
+probed against the git smart-HTTP endpoint before it is swapped in,
+and the previous (still valid) token is held in place until the new
+one works. The 30-min rotation interval is what makes that
+possible — see "Why 30 min, and not 50".
+
+### `gh api /user` returns 403 — that is expected
+
+The credential is a GitHub App **installation** token. It has no user
+identity, so `GET /user` answers 403 "Resource not accessible by
+integration", and `gh auth status` shows an empty account. Neither
+means the credential is broken. To check access, use
+`gh api repos/<owner>/<repo>` (metadata) and `git ls-remote`
+(contents). The agent's system prompt says this, because an agent
+that does not know it burns its run on it.
+
 ### Instance teardown: one-call group delete
 
 The watchdog's post-container cleanup block cascade-deletes every
 chain event for the instance in a single AWS API call. The flow:
 
-1. `aws ssm delete-parameter` on the per-issue token
-   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
-2. `aws scheduler delete-schedule-group` on the per-issue group
+1. `aws scheduler delete-schedule-group` on the per-issue group
    (`blitzlog-<env>-token-refresh-<sha256(owner|repo|issue)[:16]>`) —
    cascade-deletes all 10 chain events for this instance
+2. `aws ssm delete-parameter` on the per-issue token
+   (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`)
 3. `aws ec2 terminate-instances`
 
 The per-issue group name is hashed from
@@ -48,17 +150,57 @@ instances in the same env never share a group. One instance's
 cleanup cannot nuke another instance's chain. The per-issue scope
 also matches the per-issue SSM namespace shape.
 
-The order matters: steps 1 and 2 run **before** step 3. Once
-`terminate-instances` is called, the instance is shutting down and
-subsequent AWS calls from this script may fail. (The dev-spot
+**The order matters twice.** Steps 1 and 2 both run **before** step 3:
+once `terminate-instances` is called, the instance is shutting down
+and subsequent AWS calls from this script may fail. (The dev-spot
 test's cleanup function at `scripts/test-dev-spot.sh` doesn't have
 this constraint because it runs **outside** the instance; the
-watchdog runs **inside** it.)
+watchdog runs **inside** it.) And step 1 precedes step 2 because the
+chain *writes* the token into SSM — deleting the parameter first
+leaves a window in which a firing iteration re-creates it, leaving a
+zombie token that outlives the run. Deleting the group first stops
+the chain, so the token delete is the last word.
+
+#### The group delete needs two IAM grants
+
+`scheduler:DeleteScheduleGroup` on the group is **not** enough.
+EventBridge Scheduler authorises the group delete against every
+schedule it cascades over, so the caller also needs
+`scheduler:DeleteSchedule` on the child schedules:
+
+```
+not authorized to perform: scheduler:DeleteSchedule on resource:
+arn:aws:scheduler:<region>:<acct>:schedule/<group>/* because no
+identity-based policy allows the scheduler:DeleteSchedule action
+```
+
+Without the second grant every teardown fails, the group survives
+the run, and the next run for the same `(env, repo, issue)` is
+doomed. That is not a cosmetic problem: EventBridge Scheduler does
+**not** delete a one-time `at()` schedule after it fires, so the
+previous run's `refresh-issue-<N>-iter-0` lingers in the group and
+the next run's first `CreateSchedule` fails with
+`ConflictException`. The chain then never starts and the agent's
+token dies 1 h after the launch-time mint.
+
+The EC2 agent role therefore carries **both** grants
+(`infra/aws/modules/core/iam.tf`), scoped to the per-issue group
+and its schedules.
+
+#### Fallback: the Lambda sweeps a leftover group
+
+The teardown is the primary cleanup path. The Lambda also deletes a
+leftover group when a chain starts (`_sweep_stale_schedule_group`),
+so a run whose predecessor died without a teardown can still start.
+The sweep is best-effort: a failure is logged and the chain starts
+anyway.
 
 Pinned by `tests/test_watchdog_credential_poll_e2e.py`:
 `test_watchdog_teardown_deletes_ssm_token`,
 `test_watchdog_teardown_deletes_per_issue_schedule_group`,
-`test_watchdog_teardown_aws_state_runs_before_terminate_instances`.
+`test_watchdog_teardown_aws_state_runs_before_terminate_instances`,
+`test_watchdog_teardown_deletes_the_group_before_the_ssm_token`,
+`test_watchdog_teardown_reports_a_failed_group_delete`.
 
 ## Testing levels
 
@@ -132,8 +274,8 @@ watchdog.
 
 ```
        ┌──────────────────────────────┐
-       │  EventBridge Scheduler       │  ── 10 events, 50 min apart
-       │  (chain of 10, at(<t+50m>))  │
+       │  EventBridge Scheduler       │  ── 10 events, 30 min apart
+       │  (chain of 10, at(<t+30m>))  │
        └──────────┬───────────────────┘
                   │ action == "refresh"
                   ▼
@@ -171,6 +313,43 @@ watchdog.
        └──────────────────────────────┘
 ```
 
+Since issue #164 the two host-side files are mounted **read-only** into
+the container (at `$HOME/.git-credentials.d/github` and
+`$HOME/.config/gh/hosts.yml`): the host is the only writer, so the
+agent can read the refreshed token but cannot tamper with the host's
+copy of it. The token is also no longer passed to the container as an
+env var. The mechanism itself is otherwise unchanged.
+
+### The poll loop verifies a new token before swapping it in
+
+Between "SSM has a new value" and "the agent's git uses it" there is
+now a verification step. The poll loop probes the new token against
+the git smart-HTTP endpoint — the same request `git` itself makes:
+
+```
+GET https://github.com/<owner>/<repo>.git/info/refs?service=git-upload-pack
+Authorization: Basic base64("x-access-token:<token>")
+```
+
+A `200` means git can read the repo, and the token is written into
+the credential files. Anything else (404 = the token cannot read the
+repo, 401 = bad credentials, 000 = network failure) means the token
+is **not** usable yet: the loop keeps the PREVIOUS token in place
+and re-probes on the next tick, so the agent never holds a
+credential that cannot push.
+
+This matters because GitHub sometimes issues a token whose
+per-repository grant has not fully materialised — see "a token
+GitHub has not finished granting" above. The previous token is still
+valid at that point, precisely because the chain mints its
+replacement 30 min before the current one expires.
+
+The repository comes from the `BLITZLOG_TOKEN_REPO` env var, which
+the watchdog exports from `REPO`. When it is unset the loop cannot
+verify anything and says so once, then rotates unverified (the
+pre-verification behaviour) — a host that cannot verify degrades to
+"rotate as before", not "never rotate".
+
 The chain ends naturally at iteration 9 — no 11th event is
 scheduled. If the EC2 instance dies before the chain ends, the
 remaining events fire and no-op against the missing SSM parameter
@@ -183,7 +362,7 @@ remaining events fire and no-op against the missing SSM parameter
 | `lambda/handler.py` | The Lambda's `action == "refresh"` branch + the 10-iter `schedule_next_refresh` chain. |
 | `infra/aws/modules/core/scheduler.tf` | The per-env EventBridge Scheduler IAM role + schedule group. |
 | `infra/aws/packer/scripts-docker-ubuntu/watchdog.sh` | The host-side lifecycle manager. Sources the poll library, starts the loop, SIGTERMs it on container exit. |
-| `infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter` + diff-checked in-place rewrite of the two bind-mounted credential files. |
+| `infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter`, a git-access probe of any new token, and the in-place rewrite of the two bind-mounted credential files. |
 | `tests/test_watchdog_credential_poll.py` | 6 library-in-isolation tests. |
 | `tests/test_watchdog_credential_poll_e2e.py` | 9 tests spanning Level 1 (8) + Level 2 (1). |
 | `tests/conftest.py` | Registers the `integration` marker + auto-skip hook. |
@@ -435,8 +614,8 @@ done
 |---|---|
 | `Token change detected` doesn't fire within `BLITZLOG_TOKEN_POLL_INTERVAL` | Poll loop isn't alive; check `kill -0 $BLITZLOG_TOKEN_POLL_PID`. If dead, the watchdog's post-container cleanup or a `set -e` abort killed it. |
 | File mtime updates but content is wrong | The library's printf format changed; check `_bl_tokenpoll_write_git_creds` / `_bl_tokenpoll_write_gh_hosts_yml` against `git credential fill` / `yaml.safe_load`. |
-| `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare `watchdog.sh:124` (mkdir) vs `watchdog.sh:133` (write) vs `watchdog.sh:254` (bind mount). |
+| `gh auth status` shows the old token in the container | The bind mount source (`/root/gh-config/${INSTANCE_ID}`) and the write path drifted apart. Compare the `mkdir -p "/root/gh-config/${INSTANCE_ID}"` (mkdir) vs the `_bl_tokenpoll_write_gh_hosts_yml` call (write) vs the `-v` bind mount (bind mount) in `watchdog.sh`. |
 | Lambda returns 200 but SSM doesn't change | `get_github_app_token` returned an empty string (likely bad GitHub App credentials). Check `aws ssm get-parameter-history --name /blitzlog/dev/ephemeral/gh/${REPO}/${ISSUE} --region ap-east-1` to see what the Lambda actually wrote. |
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
-| `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation at `watchdog.sh:290-293` is the safety net. |
+| `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation in `watchdog.sh` is the safety net. |
 | Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/aws/bootstrap/`). |

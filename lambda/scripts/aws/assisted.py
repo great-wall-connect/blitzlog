@@ -173,10 +173,11 @@ log "Effective opencode config: model=$OPENCODE_MODEL, provider=${{OPENCODE_MODE
 
 # opencode plugins (idle_watchdog, periodic_autosave, session_archive,
 # spot_watchdog) and tools (shutdown) are now baked into the container
-# image at /root/.config/opencode/{{plugins,tools}}/ by the Dockerfile
-# (packages/images/agent/Dockerfile). The Lambda bootstrap no longer
-# writes them via heredoc — that path was removed when the container
-# took over plugin/tool installation.
+# image at /opt/blitzlog/opencode/{{plugins,tools}}/ by the Dockerfile
+# (packages/images/agent/Dockerfile) and copied into the agent's HOME
+# ($HOME/.config/opencode/) on boot by install-opencode-plugins.sh.
+# The Lambda bootstrap no longer writes them via heredoc — that path was
+# removed when the container took over plugin/tool installation.
 
 log "Starting blitzlog-agent via systemd watchdog..."
 # The watchdog (Packer-baked to /usr/local/bin/watchdog.sh and registered

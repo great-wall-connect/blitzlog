@@ -220,6 +220,107 @@ class TestWatchdogEnvPinning(unittest.TestCase):
             "assisted-only branch instead.",
         )
 
+    def test_container_cannot_reach_the_instance_metadata_service(self):
+        """Issue #165: the EC2 agent role can now read ANY user's
+        per-user inference credential (/blitzlog/users/*/opencode/*).
+        The container runs as root on the docker bridge and could
+        otherwise reach IMDS and assume that role.
+
+        The watchdog drops IMDS traffic from the container's network
+        (the DOCKER-USER chain only sees FORWARDED container traffic,
+        so the host's own IMDS access is unaffected) and sets
+        AWS_EC2_METADATA_DISABLED for the container as a second layer.
+        """
+        self.assertIn(
+            "169.254.169.254",
+            self.watchdog_src,
+            "watchdog.sh must block the instance metadata service from "
+            "the container's network (issue #165)",
+        )
+        self.assertIn(
+            "DOCKER-USER",
+            self.watchdog_src,
+            "the IMDS block must be installed in the DOCKER-USER chain",
+        )
+        self.assertIn(
+            "AWS_EC2_METADATA_DISABLED=true",
+            self.watchdog_src,
+            "the container must be told that the AWS SDK may not use IMDS",
+        )
+
+    def test_imds_block_is_fail_closed(self):
+        """Issue #175: a boundary that fails silently is
+        indistinguishable from one that works.
+
+        The first version of the IMDS rule was best-effort — it logged
+        a warning and started the agent anyway. The gap then went
+        unnoticed for a release cycle: the container could assume the
+        instance role and read SSM parameters it must never see (the
+        GitHub App's private key, the webhook secret). If the rule
+        cannot be installed, the agent must NOT start.
+        """
+        self.assertIn(
+            "block_imds_from_container",
+            self.watchdog_src,
+            "watchdog.sh must gate the container start on the IMDS block "
+            "being in force (issue #175)",
+        )
+        self.assertIn(
+            "refusing to start the agent container",
+            self.watchdog_src,
+            "the watchdog must say loudly that it is refusing to start "
+            "the container when the IMDS block cannot be installed",
+        )
+        # The refusal has to actually gate the start, not just log.
+        self.assertRegex(
+            self.watchdog_src,
+            r"if block_imds_from_container; then\s+run_agent_container",
+            "the container start must be inside the IMDS block's success "
+            "branch (issue #175)",
+        )
+        # ...and the failure path must still run the cleanup (log
+        # upload, bot-lock release, instance terminate), so a refused
+        # start does not strand the instance.
+        self.assertIn(
+            "CONTAINER_EXIT=1",
+            self.watchdog_src,
+            "the refused start must set a non-zero exit code so the "
+            "cleanup path runs and the instance terminates",
+        )
+
+    def test_ami_installs_iptables_explicitly(self):
+        """The block must not depend on iptables arriving as a
+        transitive dependency of docker-ce: if the binary is missing,
+        the watchdog refuses to start the agent."""
+        system_sh = _read(
+            os.path.join(
+                REPO_ROOT, "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
+            )
+        )
+        self.assertRegex(
+            system_sh,
+            r"apt-get install[^\n]*\n(?:[^\n]*\\\n)*[^\n]*\biptables\b",
+            "01-system.sh must install iptables explicitly (issue #175)",
+        )
+
+    def test_model_selection_vars_reach_the_container(self):
+        """Skipped on this branch.
+
+        The model-selection vars (OPENCODE_BASE_URL,
+        OPENCODE_API_KEY_SSM_PARAM) belong to issue #165's three-level
+        model selection, which is not on this branch — the assertion
+        would fail for a feature that does not exist here yet. It is
+        kept out rather than skipped so the file stays honest about
+        what it covers.
+        """
+        self.assertNotIn(
+            "OPENCODE_BASE_URL",
+            self.unconditional,
+            "OPENCODE_BASE_URL is issue #165's model-selection wiring; it "
+            "does not belong on this branch. If you are landing #165, "
+            "restore the assertion that it reaches the container.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

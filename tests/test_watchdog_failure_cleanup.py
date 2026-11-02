@@ -29,8 +29,14 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WATCHDOG = os.path.join(REPO_ROOT, "infra/aws/packer/scripts-docker-ubuntu/watchdog.sh")
 
-# The command that starts the agent container.
-DOCKER_RUN_RE = re.compile(r"^sudo docker run --name blitzlog-agent")
+# The command that starts the agent container. Since issue #175 it
+# lives in a `run_agent_container` function, so the `docker run` line
+# itself is indented — the regex matches on the command, not the
+# column it starts in.
+DOCKER_RUN_RE = re.compile(r"^\s*sudo docker run --name blitzlog-agent")
+
+# The line that INVOKES the container and captures its exit code.
+CONTAINER_START_RE = re.compile(r"^\s*run_agent_container \|\| CONTAINER_EXIT=\$\?")
 
 
 def _read():
@@ -72,15 +78,30 @@ class TestWatchdogRunsCleanupAfterAFailedRun(unittest.TestCase):
             "`sudo docker run --name blitzlog-agent` — update this test"
         )
 
+    def _container_start_line(self):
+        """The line that starts the container and captures its exit code.
+
+        Since issue #175 the `docker run` lives in a
+        `run_agent_container` function, so the exit code is captured at
+        the call site.
+        """
+        for line in self.lines:
+            if CONTAINER_START_RE.match(line):
+                return line
+        self.fail(
+            "the watchdog no longer starts the agent container with "
+            "`run_agent_container || CONTAINER_EXIT=$?` — update this test"
+        )
+
     def test_docker_run_cannot_abort_the_watchdog(self):
         """`set -e` must not kill the watchdog when the container fails."""
-        line = self._docker_run_line()
+        line = self._container_start_line()
         self.assertIn(
             "|| CONTAINER_EXIT=$?",
             line,
-            "the `docker run` invocation must capture the container's exit "
-            "code (`|| CONTAINER_EXIT=$?`). Under `set -euo pipefail` a "
-            "plain failing `docker run` aborts the script before the "
+            "the container start must capture the container's exit code "
+            "(`|| CONTAINER_EXIT=$?`). Under `set -euo pipefail` a plain "
+            "failing `docker run` aborts the script before the "
             "cleanup block, so a failed agent run leaves the instance "
             "running, the bot-pool lock held and the logs un-uploaded.",
         )

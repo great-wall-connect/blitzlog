@@ -63,7 +63,7 @@ class TestEntrypointReadiness(unittest.TestCase):
         fallback restart. Find the log line directly and verify it
         follows some cp + fi in the initial block.
         """
-        i = self.text.index('log "Wrote /root/.config/opencode/opencode.json')
+        i = self.text.index('log "Wrote $HOME/.config/opencode/opencode.json')
         # Sanity: the log must come after at least one `cp` of the
         # .jsonc to .json rename in the initial config-writing block.
         # We require the cp to be at most 1200 chars before the log —
@@ -72,7 +72,8 @@ class TestEntrypointReadiness(unittest.TestCase):
         # further out.
         preceding = self.text[max(0, i - 1200) : i]
         self.assertIn(
-            "cp /root/.config/opencode/opencode.jsonc /root/.config/opencode/opencode.json",
+            'cp "$HOME/.config/opencode/opencode.jsonc" '
+            '"$HOME/.config/opencode/opencode.json"',
             preceding,
             "the 'Wrote opencode.json' log must follow a cp of .jsonc to .json",
         )
@@ -163,6 +164,73 @@ class TestEntrypointReadiness(unittest.TestCase):
         """
         self.assertNotIn("GIT_USER_NAME", self.text)
         self.assertNotIn("GIT_USER_EMAIL", self.text)
+
+    def test_agent_prompt_explains_the_app_installation_token(self):
+        """The agent's system prompt must tell it that its credential
+        is a GitHub App installation token, and what that implies.
+
+        Why: an installation token has no user identity, so
+        `gh api /user` answers 403 "Resource not accessible by
+        integration" and `gh auth status` shows an empty account.
+        An agent that does not know this reads both as a broken
+        credential — on 2026-10-27 one burned 40 minutes of its run
+        debugging them, then misdiagnosed a genuinely broken git as
+        "the app lost its contents permission" and proposed
+        re-granting permissions the installation already had.
+
+        The prompt must also say what "remote: Repository not found"
+        means on a private repo (the token cannot read it — NOT the
+        repo being deleted, and NOT an expired token, which fails with
+        401).
+        """
+        self.assertIn(
+            "github_auth_prompt",
+            self.text,
+            "the entrypoint must define a shared prompt fragment that "
+            "explains the GitHub App installation token to the agent",
+        )
+        i = self.text.index("github_auth_prompt=")
+        prompt = self.text[i : i + 2000]
+        for needle in (
+            "installation token",
+            "gh api /user",
+            "403",
+            "gh auth status",
+            "git ls-remote",
+            "Repository not found",
+            "401",
+        ):
+            self.assertIn(
+                needle,
+                prompt,
+                f"the agent's system prompt must mention {needle!r} — "
+                "without it the agent treats the expected 403 on /user as "
+                "a broken credential and burns its run on it",
+            )
+
+    def test_agent_prompt_is_in_both_modes(self):
+        """The GitHub-auth prompt must reach the agent in BOTH modes.
+
+        Autonomous mode has no Telegram user to explain anything to,
+        so the system prompt is the only channel — and an autonomous
+        agent that misreads the 403 has no way to recover.
+        """
+        i = self.text.index("github_auth_prompt=")
+        block = self.text[i : i + 3000]
+        # Both branches of the mode switch must interpolate the shared
+        # prompt.
+        self.assertIn(
+            'github_auth_prompt"',
+            block,
+            "both the assisted and the autonomous branch must interpolate "
+            "the shared github_auth_prompt",
+        )
+        self.assertGreaterEqual(
+            block.count('github_auth_prompt"'),
+            2,
+            "the shared prompt must be interpolated in BOTH the assisted "
+            "and the autonomous branch",
+        )
 
 
 if __name__ == "__main__":

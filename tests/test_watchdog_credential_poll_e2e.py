@@ -260,11 +260,11 @@ def test_watchdog_poll_loop_start_args_match_container_bind_mounts() -> None:
               initial token to)
       arg 2 — region (the same one IMDS returned at line 59-62)
       arg 3 — git-credential file path (matches `-v
-              /root/.git-credentials.d:/root/.git-credentials.d`
-              at watchdog.sh:253)
+              /root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/
+              .git-credentials.d:ro`)
       arg 4 — gh hosts.yml path on the host (matches `-v
-              /root/gh-config/${INSTANCE_ID}:/root/.config/gh`
-              at watchdog.sh:254)
+              /root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}
+              /.config/gh:ro`)
       arg 5 — poll interval, defaulted via
               ``${BLITZLOG_TOKEN_POLL_INTERVAL:-300}``
 
@@ -298,31 +298,41 @@ def test_watchdog_poll_loop_start_args_match_container_bind_mounts() -> None:
 
 
 def test_watchdog_bind_mount_gh_config_source_matches_write_path() -> None:
-    """The host-side ``-v /root/gh-config/${INSTANCE_ID}:/root/.config/gh``
-    bind mount at ``watchdog.sh:254`` is the bridge between
-    ``_bl_tokenpoll_write_gh_hosts_yml`` (which writes to
-    ``/root/gh-config/${INSTANCE_ID}/hosts.yml``) and the
-    container's ``gh auth login`` (which writes to
-    ``/root/.config/gh/hosts.yml``). If the source ever stops
-    matching the write path, the poll loop will rewrite a file
-    the container never reads.
+    """The host-side ``-v /root/gh-config/${INSTANCE_ID}:
+    ${BLITZLOG_CONTAINER_HOME}/.config/gh`` bind mount is the bridge
+    between ``_bl_tokenpoll_write_gh_hosts_yml`` (which writes to
+    ``/root/gh-config/${INSTANCE_ID}/hosts.yml``) and the container's
+    gh CLI (which reads ``$HOME/.config/gh/hosts.yml``). If the source
+    ever stops matching the write path, the poll loop will rewrite a
+    file the container never reads — and the agent's gh would go stale
+    on every token rotation, which is exactly what this repo exists to
+    exercise.
 
-    The git-credential bind mount at line 253 is the same shape
-    (host path = container path), so it's self-consistent by
-    construction — no drift surface to test.
+    Issue #164 changed the container-side half of the mount: the
+    container no longer runs as root, so its HOME moved to
+    ``$BLITZLOG_CONTAINER_HOME`` (``/home/blitzlog``). The HOST-side
+    half is unchanged — it is still the host's ``/root/gh-config``.
+
+    Issue #176 changed the mount MODE: it is writable again, because
+    gh 2.x migrates its own config on first use and fails against a
+    read-only mount. The git credential store stays read-only — see
+    ``tests/test_container_hardening.py``.
     """
     src = _strip_comments_and_continuations(_read(WATCHDOG))
 
     # The bind mount is the one with `gh-config` in the source
-    # half of the `:`. The container-side `/root/.config/gh`
-    # must be the dest.
-    pattern = r'-v\s*"/root/gh-config/\$\{INSTANCE_ID\}:/root/\.config/gh"'
+    # half of the `:`. The container-side `${BLITZLOG_CONTAINER_HOME}
+    # /.config/gh` must be the dest.
+    pattern = (
+        r'-v\s*"/root/gh-config/\$\{INSTANCE_ID\}'
+        r':\$\{BLITZLOG_CONTAINER_HOME\}/\.config/gh"'
+    )
     assert re.search(pattern, src), (
         "watchdog.sh's gh-config bind mount does not map "
         "/root/gh-config/${INSTANCE_ID} (host) onto "
-        "/root/.config/gh (container). The poll loop's "
-        "rewrites of hosts.yml would land on a path the "
-        "container never reads."
+        "${BLITZLOG_CONTAINER_HOME}/.config/gh (container). "
+        "The poll loop's rewrites of hosts.yml would land on a path "
+        "the container never reads."
     )
 
 
@@ -1021,9 +1031,95 @@ def test_watchdog_teardown_deletes_per_issue_schedule_group() -> None:
     )
 
 
+def test_poll_loop_verifies_a_new_token_before_swapping_it_in() -> None:
+    """The poll loop must PROBE a newly observed token before writing
+    it into the credential files.
+
+    Why: GitHub occasionally issues an installation token whose
+    per-repository grant has not fully materialised. The token
+    authenticates, but the `contents` grant is missing — so git
+    against a private repo fails with "remote: Repository not
+    found", which reads like the repository had been deleted. Swapping
+    such a token in takes the agent's GitHub access away for as long
+    as the grant takes to settle.
+
+    The loop must therefore probe the token (against the same
+    git-upload-pack endpoint `git` itself uses) and keep the PREVIOUS
+    token until the new one works. The previous token is still valid
+    because the chain mints its replacement 30 min before the current
+    one expires.
+    """
+    src = _strip_comments_and_continuations(_read(POLL_LIB))
+    assert "_bl_tokenpoll_token_usable" in src, (
+        "the poll loop must verify a newly observed token before "
+        "swapping it into the credential files"
+    )
+    # The probe must hit the endpoint git itself uses.
+    assert "info/refs?service=git-upload-pack" in src, (
+        "the probe must hit the git smart-HTTP endpoint that `git` uses "
+        "for a fetch, with the same credential shape — a probe of some "
+        "other endpoint would not prove that `git push` works"
+    )
+    # The probe must run BEFORE the credential files are written.
+    probe_pos = src.find("_bl_tokenpoll_token_usable")
+    write_pos = src.find("_bl_tokenpoll_write_git_creds")
+    assert probe_pos > 0, "the probe function is missing"
+    assert write_pos > 0, "the credential-file writer is missing"
+    assert probe_pos < write_pos, (
+        "the probe must run before the credential files are written — "
+        "writing first is what swaps an unusable token into the agent's "
+        "hands"
+    )
+    # And the loop must be able to hold a token back.
+    assert "BLITZLOG_TOKEN_PENDING" in src, (
+        "the loop must remember a token it is holding back so it can "
+        "re-probe it on the next tick and swap it in once it works"
+    )
+
+
+def test_watchdog_exports_the_repo_the_token_is_verified_against() -> None:
+    """The watchdog must tell the poll loop which repository the token
+    has to be able to read.
+
+    Without it the loop cannot verify anything and falls back to
+    rotating unverified — the pre-verification behaviour, which is the
+    safe degradation but not the fix.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    assert "BLITZLOG_TOKEN_REPO" in src, (
+        "watchdog.sh must export BLITZLOG_TOKEN_REPO (the <owner>/<repo> "
+        "the token must be able to read) so the poll loop can verify a "
+        "new token before swapping it in"
+    )
+    assert "BLITZLOG_TOKEN_REPO" in _read(
+        POLL_LIB
+    ), "the poll loop must read BLITZLOG_TOKEN_REPO"
+
+
+def test_poll_loop_does_not_claim_the_chain_is_dead_on_a_near_expiry() -> None:
+    """The poll loop must not say "the chain is not refreshing it"
+    merely because the observed token is close to expiry.
+
+    With the old 50-min rotation interval the token was minted 50 min
+    before it expired and lived 60 min, so the last 10 min of every
+    cycle tripped that warning — it fired twice an hour on a perfectly
+    healthy chain (observed at 06:40:54, 07:31:03, 08:21:10, 08:26:11
+    and 09:16:19 on 2026-10-27) and told the agent and the operator
+    that the chain was dead while it was rotating normally. A warning
+    that is always on is not a warning.
+    """
+    src = _strip_comments_and_continuations(_read(POLL_LIB))
+    assert "the chain is not refreshing it" not in src, (
+        "the poll loop must not claim the chain is dead just because the "
+        "observed token is near expiry — with a 30-min rotation interval "
+        "the published token always has >= 30 min of life left, so a "
+        "near-expiry token really is anomalous, but the loop cannot know "
+        "that the chain is dead; it can only report what the token says"
+    )
+
+
 def test_watchdog_teardown_aws_state_runs_before_terminate_instances() -> None:
-    """Order matters: the SSM delete + schedule-group delete MUST
-    appear before `aws ec2 terminate-instances` in the watchdog
+    """Order matters: the SSM delete + schedule-group delete MUST    appear before `aws ec2 terminate-instances` in the watchdog
     source. Once terminate-instances is called, the instance is
     shutting down and subsequent AWS calls from this script may
     fail. The dev-spot test's cleanup function (scripts/test-dev-spot.sh)
@@ -1047,4 +1143,69 @@ def test_watchdog_teardown_aws_state_runs_before_terminate_instances() -> None:
     assert sched_pos < term_pos, (
         f"schedule-group delete (pos {sched_pos}) must run BEFORE "
         f"terminate-instances (pos {term_pos}); same reason."
+    )
+
+
+def test_watchdog_teardown_deletes_the_group_before_the_ssm_token() -> None:
+    """The schedule-group delete MUST run before the SSM-token delete.
+
+    The refresh chain writes the token into SSM. Deleting the SSM
+    parameter first leaves a window in which a firing chain
+    iteration re-creates it — a zombie token that outlives the run.
+    Deleting the group first stops the chain, so the token delete
+    is the last word.
+    """
+    src = _strip_comments_and_continuations(_read(WATCHDOG))
+    ssm_pos = src.find("aws ssm delete-parameter")
+    sched_pos = src.find("aws scheduler delete-schedule-group")
+    assert ssm_pos > 0, "aws ssm delete-parameter not present in watchdog.sh"
+    assert (
+        sched_pos > 0
+    ), "aws scheduler delete-schedule-group not present in watchdog.sh"
+    assert sched_pos < ssm_pos, (
+        f"schedule-group delete (pos {sched_pos}) must run BEFORE the "
+        f"SSM delete (pos {ssm_pos}); the chain writes the token into "
+        "SSM, so deleting the token first leaves a window in which a "
+        "firing iteration re-creates it."
+    )
+
+
+def test_watchdog_teardown_reports_a_failed_group_delete() -> None:
+    """A failed schedule-group delete must be LOGGED, not discarded.
+
+    The teardown used to swallow the failure with `2>/dev/null || true`.
+    That is exactly what hid a broken IAM grant for ten days: every
+    teardown failed with AccessDenied, the group survived the run,
+    and the next run's first CreateSchedule collided with the
+    leftover iter-0 — so the chain never started and the agent's
+    token died 1 h after the launch-time mint.
+
+    The delete must stay non-fatal (teardown continues to
+    terminate-instances), but its error must reach the watchdog log.
+    """
+    cleaned = _strip_comments_and_continuations(_read(WATCHDOG))
+    command = _group_delete_command(cleaned)
+    assert "2>/dev/null" not in command, (
+        "watchdog.sh's schedule-group delete must not swallow its "
+        "stderr with 2>/dev/null — a failed delete has to reach the "
+        "watchdog log, otherwise a broken IAM grant is invisible."
+    )
+    assert "2>&1" in command, (
+        "watchdog.sh's schedule-group delete must capture the AWS "
+        "error text (2>&1) so the failure can be logged."
+    )
+    assert "failed to delete schedule group" in cleaned, (
+        "watchdog.sh must log a failed schedule-group delete — the "
+        "teardown stays non-fatal, but the operator has to see it."
+    )
+
+
+def _group_delete_command(cleaned_src: str) -> str:
+    """The single (continuation-stripped) line that invokes the
+    schedule-group delete."""
+    for line in cleaned_src.splitlines():
+        if "aws scheduler delete-schedule-group" in line:
+            return line
+    raise AssertionError(
+        "aws scheduler delete-schedule-group not present in watchdog.sh"
     )

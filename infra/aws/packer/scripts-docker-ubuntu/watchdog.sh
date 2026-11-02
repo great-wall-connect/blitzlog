@@ -57,6 +57,7 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FI
 # mise dev tasks can source it under /bin/sh.)
 read -r -a HARDENING_ARGS <<<"$BLITZLOG_HARDENING_FLAGS"
 read -r -a TAILSCALE_ARGS <<<"$BLITZLOG_TAILSCALE_FLAGS"
+read -r -a TMPFS_ARGS <<<"$BLITZLOG_TMPFS_MOUNTS"
 
 # Load the baked agent image
 sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
@@ -69,6 +70,17 @@ sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
 # own exit-detection logic.
 mkdir -p /workspace/.blitzlog
 touch /workspace/.idle
+
+# Issue #164: the container runs as a specific uid
+# (BLITZLOG_CONTAINER_UID, see the hardening contract). A bind mount
+# preserves the SOURCE's ownership, so the host paths the container
+# writes to must be owned by that uid — otherwise the agent's first
+# write fails with EACCES and the entrypoint aborts under `set -e`.
+#
+# The chown covers /workspace itself (the container clones the repo
+# there) plus the pre-created markers above (the container re-touches
+# /workspace/.idle on every start).
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /workspace
 
 # Compute IMDSv2 token + region + instance id (host AWS creds via role)
 TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' \
@@ -132,14 +144,18 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
         --output text \
         --region "$REGION" 2>/dev/null || echo "")
     if [ -n "$GITHUB_TOKEN" ]; then
-        # Issue #145: pre-create the per-instance /root/.config/gh
+        # Issue #145: pre-create the per-instance gh-config
         # bind-mount point so the path exists when docker starts
         # (the bind mount's host side must exist or docker creates
         # it as root and the container's `gh auth login` writes
-        # cannot be made world-readable). The container's
-        # `gh auth login --with-token` (entrypoint.sh:85-86) still
-        # does the initial write here — the watchdog's poll loop
-        # overwrites this file on every subsequent refresh.
+        # cannot be made world-readable).
+        #
+        # Issue #164: the HOST is now the only writer of these two
+        # files. They are mounted READ-ONLY into the container, so
+        # the agent cannot tamper with the host's copy, and the
+        # watchdog's poll loop overwrites them on every subsequent
+        # refresh. The container-side `gh auth login` is therefore
+        # only a local-dev fallback (see entrypoint.sh).
         mkdir -p "/root/gh-config/${INSTANCE_ID}"
         mkdir -p /root/.git-credentials.d
         # The library helpers are the single source of truth for
@@ -152,6 +168,13 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
             "/root/gh-config/${INSTANCE_ID}/hosts.yml"
         git config --global credential.helper \
             'store --file /root/.git-credentials.d/github'
+        # Issue #164: hand the credential files to the container's uid. A
+        # bind mount preserves the source's ownership, so a root-owned
+        # 0600 file would be unreadable from inside a container that
+        # does not run as root. The poll loop's rewrites truncate these
+        # files in place, so the ownership survives every refresh.
+        chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \
+            /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"
     fi
 fi
 
@@ -165,6 +188,13 @@ echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> /etc/blitzlog.env
 # accessible to the watchdog after the container exits.
 mkdir -p /var/log/blitzlog
 mkdir -p /workspace
+
+# Issue #164: the container runs as an unprivileged uid and its rootfs
+# is read-only, so every host path it writes to has to be owned by
+# that uid. /var/log/blitzlog holds the container's logs (the watchdog
+# uploads them to S3 after the run). /workspace was already chowned
+# above, right after its marker files were created.
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /var/log/blitzlog
 
 # Common env vars (passed to every container launch).
 COMMON_ARGS=(
@@ -186,9 +216,18 @@ COMMON_ARGS=(
     -e "SESSION_ARCHIVE_BUCKET=$SESSION_ARCHIVE_BUCKET"
     -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
     -e "S3_LOG_PREFIX=$S3_LOG_PREFIX"
-    -e "GITHUB_TOKEN=$GITHUB_TOKEN"
+    # Issue #164: GITHUB_TOKEN is deliberately NOT passed to the
+    # container. The host owns the credential files and mounts them
+    # READ-ONLY, so the agent gets its credentials without the token
+    # ever appearing in the container's environment (where `docker
+    # inspect` and every same-uid process could read it).
     -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
     -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
+    # Issue #165: the container has no AWS credentials BY DESIGN. This
+    # makes the AWS SDK refuse the instance metadata service as well,
+    # on top of the host-side iptables rule that drops IMDS traffic
+    # from the container's network.
+    -e "AWS_EC2_METADATA_DISABLED=true"
 )
 
 # Mode-specific env vars. We don't reference these outside the
@@ -253,12 +292,23 @@ WATCHER_PID=$!
 # (i.e. when the Lambda's refresh event has just fired). The loop
 # runs for the full lifetime of the container; it has no per-run
 # state of its own. The chain of 10 scheduled refresh events
-# covers ~8.3 h — well over the longest realistic assisted run —
+# covers ~5 h — well over the longest realistic assisted run —
 # so the loop cannot run forever even if the schedule is buggy.
 # Poll interval is 300s (5 min) — same cadence as the existing
 # host-side SESSION_ARCHIVE_BUCKET and S3_LOG_PREFIX exports, so
 # operators only need to remember one number.
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    # The poll loop verifies a newly observed token against this
+    # repository BEFORE swapping it into the credential files: GitHub
+    # occasionally issues an installation token whose per-repository
+    # grant has not fully materialised, and such a token makes git
+    # fail with "remote: Repository not found" against a private repo.
+    # Holding it back keeps the previous (still valid) token in place
+    # until the new one works. REPO is "<owner>/<repo>"; when it is
+    # empty the loop cannot verify and falls back to rotating
+    # unverified (the pre-verification behaviour).
+    BLITZLOG_TOKEN_REPO="${REPO:-}"
+    export BLITZLOG_TOKEN_REPO
     # `blitzlog_start_token_poll_loop` writes the subshell's PID to
     # the global `BLITZLOG_TOKEN_POLL_PID`. We use a global instead
     # of `$(...)` capture because bash's `wait` for a non-direct
@@ -272,7 +322,7 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
         /root/.git-credentials.d/github \
         "/root/gh-config/${INSTANCE_ID}/hosts.yml" \
         "${BLITZLOG_TOKEN_POLL_INTERVAL:-300}"
-    log "Started token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s)"
+    log "Started token refresh poll loop (pid=${BLITZLOG_TOKEN_POLL_PID}, interval=${BLITZLOG_TOKEN_POLL_INTERVAL:-300}s, verify_repo=${BLITZLOG_TOKEN_REPO:-none})"
 fi
 
 # Defense in depth: clear any stale .shutdown left over from a crashed
@@ -281,6 +331,35 @@ fi
 # tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
 rm -f /workspace/.shutdown
 
+# Issue #164: the credential files are owned by the HOST and mounted
+# READ-ONLY (see the comment on the chown above). The container's uid
+# can read them but cannot write them, so the agent cannot tamper with
+# the host's copy of the token. The container's HOME is a tmpfs (see
+# TMPFS_ARGS above), so the two credential paths are bind-mounted
+# INSIDE it.
+#
+# Issue #176: the gh config is the ONE credential path that is NOT
+# read-only, and deliberately so. gh 2.x migrates its config on first
+# use: with no `config.yml` next to it (the host's poll loop writes
+# only `hosts.yml`), gh wants to WRITE the file — and against a
+# read-only mount every `gh` call in the container fails with
+#
+#   error: failed to write config: open /home/blitzlog/.config/gh/hosts.yml:
+#   read-only file system
+#
+# The agent worked around it by copying the config to a writable
+# directory — which silently breaks the thing this repo was created to
+# test: the copy is a snapshot, and the host refreshes the token every
+# ~50 min (issue #145), so the copy goes stale and `gh` starts
+# failing with 401s mid-task.
+#
+# Making the mount writable costs nothing: the AMI's host extras are
+# awscli/git/jq (no `gh` of its own), so that directory exists only
+# for the container, and the agent already holds the token. The
+# GIT credential store stays READ-ONLY — `git credential-store`
+# genuinely rewrites that file, which is why the container ships a
+# get-only credential helper instead.
+#
 # `set -e` is active, so a non-zero `docker run` aborted the script
 # right here — before the cleanup below (log upload, bot-lock release,
 # SSM/schedule teardown, instance terminate) could run. A failed agent
@@ -289,18 +368,62 @@ rm -f /workspace/.shutdown
 # of letting errexit kill the watchdog; the cleanup path runs either
 # way and the script exits with the container's code at the very end.
 CONTAINER_EXIT=0
-sudo docker run --name blitzlog-agent \
-    "${HARDENING_ARGS[@]}" \
-    "${TUNNEL_FLAGS[@]}" \
-    "${COMMON_ARGS[@]}" \
-    -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
-    -v /root/.git-credentials.d:/root/.git-credentials.d \
-    -v "/root/gh-config/${INSTANCE_ID}:/root/.config/gh" \
-    -v /workspace:/workspace \
-    -v /var/log/blitzlog:/var/log/blitzlog \
-    "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}" \
-    || CONTAINER_EXIT=$?
 
+# Defense in depth (issue #175): block the instance metadata service
+# from the CONTAINER's network.
+#
+# The container runs as root on the docker bridge, so it can reach
+# 169.254.169.254 and assume the EC2 instance role. That role can
+# read SSM parameters the container must never see — the GitHub App's
+# private key and the webhook secret among them (issue #175) — so
+# "the container has no AWS credentials" is only true while it cannot
+# reach IMDS.
+#
+# DOCKER-USER is only traversed by FORWARDED container traffic, so the
+# HOST's own IMDS access (the watchdog's token + region fetches above)
+# is unaffected.
+#
+# This is FAIL-CLOSED. The first version of this rule was best-effort:
+# it logged a warning and started the agent anyway, so a boundary that
+# was not actually in force looked exactly like one that was — and the
+# gap went unnoticed for a release cycle (issue #175). If the rule
+# cannot be installed, the agent does not start; the cleanup path below
+# still runs, so the instance is not stranded.
+block_imds_from_container() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        log "ERROR: iptables is not available — cannot block IMDS from the container network"
+        return 1
+    fi
+    if iptables -C DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! iptables -I DOCKER-USER -d 169.254.169.254 -j DROP >/dev/null 2>&1; then
+        log "ERROR: could not install the DOCKER-USER rule that blocks IMDS from the container network"
+        return 1
+    fi
+    return 0
+}
+
+run_agent_container() {
+    sudo docker run --name blitzlog-agent \
+        "${HARDENING_ARGS[@]}" \
+        "${TMPFS_ARGS[@]}" \
+        "${TUNNEL_FLAGS[@]}" \
+        "${COMMON_ARGS[@]}" \
+        -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
+        -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
+        -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh" \
+        -v /workspace:/workspace \
+        -v /var/log/blitzlog:/var/log/blitzlog \
+        "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
+}
+
+if block_imds_from_container; then
+    run_agent_container || CONTAINER_EXIT=$?
+else
+    log "ERROR: refusing to start the agent container — without the IMDS block it could assume the instance role and read SSM parameters it must not see (issue #175)"
+    CONTAINER_EXIT=1
+fi
 # The watcher auto-exits once it sends SIGTERM (the while loop ends
 # when .shutdown appears). If .shutdown was never touched (autonomous
 # mode finished, agent ran to completion), the watcher is still
@@ -402,17 +525,35 @@ sudo docker rm -f blitzlog-agent || true
 # subsequent AWS calls from this script may fail. Both cleanups are
 # idempotent (the SSM delete is per-issue; the schedule group delete
 # cascade-deletes every refresh-event schedule for this instance).
+#
+# ORDER MATTERS: the schedule group is deleted FIRST so the refresh
+# chain cannot fire another iteration. The chain writes the token
+# into SSM, so deleting the SSM parameter first would leave a window
+# in which a firing iteration re-creates it — a zombie token that
+# outlives the run.
+#
+# The group delete needs BOTH `scheduler:DeleteScheduleGroup` (on the
+# group) and `scheduler:DeleteSchedule` (on each child schedule)
+# because EventBridge Scheduler authorises the cascade against the
+# schedules. The EC2 role carries both grants; without the second
+# one the delete fails with AccessDenied and the group survives the
+# run, which makes the NEXT run's first CreateSchedule collide with
+# the leftover iter-0 (ConflictException) — no chain, and the agent's
+# token dies 1 h after the launch-time mint.
 log "Tearing down instance-owned AWS state"
+if [ -n "${GITHUB_TOKEN_SCHED_GROUP:-}" ]; then
+    log "Deleting schedule group ${GITHUB_TOKEN_SCHED_GROUP} (cascade-deletes all chain events)"
+    if ! sched_out=$(aws scheduler delete-schedule-group \
+        --name "${GITHUB_TOKEN_SCHED_GROUP}" \
+        --region "$REGION" 2>&1); then
+        log "WARNING: failed to delete schedule group ${GITHUB_TOKEN_SCHED_GROUP}: ${sched_out}"
+        log "WARNING: the refresh chain may outlive this run. The next run's first CreateSchedule can collide with a leftover schedule (ConflictException) and the chain will not start."
+    fi
+fi
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
     log "Deleting SSM token at ${GITHUB_TOKEN_SSM_PARAM}"
     aws ssm delete-parameter \
         --name "${GITHUB_TOKEN_SSM_PARAM}" \
-        --region "$REGION" 2>/dev/null || true
-fi
-if [ -n "${GITHUB_TOKEN_SCHED_GROUP:-}" ]; then
-    log "Deleting schedule group ${GITHUB_TOKEN_SCHED_GROUP} (cascade-deletes all chain events)"
-    aws scheduler delete-schedule-group \
-        --name "${GITHUB_TOKEN_SCHED_GROUP}" \
         --region "$REGION" 2>/dev/null || true
 fi
 
