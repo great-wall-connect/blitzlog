@@ -9,8 +9,36 @@
 # `oss2` re-exports under both `oss2` and `alibabacloud_oss2`
 # namespaces (the legacy short name is the only PyPI package). KMS /
 # ECS use Alibaba's per-product SDK naming.
+#
+# `typing-extensions` is listed EXPLICITLY, even though it is already a
+# transitive dependency of this file. `aiohttp` (pulled in by `oss2`)
+# declares it as `typing_extensions>=4.4; python_version < "3.13"`, so
+# it is only a dependency on the Python 3.12 runtime this bundle
+# targets — see `runtime = "python3.12"` in
+# infra/aws/modules/core/lambda.tf.
+#
+# Dependabot compiles this lock under Python >= 3.13, where that marker
+# is false, so pip-compile concludes the dependency is unnecessary and
+# DROPS the pin. The resulting lock then fails to install at all:
+#
+#     ERROR: In --require-hashes mode, all requirements must have
+#     their versions pinned with ==. These do not:
+#         typing_extensions>=4.4 ... (from aiohttp==3.14.5)
+#
+# (every requirement here carries a --hash, which puts pip in
+# --require-hashes mode where transitive deps must be pinned with ==).
+# Worse, the bundle would have been built without typing_extensions,
+# and `import oss2` -> `import aiohttp` -> `import typing_extensions`
+# would raise ImportError at cold start.
+#
+# Declaring it here makes the dependency unconditional, so the
+# resolution is identical on 3.12 and 3.13+ and dependabot can no
+# longer remove it. Do NOT drop this line — `scripts/
+# check_requirements_lock.py` and tests/test_requirements_lock.py both
+# guard it.
 -r requirements.in
 
 oss2
 alibabacloud_kms20160120
 alibabacloud_ecs20140526
+typing-extensions
