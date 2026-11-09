@@ -20,6 +20,10 @@ terraform.tfstate
 __pycache__/
 *.pyc
 
+# pip-compile scratch virtualenvs (mise run lock / mise run check-lock)
+.venv-lock/
+.venv-lock-check/
+
 # Node
 node_modules/
 out/

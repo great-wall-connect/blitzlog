@@ -57,6 +57,33 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: python -m pytest tests/ --ignore=tests/test_shim.py -v
 
+  requirements-lock:
+    name: Requirements lock (pip-compile drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mise
+        uses: jdx/mise-action@v4
+
+      # The locks target the Lambda runtime's Python (3.12), and
+      # pip-compile evaluates environment markers against the running
+      # interpreter, so this job has to run on the same Python the locks
+      # were compiled with. mise pins it via [tools] in mise.toml.
+      - name: Install Python toolchain
+        run: mise install
+
+      # pip-tools re-resolves the `.in` sources. requirements-dev.txt
+      # pins it, so this resolves exactly like `mise run lock` does.
+      - name: Install pip-tools
+        run: python -m pip install -q -r requirements-dev.txt
+
+      # Without this, a lock that has drifted from its source only
+      # surfaces as a cryptic pip --require-hashes error during the
+      # install step of the job above (see PRs #159 and #180).
+      - name: Check requirements locks
+        run: python scripts/check_requirements_lock.py
+
   terraform:
     name: Validate Terraform
     runs-on: ubuntu-latest

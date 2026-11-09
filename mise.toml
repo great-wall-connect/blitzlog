@@ -16,12 +16,21 @@ python3 -m pip install --quiet -r requirements-dev.txt && \
 description = "Regenerate per-cloud pip-compiled requirements files (lambda/requirements-{aws,alicloud}.txt) from their .in sources. Idempotent; run after editing any lambda/requirements*.in."
 run = """
 python3 -m venv .venv-lock
-.venv-lock/bin/pip install --quiet pip-tools
+.venv-lock/bin/pip install --quiet "pip-tools==$(grep -E '^pip-tools==' requirements-dev.txt | head -1 | cut -d' ' -f1 | cut -d'=' -f3)"
 .venv-lock/bin/pip-compile --allow-unsafe --generate-hashes \
     --output-file=lambda/requirements-aws.txt lambda/requirements-aws.in
 .venv-lock/bin/pip-compile --allow-unsafe --generate-hashes \
     --output-file=lambda/requirements-alicloud.txt lambda/requirements-alicloud.in
 rm -rf .venv-lock
+"""
+
+[tasks.check-lock]
+description = "Verify the hash-pinned lambda requirements locks still match the pip-compile resolution for their target Python. Run after `mise run lock` to confirm the locks are in sync with their .in sources."
+run = """
+python3 -m venv .venv-lock-check
+.venv-lock-check/bin/pip install --quiet "pip-tools==$(grep -E '^pip-tools==' requirements-dev.txt | head -1 | cut -d' ' -f1 | cut -d'=' -f3)"
+.venv-lock-check/bin/python scripts/check_requirements_lock.py
+rm -rf .venv-lock-check
 """
 
 [tasks.test]
