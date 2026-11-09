@@ -72,7 +72,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
 
       - name: Install Python toolchain
         # The local-exec in null_resource.lambda_build resolves
