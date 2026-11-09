@@ -364,7 +364,7 @@ remaining events fire and no-op against the missing SSM parameter
 | `infra/aws/packer/scripts-docker-ubuntu/watchdog.sh` | The host-side lifecycle manager. Sources the poll library, starts the loop, SIGTERMs it on container exit. |
 | `infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh` | The poll library: 5-min `ssm get-parameter`, a git-access probe of any new token, and the in-place rewrite of the two bind-mounted credential files. |
 | `tests/test_watchdog_credential_poll.py` | 6 library-in-isolation tests. |
-| `tests/test_watchdog_credential_poll_e2e.py` | 9 tests spanning Level 1 (8) + Level 2 (1). |
+| `tests/test_watchdog_credential_poll_e2e.py` | 19 tests spanning Level 1 (18) + Level 2 (1). |
 | `tests/conftest.py` | Registers the `integration` marker + auto-skip hook. |
 | `scripts/test-dev-spot.sh` | Level 3 wrapper around the manual procedure below. |
 | `.github/workflows/integration-test.yml` | Nightly schedule for Level 2. |
@@ -380,6 +380,13 @@ workflow can assume it) with `ssm:GetParameter` / `PutParameter` /
 `/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*`. A
 failed nightly run surfaces in the GitHub Actions UI under the
 `integration-test` workflow.
+
+The grant lives in `infra/aws/bootstrap/integration-test-role.tf`
+(an operator-applied stack). It must cover the param name the
+Level 2 test writes to; the Level 1 guard
+`test_integration_test_role_grants_the_level2_param_prefix` in
+`tests/test_watchdog_credential_poll_e2e.py` fails CI when the two
+drift apart (issue #182).
 
 To trigger an ad-hoc run, use `gh workflow run integration-test.yml`
 from the repo root.
@@ -619,3 +626,4 @@ done
 | `blitzlog-dev-webhook` invocation returns 500 | The Lambda's `action == "refresh"` branch is throwing; check CloudWatch logs for the `blitzlog-dev-webhook` log group. |
 | `kill -0 $BLITZLOG_TOKEN_POLL_PID` after SIGTERM still succeeds | The loop's `trap 'exit 0' TERM` was removed; the SIGKILL escalation in `watchdog.sh` is the safety net. |
 | Nightly CI fails on Level 2 | Check the GitHub Actions run for the actual `aws ssm put-parameter` / `delete-parameter` errors. The most common cause is the integration-test IAM role not being applied (`terraform apply` in `infra/aws/bootstrap/`). |
+| Nightly CI fails with `AccessDeniedException` on `ssm:PutParameter` | The deployed role's grant no longer covers the param name the test writes to. Compare the `Resource` list in `infra/aws/bootstrap/integration-test-role.tf` with `INTEGRATION_TEST_PARAM_PREFIX` in `tests/test_watchdog_credential_poll_e2e.py`, then re-apply the bootstrap stack (issue #182). |

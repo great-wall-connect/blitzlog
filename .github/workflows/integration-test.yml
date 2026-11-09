@@ -15,8 +15,12 @@ name: integration-test
 # so the deploy / packer / release workflows cannot assume this
 # role even by accident. Permissions are scoped to the test
 # SSM prefix
-# (`/blitzlog/<env>/ephemeral/github-token-integration-test-*`)
-# so the test cannot touch any real prod params.
+# (`/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*`)
+# so the test cannot touch any real prod params. The grant lives
+# in infra/aws/bootstrap/integration-test-role.tf; the Level 1
+# guard in tests/test_watchdog_credential_poll_e2e.py keeps that
+# grant in sync with the param name the test writes to
+# (issue #182).
 #
 # Cost: ~$0.0003 per run (3 SSM puts + a handful of gets;
 # SecureString storage < 1 s; cleanup deletes the param).

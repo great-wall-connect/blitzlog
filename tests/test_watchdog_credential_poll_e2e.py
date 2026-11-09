@@ -2,10 +2,10 @@
 (issue #145). Part of the **3-level testing convention** for the
 mechanism (full taxonomy in ``docs/WATCHDOG_TOKEN_REFRESH.md``):
 
-* **Level 1 — unit with shim.** This file's first 8 tests. Static
-  analysis of ``watchdog.sh`` text, format tests against the real
-  ``git credential fill`` / PyYAML parsers, and subprocess tests
-  with a fake ``aws`` shim. No real AWS. Runs in < 2 s on every PR.
+* **Level 1 — unit with shim.** 18 tests. Static analysis of
+  ``watchdog.sh`` text, format tests against the real ``git
+  credential fill`` / PyYAML parsers, and subprocess tests with a
+  fake ``aws`` shim. No real AWS. Runs in < 2 s on every PR.
 
 * **Level 2 — real-AWS round-trip on a workstation.** This file's
   last test (``@pytest.mark.integration``). The library's
@@ -85,6 +85,7 @@ documented in ``docs/WATCHDOG_TOKEN_REFRESH.md`` and wrapped in
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import shutil
@@ -101,6 +102,27 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/watchdog.sh"
 POLL_LIB = REPO_ROOT / "infra/aws/packer/scripts-docker-ubuntu/blitzlog_token_poll.sh"
+
+# The SSM param name the Level 2 test writes to. The `<uuid8>`
+# suffix keeps concurrent runs (or a re-run after a crashed
+# previous run that left a param behind) from colliding.
+#
+# The path mirrors the shape of a real token param
+# (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`, issue
+# #145's per-(env, owner, repo, issue) namespace) so the Level 2
+# test drives the same path shape the agent uses.
+#
+# The integration-test IAM role must grant exactly this prefix.
+# `test_integration_test_role_grants_the_level2_param_prefix` is
+# the guard that keeps the two in sync — they drifted apart once
+# already (issue #182) and only the nightly job noticed.
+INTEGRATION_TEST_PARAM_PREFIX = (
+    "/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-"
+)
+
+# The Terraform that owns the integration-test role's inline
+# policy — the SSM grant the Level 2 test runs under.
+INTEGRATION_TEST_ROLE_TF = REPO_ROOT / "infra/aws/bootstrap/integration-test-role.tf"
 
 # Issue #145: the GitHub App token in the bind-mounted credential
 # file is read by `git credential-store` (for `git push`) and by the
@@ -682,6 +704,151 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
 
 
 # =====================================================================
+# Level 1 (5/6) — Static analysis: the integration-test IAM role
+#                grants the SSM prefix the Level 2 test writes to.
+# =====================================================================
+#
+# Issue #182: the Level 2 test's param path moved to the
+# per-(env, owner, repo, issue) namespace (PR #154) while the
+# integration-test role's inline policy stayed on the old prefix.
+# Nothing in the normal test suite compared the two, so every
+# nightly `integration-test` run failed with an AccessDenied on
+# `ssm:PutParameter` — for three weeks, unnoticed.
+#
+# These two tests bind the repo's Terraform grant to the param
+# name the Level 2 test builds, so a namespace rename fails CI
+# instead of the nightly job. They are Level 1: they read the
+# Terraform as text, they touch no AWS.
+
+
+def _integration_test_role_ssm_grant() -> tuple[set[str], list[str]]:
+    """Parse the integration-test role's inline policy.
+
+    Returns ``(actions, resource_paths)`` for the
+    ``aws_iam_role_policy.integration_test`` statement: ``actions``
+    is the set of IAM actions in the ``Action`` list,
+    ``resource_paths`` the SSM path patterns from the ``Resource``
+    list (each ARN's ``parameter/...`` suffix, without the leading
+    slash a param name carries).
+
+    The policy is HCL wrapping a JSON document, so this parses the
+    two lists with regexes rather than dragging in a Terraform
+    parser: the shape being asserted (a flat list of string
+    literals) is stable, and the guard that matters is the
+    cross-check against the Level 2 param name, not the HCL
+    itself.
+    """
+    src = _read(INTEGRATION_TEST_ROLE_TF)
+    marker = 'resource "aws_iam_role_policy" "integration_test" {'
+    assert marker in src, (
+        f"{INTEGRATION_TEST_ROLE_TF} must still declare the "
+        "`aws_iam_role_policy.integration_test` resource — the "
+        "Level 2 test runs under the policy it declares"
+    )
+    after_resource = src.split(marker, 1)[1]
+    assert "policy = jsonencode(" in after_resource, (
+        f"{INTEGRATION_TEST_ROLE_TF} must still declare the "
+        "`policy = jsonencode(...)` body of the integration-test "
+        "role policy"
+    )
+    policy = after_resource.split("policy = jsonencode(", 1)[1]
+
+    actions_match = re.search(r"Action\s*=\s*\[(.*?)\]", policy, re.DOTALL)
+    assert (
+        actions_match
+    ), "the integration-test policy must declare an `Action = [...]` list"
+    actions = set(re.findall(r'"([^"]+)"', actions_match.group(1)))
+
+    resources_match = re.search(r"Resource\s*=\s*\[(.*?)\]", policy, re.DOTALL)
+    assert (
+        resources_match
+    ), "the integration-test policy must declare a `Resource = [...]` list"
+    resource_paths = []
+    for arn in re.findall(r'"([^"]+)"', resources_match.group(1)):
+        assert ":parameter/" in arn, (
+            f"unexpected SSM resource ARN {arn!r} — the Level 2 test "
+            "only needs Parameter Store"
+        )
+        resource_paths.append(arn.split(":parameter/", 1)[1])
+    return actions, resource_paths
+
+
+def test_integration_test_role_grants_the_level2_param_prefix() -> None:
+    """The integration-test role must grant the SSM prefix the
+    Level 2 test actually writes to.
+
+    The Level 2 test runs under the
+    `blitzlog-integration-test-role` OIDC role, whose inline
+    policy is declared in `infra/aws/bootstrap/integration-test-role.tf`.
+    If that policy's `Resource` list stops covering the param
+    name the test builds, every Level 2 run dies with an
+    AccessDenied on `ssm:PutParameter` — a failure only the
+    nightly job (against real AWS) can see. This test is the
+    Level 1 mirror of that cross-check.
+    """
+    actions, granted_paths = _integration_test_role_ssm_grant()
+
+    required_actions = {
+        "ssm:GetParameter",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+    }
+    assert required_actions <= actions, (
+        f"the integration-test policy must grant "
+        f"{sorted(required_actions)}; found {sorted(actions)}"
+    )
+
+    # A concrete param name — the prefix plus a sample uuid8, the
+    # same shape the Level 2 test builds.
+    param_name = f"{INTEGRATION_TEST_PARAM_PREFIX}abcdef12"
+    matching = [
+        path for path in granted_paths if fnmatch.fnmatch(param_name.lstrip("/"), path)
+    ]
+    assert matching, (
+        f"the integration-test policy grants {granted_paths}, none of "
+        f"which covers the Level 2 test's param name {param_name!r}. "
+        "Either widen the Resource list in "
+        f"{INTEGRATION_TEST_ROLE_TF.relative_to(REPO_ROOT)} (and "
+        "re-apply the bootstrap stack), or move the test's param name "
+        "(INTEGRATION_TEST_PARAM_PREFIX) onto a granted prefix."
+    )
+
+
+def test_integration_test_role_cannot_reach_production_token_params() -> None:
+    """The integration-test role's SSM grant must not be able to
+    touch a real token param.
+
+    A real token param is
+    `/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`, where
+    `<issue>` is a numeric issue number. The grant may therefore
+    only cover a leaf that cannot be numeric, and may not wildcard
+    any segment above the leaf — a wildcarded owner or repo
+    segment would let the role write to a real param's path.
+    """
+    _, granted_paths = _integration_test_role_ssm_grant()
+    assert granted_paths, (
+        "the integration-test policy must declare at least one SSM "
+        "resource — the Level 2 test needs one to write to"
+    )
+    for path in granted_paths:
+        segments = path.split("/")
+        for segment in segments[:-1]:
+            assert "*" not in segment, (
+                f"granted SSM path {path!r} wildcards a non-leaf segment "
+                f"({segment!r}) — the grant could then cover a real "
+                "owner/repo pair"
+            )
+        leaf = segments[-1]
+        for issue_number in ("1", "42", "145"):
+            assert not fnmatch.fnmatch(issue_number, leaf), (
+                f"granted SSM path {path!r} matches a numeric leaf "
+                f"segment ({issue_number!r}) — a real token param's "
+                "leaf is a numeric issue number, so this grant could "
+                "reach production params"
+            )
+
+
+# =====================================================================
 # Level 2 — Real-AWS round-trip on a workstation.
 # =====================================================================
 #
@@ -707,8 +874,10 @@ def test_watchdog_sigterm_block_reaps_poll_loop_within_grace_window(
 # AWS permissions: `ssm:GetParameter`, `ssm:PutParameter`,
 # `ssm:DeleteParameter` on
 # `arn:aws:ssm:*:*:parameter/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-*`.
-# The new `blitzlog-integration-test-role` in
-# `infra/aws/bootstrap/integration-test-role.tf` grants exactly this.
+# The `blitzlog-integration-test-role` in
+# `infra/aws/bootstrap/integration-test-role.tf` grants exactly this;
+# `test_integration_test_role_grants_the_level2_param_prefix` keeps
+# that grant in sync with the param name below (issue #182).
 #
 # Each test run uses a unique param name (`<uuid8>`) so concurrent
 # runs (or a re-run after a crashed previous run that left a
@@ -746,6 +915,28 @@ def _aws_cli() -> list[str]:
     return [aws]
 
 
+def _ssm_failure_hint(stderr: str) -> str:
+    """Operator-facing hint for a failed SSM call.
+
+    An AccessDenied under the integration-test role almost always
+    means the role's inline policy grants a stale prefix (issue
+    #182): the repo's Terraform and the *deployed* policy drift
+    apart whenever the bootstrap stack is not re-applied. Without
+    this hint the raw stderr reads like a permissions bug in the
+    test rather than a missing `terraform apply`.
+    """
+    if "AccessDenied" not in stderr:
+        return ""
+    return (
+        " — AccessDenied usually means the integration-test role's "
+        "SSM grant is stale. The grant in "
+        f"{INTEGRATION_TEST_ROLE_TF.relative_to(REPO_ROOT)} must cover "
+        f"{INTEGRATION_TEST_PARAM_PREFIX}*; if the deployed policy is "
+        "older than that file, re-apply the bootstrap stack "
+        "(cd infra/aws/bootstrap && terraform apply)."
+    )
+
+
 def _ssm_put(name: str, value: str, region: str) -> None:
     """Real ``aws ssm put-parameter`` call (no shim)."""
     result = subprocess.run(
@@ -771,6 +962,7 @@ def _ssm_put(name: str, value: str, region: str) -> None:
         raise AssertionError(
             f"aws ssm put-parameter failed for {name}: "
             f"rc={result.returncode} stderr={result.stderr!r}"
+            f"{_ssm_failure_hint(result.stderr)}"
         )
 
 
@@ -824,9 +1016,7 @@ def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
     """
     region = _aws_region()
     uuid8 = uuid.uuid4().hex[:8]
-    param_name = (
-        f"/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-{uuid8}"
-    )
+    param_name = f"{INTEGRATION_TEST_PARAM_PREFIX}{uuid8}"
     value_a = "ghp_real_ssm_round_trip_aaaa"
     value_b = "ghp_real_ssm_round_trip_bbbb"
     value_c = "ghp_real_ssm_round_trip_cccc"
@@ -973,7 +1163,7 @@ def test_watchdog_poll_loop_rewrites_against_real_ssm(tmp_path: Path) -> None:
 
 
 # =====================================================================
-# Level 1 (5/5) — Static analysis: instance teardown deletes the
+# Level 1 (6/6) — Static analysis: instance teardown deletes the
 #                SSM token + per-issue schedule group, and does so
 #                before terminate-instances.
 # =====================================================================
