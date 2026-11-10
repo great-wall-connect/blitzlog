@@ -29,7 +29,7 @@ description = "Run Python unit tests"
 run = "pip install -q -r requirements.txt && python -m pytest tests/ -v"
 
 [tasks.test-integration]
-description = "Level 2: real-AWS integration tests for the watchdog token-refresh mechanism. Requires AWS credentials with ssm:GetParameter, ssm:PutParameter, ssm:DeleteParameter on /blitzlog/<env>/ephemeral/github-token-integration-test-*. Sets BLITZLOG_RUN_INTEGRATION=1 to opt in to the @pytest.mark.integration test in tests/test_watchdog_credential_poll_e2e.py."
+description = "Level 2: real-AWS integration tests for the watchdog token-refresh mechanism. Requires AWS credentials with ssm:GetParameter, ssm:PutParameter, ssm:DeleteParameter on /blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-* (the grant in infra/aws/bootstrap/integration-test-role.tf). Sets BLITZLOG_RUN_INTEGRATION=1 to opt in to the @pytest.mark.integration test in tests/test_watchdog_credential_poll_e2e.py."
 run = "BLITZLOG_RUN_INTEGRATION=1 python -m pytest -m integration -v tests/test_watchdog_credential_poll_e2e.py"
 
 [tasks.test-dev-spot]

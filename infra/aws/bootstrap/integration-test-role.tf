@@ -13,10 +13,18 @@
 # gains the integration-test SSM permissions.
 #
 # Permissions are scoped to a UUID-suffixed SSM prefix
-# (`/blitzlog/<env>/ephemeral/github-token-integration-test-*`) so
-# the test's writes cannot collide with any real prod params, and
-# a future "I wonder what would happen if I changed X in prod"
+# (`/blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*`)
+# so the test's writes cannot collide with any real prod params,
+# and a future "I wonder what would happen if I changed X in prod"
 # refactor cannot use this role to touch real params.
+#
+# The prefix mirrors the shape of a real token param
+# (`/blitzlog/<env>/ephemeral/gh/<owner>/<repo>/<issue>`, issue
+# #145's per-(env, owner, repo, issue) namespace) so the Level 2
+# test exercises the same path shape the agent uses. It still
+# cannot match a real param: the leaf segment of a real param is
+# a numeric issue number, and this pattern requires a leaf that
+# starts with `integration-test-`.
 #
 # The admin-SSO escape hatch matches the deploy and packer
 # roles' shape so a local operator who has AdministratorAccess can
@@ -97,7 +105,7 @@ resource "aws_iam_role_policy" "integration_test" {
       {
         # SSM Parameter Store: Get/Put/Delete on the test prefix
         # only. The test mints a UUID-suffixed param under
-        # /blitzlog/<env>/ephemeral/github-token-integration-test-*
+        # /blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-*
         # and cleans it up in `finally`; the test prefix
         # deliberately does NOT overlap with any real prod
         # param namespace. A future contributor cannot use this
@@ -111,6 +119,15 @@ resource "aws_iam_role_policy" "integration_test" {
         # operator wants to run Level 2 against prod (Level 3
         # is the only thing that actually needs prod-real
         # credentials; Level 2 is parameter-content-only).
+        #
+        # The grant MUST track the param name the Level 2 test
+        # writes to (`tests/test_watchdog_credential_poll_e2e.py`);
+        # `test_integration_test_role_grants_the_level2_param_prefix`
+        # fails CI when the two drift apart. They drifted once
+        # already (issue #182): the test's param path moved to
+        # the per-(env, owner, repo, issue) namespace while this
+        # grant stayed on the old prefix, and every nightly run
+        # failed with AccessDenied on PutParameter.
         Sid    = "IntegrationTestSSM"
         Effect = "Allow"
         Action = [
@@ -119,8 +136,8 @@ resource "aws_iam_role_policy" "integration_test" {
           "ssm:DeleteParameter",
         ]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/dev/ephemeral/github-token-integration-test-*",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/prod/ephemeral/github-token-integration-test-*",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/dev/ephemeral/gh/integration-test/repo/integration-test-*",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/blitzlog/prod/ephemeral/gh/integration-test/repo/integration-test-*",
         ]
       },
     ]
