@@ -10,9 +10,15 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
+# `iptables` is installed explicitly (issue #175): the watchdog installs a
+# DOCKER-USER rule that blocks the agent container from reaching the
+# instance metadata service, and it REFUSES to start the agent if the
+# rule cannot be installed. It must not depend on iptables arriving as a
+# transitive dependency of docker-ce.
 sudo apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg \
-    awscli jq openssl
+    awscli jq openssl \
+    kmod iptables
 
 # Docker's official Ubuntu repo (installs dockerd + CLI)
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -29,5 +35,22 @@ sudo apt-get install -y --no-install-recommends docker-ce docker-ce-cli containe
 
 sudo apt-get clean
 sudo rm -rf /var/lib/apt/lists/*
+
+# Issue #164: the agent container joins the Tailnet from INSIDE the
+# container, and the Tailscale daemon needs the /dev/net/tun character
+# device to build the WireGuard tunnel. A minimal Ubuntu AMI does not
+# have that device until the `tun` module is loaded.
+#
+# Load the module and create the device node explicitly — we do not
+# rely on udev to do it, because udev is not guaranteed to be running
+# on the minimal image at bake time. The device node is 0666 so the
+# container can open it when the run enables the Tailnet path
+# (`--device /dev/net/tun`).
+sudo modprobe tun || true
+if [ ! -e /dev/net/tun ]; then
+    sudo mkdir -p /dev/net
+    sudo mknod /dev/net/tun c 10 200
+    sudo chmod 0666 /dev/net/tun
+fi
 
 echo "Installed: $(aws --version 2>&1 | head -1), $(git --version), $(jq --version), $(sudo docker --version)"

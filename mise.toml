@@ -8,7 +8,8 @@ description = "Install runtime + dev Python dependencies and symlink /usr/local/
 run = """
 python3 -m pip install --quiet -r requirements.txt -r requirements-dev.in && \
 python3 -m pip install --quiet -r requirements-dev.txt && \
-ln -sf "$(command -v python3)" /usr/local/bin/python
+( ln -sf "$(command -v python3)" /usr/local/bin/python 2>/dev/null || \
+  ln -sf "$(command -v python3)" "$HOME/.local/bin/python" )
 """
 
 [tasks.lock]
@@ -28,7 +29,7 @@ description = "Run Python unit tests"
 run = "pip install -q -r requirements.txt && python -m pytest tests/ -v"
 
 [tasks.test-integration]
-description = "Level 2: real-AWS integration tests for the watchdog token-refresh mechanism. Requires AWS credentials with ssm:GetParameter, ssm:PutParameter, ssm:DeleteParameter on /blitzlog/<env>/ephemeral/github-token-integration-test-*. Sets BLITZLOG_RUN_INTEGRATION=1 to opt in to the @pytest.mark.integration test in tests/test_watchdog_credential_poll_e2e.py."
+description = "Level 2: real-AWS integration tests for the watchdog token-refresh mechanism. Requires AWS credentials with ssm:GetParameter, ssm:PutParameter, ssm:DeleteParameter on /blitzlog/<env>/ephemeral/gh/integration-test/repo/integration-test-* (the grant in infra/aws/bootstrap/integration-test-role.tf). Sets BLITZLOG_RUN_INTEGRATION=1 to opt in to the @pytest.mark.integration test in tests/test_watchdog_credential_poll_e2e.py."
 run = "BLITZLOG_RUN_INTEGRATION=1 python -m pytest -m integration -v tests/test_watchdog_credential_poll_e2e.py"
 
 [tasks.test-dev-spot]
@@ -124,13 +125,28 @@ docker buildx build \
 [tasks.image-test]
 description = "Build the image and run the Tier-1 smoke test (no env vars, no network)"
 run = """
+. packages/images/agent/container-hardening.env || exit 1
 docker buildx build \
   --builder default \
   --tag blitzlog-agent:local \
   --load \
   ./packages/images/agent
-docker run --rm --platform linux/arm64 --entrypoint="" \
+# Issue #164: mount a gh config at the same path production uses. Docker
+# creates the MISSING PARENT of a bind mount as root:root 0755, so this
+# mount is what makes $HOME/.config a root-owned directory unless it
+# carries its own uid-owned tmpfs (see container-hardening.env). The
+# smoke test asserts $HOME/.config is writable by the agent, so this
+# mount is what makes the assertion meaningful — it is the local mirror
+# of the CI gate in .github/workflows/docker-images.yml.
+mkdir -p /tmp/blitzlog-gh-config
+cat > /tmp/blitzlog-gh-config/hosts.yml <<'GH_EOF'
+github.com:
+    oauth_token: local-dev-not-a-real-token
+    git_protocol: https
+GH_EOF
+docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS --platform linux/arm64 --entrypoint="" \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/blitzlog-gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro \
   blitzlog-agent:local \
   sh /smoke-test.sh
 """
@@ -138,6 +154,7 @@ docker run --rm --platform linux/arm64 --entrypoint="" \
 [tasks.image-run-test]
 description = "Build, run Tier-1 smoke + Tier-2 entrypoint with .env.assisted.test. The container's entrypoint (a) writes logs to /var/log/blitzlog/opencode.log and (b) writes session artifacts + signal files under /workspace/.blitzlog, /workspace/.idle, /workspace/.shutdown. We mirror the production watchdog.sh: pre-create those host paths in /tmp/blitzlog-{logs,workspace}/ and bind-mount them in so the entrypoint output + signal state are inspectable from the host after the 30s timeout."
 run = """
+. packages/images/agent/container-hardening.env || exit 1
 docker buildx build \
   --builder default \
   --tag blitzlog-agent:local \
@@ -146,9 +163,29 @@ docker buildx build \
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
 touch /tmp/blitzlog-workspace/.idle
-docker run --rm --entrypoint="" \
+# Issue #164/#174: the container runs as uid 0 (dpkg needs root to
+# install a project's build dependencies) and its tmpfs mounts are
+# owned by the runtime uid, so the bind-mounted host paths have to be
+# writable by it. `chmod` rather than `chown` — a local dev box may
+# not have sudo. Both directories live under /tmp.
+chmod 0777 /tmp/blitzlog-logs /tmp/blitzlog-workspace /tmp/blitzlog-workspace/.blitzlog
+chmod 0666 /tmp/blitzlog-workspace/.idle
+# Issue #164: see the note in the image-test task — this mount makes the
+# container's $HOME/.config a Docker-created (root-owned) directory, the
+# production topology, so the smoke test's writability assertion is
+# meaningful. gh inside the container is unauthenticated with this dummy
+# config, but every gh call in the entrypoint is guarded (it degrades to
+# "unknown" rather than aborting).
+mkdir -p /tmp/blitzlog-gh-config
+cat > /tmp/blitzlog-gh-config/hosts.yml <<'GH_EOF'
+github.com:
+    oauth_token: local-dev-not-a-real-token
+    git_protocol: https
+GH_EOF
+docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS --entrypoint="" \
   --env-file ./packages/images/agent/.env.assisted.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/blitzlog-gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
   -v /tmp/blitzlog-workspace:/workspace \
@@ -159,6 +196,7 @@ docker run --rm --entrypoint="" \
 [tasks.image-telegram]
 description = "Build the image and run the Tier-2 Telegram bot boot smoke (60s timeout — boots the bot, doesn't talk to Telegram). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in so entrypoint logs + signal files (.idle, .shutdown, .blitzlog/) are inspectable from the host after the 60s timeout."
 run = """
+. packages/images/agent/container-hardening.env || exit 1
 docker buildx build \
   --builder default \
   --tag blitzlog-agent:local \
@@ -167,19 +205,38 @@ docker buildx build \
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
 touch /tmp/blitzlog-workspace/.idle
-docker run --rm --entrypoint="" \
+# Issue #164/#174: the container runs as uid 0 (dpkg needs root to
+# install a project's build dependencies) and its tmpfs mounts are
+# owned by the runtime uid, so the bind-mounted host paths have to be
+# writable by it. `chmod` rather than `chown` — a local dev box may
+# not have sudo. Both directories live under /tmp.
+chmod 0777 /tmp/blitzlog-logs /tmp/blitzlog-workspace /tmp/blitzlog-workspace/.blitzlog
+chmod 0666 /tmp/blitzlog-workspace/.idle
+# Issue #164: see the note in the image-test task — this mount makes the
+# container's $HOME/.config a Docker-created (root-owned) directory, the
+# production topology, so the smoke test's writability assertion is
+# meaningful.
+mkdir -p /tmp/blitzlog-gh-config
+cat > /tmp/blitzlog-gh-config/hosts.yml <<'GH_EOF'
+github.com:
+    oauth_token: local-dev-not-a-real-token
+    git_protocol: https
+GH_EOF
+docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS --entrypoint="" \
   --env-file ./packages/images/agent/.env.assisted.test \
   -v \"$PWD/packages/images/agent/smoke-test.sh:/smoke-test.sh:ro\" \
+  -v /tmp/blitzlog-gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
   -v /tmp/blitzlog-workspace:/workspace \
   blitzlog-agent:local \
-  sh -c 'sh /smoke-test.sh && echo \"==> entrypoint (bot boot may take up to 60s)\" && timeout 60 /usr/local/bin/entrypoint.sh || echo \"(exited $? — expected without LLM auth)\"'
+  sh -c 'sh /smoke-test.sh && echo "==> entrypoint (bot boot may take up to 60s)" && timeout 60 /usr/local/bin/entrypoint.sh || echo "(exited $? — expected without LLM auth)"'
 """
 
 [tasks.image-telegram-live-assisted]
 description = "Build the image and start the agent for real Telegram interaction (foreground, Ctrl-C to stop). Mirrors the production watchdog.sh: pre-creates host paths under /tmp/blitzlog-{logs,workspace}/ and bind-mounts them in. The user can `tail -f /tmp/blitzlog-logs/opencode.log` from another terminal and observe signal files at /tmp/blitzlog-workspace/.{idle,shutdown,blitzlog/} while the container runs. The host-side watcher polls /workspace/.shutdown and SIGTERMs the container when the agent invokes its shutdown tool, mirroring the production watchdog's behavior. Prerequisite: `mise run fetch-whisper` (downloads the whisper model), and `gh auth login` on the host (we pass the token to the container via -e so gh inside the container can fetch issue titles)."
 run = """
+. packages/images/agent/container-hardening.env || exit 1
 docker buildx build \
   --builder default \
   --tag blitzlog-agent:local \
@@ -193,6 +250,13 @@ mkdir -p /tmp/blitzlog-workspace/.blitzlog
 # is created by the agent's shutdown tool (assisted-shutdown.sh) as
 # its LAST step, after the session is exported.
 touch /tmp/blitzlog-workspace/.idle
+# Issue #164/#174: the container runs as uid 0 (dpkg needs root to
+# install a project's build dependencies) and its tmpfs mounts are
+# owned by the runtime uid, so the bind-mounted host paths have to be
+# writable by it. `chmod` rather than `chown` — a local dev box may
+# not have sudo. Both directories live under /tmp.
+chmod 0777 /tmp/blitzlog-logs /tmp/blitzlog-workspace /tmp/blitzlog-workspace/.blitzlog
+chmod 0666 /tmp/blitzlog-workspace/.idle
 # Remove any stale .shutdown left over from a previous run, so the
 # watcher below doesn't fire immediately on startup. The watcher
 # polls for the file's existence, so any leftover .shutdown would
@@ -218,18 +282,33 @@ trap "kill $WATCHER_PID 2>/dev/null || true" EXIT INT TERM
 # it to the container via -e. The token is short-lived, so we generate
 # it on every run rather than storing it. -e overrides any value that
 # might be in .env.assisted.test. Conditional docker flags — only grant
-# Tailscale capabilities when TAILSCALE_AUTH_KEY is set in
-# .env.assisted.test (least privilege).
+# the Tailscale capability exemption when TAILSCALE_AUTH_KEY is set in
+# .env.assisted.test (least privilege). The flag list itself comes
+# from the canonical contract so the dev run and the production run
+# grant exactly the same exemption.
 TUNNEL_FLAGS=""
 if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.assisted.test 2>/dev/null; then
-    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+    TUNNEL_FLAGS="$BLITZLOG_TAILSCALE_FLAGS"
 fi
 
 # might be in .env.assisted.test.
-docker run --rm -i $TUNNEL_FLAGS \
+# Issue #164: mirror production's gh-config mount so the container's
+# $HOME/.config is a Docker-created (root-owned) directory — the
+# production topology, where the host owns the gh config and the
+# container only reads it. The host's real token goes in it, so `gh`
+# inside the container keeps working (the entrypoint skips its own
+# `gh auth login` when a hosts.yml is already mounted).
+mkdir -p /tmp/blitzlog-gh-config
+cat > /tmp/blitzlog-gh-config/hosts.yml <<GH_EOF
+github.com:
+    oauth_token: $(gh auth token)
+    git_protocol: https
+GH_EOF
+docker run --rm -i $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS $TUNNEL_FLAGS \
   --env-file ./packages/images/agent/.env.assisted.test \
   -e "GITHUB_TOKEN=$(gh auth token)" \
   -v /tmp/whisper-models:/opt/whisper-stt/models:ro \
+  -v /tmp/blitzlog-gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
   -v /tmp/blitzlog-workspace:/workspace \
   --name blitzlog-tg-test \
@@ -255,6 +334,7 @@ curl -L --fail -o /tmp/whisper-models/ggml-tiny.en.bin \
 [tasks.image-telegram-live-autonomous]
 description = "Build the image and run the agent in autonomous mode (fire-and-forget opencode run). The agent clones the repo, installs the toolchain, runs the project's bootstrap task, then runs opencode on the issue specified in OPENCODE_PROMPT. The container exits when opencode finishes. Env vars come from .env.autonomous.test (gitignored, MODE=autonomous + OPENCODE_PROMPT + OPENCODE_API_KEY + etc.) plus -e GITHUB_TOKEN fetched at runtime. Prerequisite: gh auth login on the host. The whisper-stt-shim does NOT run in autonomous mode, so no STT model file is needed."
 run = """
+. packages/images/agent/container-hardening.env || exit 1
 docker buildx build \
   --builder default \
   --tag blitzlog-agent:local \
@@ -262,21 +342,41 @@ docker buildx build \
   ./packages/images/agent
 mkdir -p /tmp/blitzlog-logs
 mkdir -p /tmp/blitzlog-workspace/.blitzlog
+# Issue #164/#174: the container runs as uid 0 (dpkg needs root to
+# install a project's build dependencies) and its tmpfs mounts are
+# owned by the runtime uid, so the bind-mounted host paths have to be
+# writable by it. `chmod` rather than `chown` — a local dev box may
+# not have sudo. Both directories live under /tmp.
+chmod 0777 /tmp/blitzlog-logs /tmp/blitzlog-workspace /tmp/blitzlog-workspace/.blitzlog
 # Autonomous mode is fire-and-forget: opencode run --agent build runs to
 # completion, then the entrypoint exits with opencode's exit code. No
 # watcher, no .shutdown, no Telegram bot, no whisper-stt-shim. The
-# Conditional docker flags — only grant Tailscale capabilities when
-# TAILSCALE_AUTH_KEY is set in .env.autonomous.test (least privilege).
+# Conditional docker flags — only grant the Tailscale capability
+# exemption when TAILSCALE_AUTH_KEY is set in .env.autonomous.test
+# (least privilege). The flag list itself comes from the canonical
+# contract so the dev run and the production run grant exactly the
+# same exemption.
 TUNNEL_FLAGS=""
 if grep -qE '^TAILSCALE_AUTH_KEY=.+' ./packages/images/agent/.env.autonomous.test 2>/dev/null; then
-    TUNNEL_FLAGS="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+    TUNNEL_FLAGS="$BLITZLOG_TAILSCALE_FLAGS"
 fi
 
 # container name is different from the assisted task to avoid
 # collisions if both run concurrently (e.g., during CI).
-docker run --rm $TUNNEL_FLAGS \
+# Issue #164: mirror production's gh-config mount so the container's
+# $HOME/.config is a Docker-created (root-owned) directory — the
+# production topology. The host's real token goes in it, so `gh` inside
+# the container keeps working.
+mkdir -p /tmp/blitzlog-gh-config
+cat > /tmp/blitzlog-gh-config/hosts.yml <<GH_EOF
+github.com:
+    oauth_token: $(gh auth token)
+    git_protocol: https
+GH_EOF
+docker run --rm $BLITZLOG_HARDENING_FLAGS $BLITZLOG_TMPFS_MOUNTS $TUNNEL_FLAGS \
   --env-file ./packages/images/agent/.env.autonomous.test \
   -e "GITHUB_TOKEN=$(gh auth token)" \
+  -v /tmp/blitzlog-gh-config:${BLITZLOG_CONTAINER_HOME}/.config/gh:ro \
   -v /tmp/blitzlog-logs:/var/log/blitzlog \
   -v /tmp/blitzlog-workspace:/workspace \
   --name blitzlog-tg-auto \

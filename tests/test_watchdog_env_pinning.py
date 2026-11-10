@@ -258,6 +258,61 @@ class TestWatchdogEnvPinning(unittest.TestCase):
                 f"{var} must be passed to the container by the watchdog",
             )
 
+    def test_imds_block_is_fail_closed(self):
+        """Issue #175: a boundary that fails silently is
+        indistinguishable from one that works.
+
+        The first version of the IMDS rule was best-effort — it logged
+        a warning and started the agent anyway. The gap then went
+        unnoticed for a release cycle: the container could assume the
+        instance role and read SSM parameters it must never see (the
+        GitHub App's private key, the webhook secret). If the rule
+        cannot be installed, the agent must NOT start.
+        """
+        self.assertIn(
+            "block_imds_from_container",
+            self.watchdog_src,
+            "watchdog.sh must gate the container start on the IMDS block "
+            "being in force (issue #175)",
+        )
+        self.assertIn(
+            "refusing to start the agent container",
+            self.watchdog_src,
+            "the watchdog must say loudly that it is refusing to start "
+            "the container when the IMDS block cannot be installed",
+        )
+        # The refusal has to actually gate the start, not just log.
+        self.assertRegex(
+            self.watchdog_src,
+            r"if block_imds_from_container; then\s+run_agent_container",
+            "the container start must be inside the IMDS block's success "
+            "branch (issue #175)",
+        )
+        # ...and the failure path must still run the cleanup (log
+        # upload, bot-lock release, instance terminate), so a refused
+        # start does not strand the instance.
+        self.assertIn(
+            "CONTAINER_EXIT=1",
+            self.watchdog_src,
+            "the refused start must set a non-zero exit code so the "
+            "cleanup path runs and the instance terminates",
+        )
+
+    def test_ami_installs_iptables_explicitly(self):
+        """The block must not depend on iptables arriving as a
+        transitive dependency of docker-ce: if the binary is missing,
+        the watchdog refuses to start the agent."""
+        system_sh = _read(
+            os.path.join(
+                REPO_ROOT, "infra/aws/packer/scripts-docker-ubuntu/01-system.sh"
+            )
+        )
+        self.assertRegex(
+            system_sh,
+            r"apt-get install[^\n]*\n(?:[^\n]*\\\n)*[^\n]*\biptables\b",
+            "01-system.sh must install iptables explicitly (issue #175)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

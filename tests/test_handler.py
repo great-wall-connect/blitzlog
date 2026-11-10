@@ -381,7 +381,15 @@ class TestRefreshBranch(unittest.TestCase):
         handler = sys.modules["handler"]
         handler._scheduler_client = None
         handler._sts_client = None
+        handler._ec2_client = None
         handler._account_id_cache = None
+
+        # The instance-liveness guard calls EC2. Stub it out by
+        # default so the refresh tests never reach AWS; the guard's
+        # own behaviour is pinned by the dedicated tests below.
+        liveness = patch.object(handler, "_instance_is_alive", return_value=True)
+        liveness.start()
+        self.addCleanup(liveness.stop)
 
     def tearDown(self):
         os.environ.clear()
@@ -390,6 +398,7 @@ class TestRefreshBranch(unittest.TestCase):
         handler = sys.modules["handler"]
         handler._scheduler_client = None
         handler._sts_client = None
+        handler._ec2_client = None
         handler._account_id_cache = None
 
     def _make_event(self, **overrides):
@@ -492,6 +501,74 @@ class TestRefreshBranch(unittest.TestCase):
         mock_mint.assert_called_once()
         mock_secrets.return_value.put.assert_called_once()  # token still written
         mock_schedule.assert_not_called()  # chain ends
+
+    @patch("handler.schedule_next_refresh")
+    @patch("handler.get_github_app_token")
+    @patch("handler.get_secrets")
+    def test_refresh_branch_keeps_the_old_token_and_chains_on_when_the_mint_fails(
+        self, mock_secrets, mock_mint, mock_schedule
+    ):
+        """A failed mint must NOT overwrite the token in SSM, and the
+        chain must keep going.
+
+        Why: the token already in SSM is the previous one and it is
+        still valid — the chain mints its replacement 30 min before
+        the current one expires. Overwriting it with nothing (or with
+        a broken value) would cost the agent its GitHub access, and
+        ending the chain would mean it never gets another chance.
+
+        The old code returned 500 and stopped, so ONE transient GitHub
+        error killed the refresh for the rest of the run.
+        """
+        from handler import lambda_handler
+
+        mock_secrets.return_value.put = MagicMock()
+        mock_mint.side_effect = RuntimeError("boom")
+
+        result = lambda_handler(self._make_event(iteration=3), None)
+
+        self.assertEqual(result["statusCode"], 500)
+        # The token in SSM is untouched: the previous one is still
+        # valid and must stay there.
+        mock_secrets.return_value.put.assert_not_called()
+        # ...and the chain carries on so the next hop can retry.
+        mock_schedule.assert_called_once_with(
+            issue=145,
+            instance="i-0b076c604585b01be",
+            iteration=4,
+            repo="octocat/Hello-World",
+        )
+
+    def test_refresh_interval_leaves_overlap_headroom(self):
+        """The rotation interval must leave enough overlap for a
+        replacement token to become usable.
+
+        GitHub caps installation tokens at 1 h. The chain mints the
+        next one `TOKEN_REFRESH_INTERVAL_SECONDS` after the current
+        one, so the published token's remaining life at any moment is
+        (60 min - age). With a 30-min interval the token in SSM ALWAYS
+        has at least 30 min of life left.
+
+        That headroom is what lets the watchdog's poll loop hold back
+        a freshly minted token whose per-repository grant has not
+        materialised yet (GitHub did this to one mint of five on
+        2026-10-27, for ~20 min) while the PREVIOUS token — still
+        valid — keeps the agent's git working. The old 50-min
+        interval left only 10 min of overlap, which is not enough.
+        """
+        from handler import TOKEN_REFRESH_INTERVAL_SECONDS
+
+        self.assertEqual(
+            TOKEN_REFRESH_INTERVAL_SECONDS,
+            1800,
+            "the rotation interval must be 30 min: with GitHub's 1 h "
+            "token cap that guarantees >= 30 min of overlap, so a "
+            "replacement whose repo grant has not materialised yet can "
+            "be held back without stranding the agent",
+        )
+        # It must also be shorter than the 1 h cap, or the token would
+        # expire before its replacement arrived.
+        self.assertLess(TOKEN_REFRESH_INTERVAL_SECONDS, 3600)
 
     def test_refresh_schedule_group_name_is_per_issue(self):
         """The schedule group name must be per-(env, repo, issue) so the
@@ -663,6 +740,58 @@ class TestRefreshBranch(unittest.TestCase):
             lambda_handler(event, None)
         mock_verify.assert_not_called()
 
+    def test_refresh_branch_stops_the_chain_when_the_instance_is_gone(self):
+        """The chain must not outlive its run.
+
+        The watchdog's teardown deletes the schedule group, so the
+        chain normally dies with the agent. When that cleanup
+        failed (or the instance was killed hard), a chain left
+        running would keep re-minting tokens into SSM for hours
+        after the agent is gone — a zombie token nobody uses.
+
+        So: if the instance is no longer alive, write NO token and
+        schedule NO next hop.
+        """
+        from handler import lambda_handler
+
+        with (
+            patch("handler._instance_is_alive", return_value=False),
+            patch("handler.get_github_app_token") as mock_mint,
+            patch("handler.get_secrets") as mock_secrets,
+            patch("handler.schedule_next_refresh") as mock_schedule,
+        ):
+            mock_secrets.return_value.put = MagicMock()
+            result = lambda_handler(self._make_event(), None)
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertIn("instance-gone", result["body"])
+        mock_mint.assert_not_called()
+        mock_secrets.return_value.put.assert_not_called()
+        mock_schedule.assert_not_called()
+
+    def test_refresh_branch_continues_when_the_instance_lookup_fails(self):
+        """A failed instance lookup must NOT kill the chain.
+
+        The liveness guard is an optimisation, not a safety
+        interlock: if EC2 cannot answer (throttling, a transient
+        endpoint error), the refresh must carry on. A dead chain
+        costs the agent its GitHub access, so the guard fails open.
+        """
+        from handler import lambda_handler
+
+        with (
+            patch("handler._instance_is_alive", return_value=None),
+            patch("handler.get_github_app_token", return_value="ghp_NEW"),
+            patch("handler.get_secrets") as mock_secrets,
+            patch("handler.schedule_next_refresh") as mock_schedule,
+        ):
+            mock_secrets.return_value.put = MagicMock()
+            result = lambda_handler(self._make_event(), None)
+
+        self.assertEqual(result["statusCode"], 200)
+        mock_secrets.return_value.put.assert_called_once()
+        mock_schedule.assert_called_once()
+
     def test_refresh_branch_does_not_affect_webhook_path(self):
         """A non-refresh event must NOT enter the refresh branch. Pin
         this so a payload with a `action` of anything other than
@@ -802,6 +931,170 @@ class TestScheduleNextRefresh(unittest.TestCase):
         os.environ.pop("SCHEDULER_ROLE_ARN", None)
         with patch("handler.boto3.client"), self.assertRaises(RuntimeError):
             schedule_next_refresh(issue=145, instance="i-abc", iteration=0, repo="r")
+
+    def test_first_hop_sweeps_the_leftover_schedule_group(self):
+        """FALLBACK cleanup: the first hop of a chain must delete a
+        leftover per-issue schedule group before creating its own
+        schedule.
+
+        Why this matters: EventBridge Scheduler does NOT delete a
+        one-time `at()` schedule after it fires, so the previous
+        run's `refresh-issue-<N>-iter-0` lingers in the group. The
+        next run's first `CreateSchedule` then fails with
+        `ConflictException`, the chain never starts, and the agent's
+        token dies 1 h after the launch-time mint — the exact
+        symptom seen on the dev instance.
+
+        The watchdog's teardown is the PRIMARY cleanup path; this
+        sweep only covers the case where that teardown never ran.
+        """
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+
+        client.delete_schedule_group.assert_called_once()
+        self.assertEqual(
+            client.delete_schedule_group.call_args.kwargs["Name"],
+            "blitzlog-prod-token-refresh-d54f61277109bf4c",
+            "the sweep must target the per-(env, repo, issue) group.",
+        )
+
+    def test_later_hops_never_sweep_the_schedule_group(self):
+        """Iterations 1..9 ARE the chain — they live in the group and
+        must never delete it. Only the first hop sweeps."""
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=3,
+                repo="octocat/Hello-World",
+            )
+
+        client.delete_schedule_group.assert_not_called()
+
+    def test_sweep_failure_does_not_stop_the_chain(self):
+        """A failed sweep is best-effort: the chain must still start.
+
+        The sweep exists to cover the case where the watchdog's
+        teardown never ran; if the sweep itself fails (e.g. the
+        Lambda role is missing `scheduler:DeleteScheduleGroup`) the
+        chain must still come up rather than leave the agent with a
+        1 h token and no refresh.
+        """
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        client.delete_schedule_group.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "nope"}},
+            "DeleteScheduleGroup",
+        )
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+
+        client.create_schedule.assert_called_once()
+
+    def test_conflict_exception_deletes_the_leftover_and_retries(self):
+        """A `ConflictException` means a schedule with this name
+        already exists — a leftover from a previous run. The handler
+        must delete it and recreate, so the chain can start.
+
+        This is the belt-and-braces path for the case where the
+        sweep could not remove the group (e.g. the group is shared
+        with a schedule we must not touch).
+        """
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        client.create_schedule.side_effect = [
+            ClientError(
+                {"Error": {"Code": "ConflictException", "Message": "exists"}},
+                "CreateSchedule",
+            ),
+            None,
+        ]
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+
+        client.delete_schedule.assert_called_once()
+        self.assertEqual(
+            client.delete_schedule.call_args.kwargs["Name"],
+            "refresh-issue-145-iter-0",
+        )
+        self.assertEqual(client.create_schedule.call_count, 2)
+
+    def test_group_being_deleted_is_retried_not_raised(self):
+        """EventBridge Scheduler is eventually consistent on group
+        deletion: a `CreateSchedule` right after a `DeleteScheduleGroup`
+        fails with `ValidationException: ... is being deleted`.
+
+        The handler must wait it out and retry rather than lose the
+        chain (this is the race the live unblock hit).
+        """
+        from handler import schedule_next_refresh
+
+        client = MagicMock()
+        client.create_schedule.side_effect = [
+            ClientError(
+                {
+                    "Error": {
+                        "Code": "ValidationException",
+                        "Message": (
+                            "You cannot perform this operation because "
+                            "schedule group blitzlog-prod-token-refresh-x "
+                            "is being deleted."
+                        ),
+                    }
+                },
+                "CreateSchedule",
+            ),
+            None,
+        ]
+        with (
+            patch("handler._get_scheduler_client", return_value=client),
+            patch("handler._get_account_id", return_value="000000000000"),
+            patch("handler.time.sleep") as mock_sleep,
+        ):
+            schedule_next_refresh(
+                issue=145,
+                instance="i-test",
+                iteration=0,
+                repo="octocat/Hello-World",
+            )
+
+        mock_sleep.assert_called_once()
+        self.assertEqual(client.create_schedule.call_count, 2)
 
 
 class TestRefreshWireIntegration(unittest.TestCase):

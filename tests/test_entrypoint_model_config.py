@@ -57,20 +57,22 @@ class TestCloudConfigRendering(unittest.TestCase):
         }
         defaults.update(kwargs)
         with tempfile.TemporaryDirectory() as tmp:
-            # Redirect the hard-coded config path into the temp dir so
-            # the test never touches /root.
-            function = self.function.replace(
-                "/root/.config/opencode", f"{tmp}/opencode"
-            )
+            # The entrypoint writes the config under "$HOME/.config/opencode"
+            # (the container's HOME is a tmpfs — see issue #164's
+            # container hardening). Point HOME at the temp dir so the
+            # test never touches the real one.
+            home = Path(tmp) / "home"
+            (home / ".config" / "opencode").mkdir(parents=True)
             script = f"""#!/bin/sh
 set -eu
-mkdir -p {tmp}/opencode
-{function}
+HOME="{home}"
+export HOME
+{self.function}
 """
             for name, value in defaults.items():
                 script += f'{name}="{value}"\n'
             script += "write_cloud_config\n"
-            script += f"cat {tmp}/opencode/opencode.json\n"
+            script += f"cat {home}/.config/opencode/opencode.json\n"
             result = subprocess.run(
                 ["sh", "-c", script],
                 capture_output=True,
@@ -143,7 +145,7 @@ mkdir -p {tmp}/opencode
         block = self.text[i : i + 1200]
         self.assertIn("write_cloud_config", block)
         # The old inline heredoc is gone.
-        self.assertNotIn("cat > /root/.config/opencode/opencode.jsonc", block)
+        self.assertNotIn('cat > "$HOME/.config/opencode/opencode.jsonc"', block)
         # ...and so is the old direct use of the raw env var.
         self.assertNotIn('"apiKey": "${OPENCODE_API_KEY}"', self.text)
 
