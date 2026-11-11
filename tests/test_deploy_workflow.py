@@ -1281,10 +1281,11 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
         (see infra/aws/modules/core/lambda.tf:65-75). Without mise,
         the apply fails with "Python 3.12 not found".
         """
-        self.assertIn(
-            "jdx/mise-action@v4",
+        self.assertRegex(
             self.text,
-            "terraform-apply-dev.yml must use jdx/mise-action to install mise",
+            r"jdx/mise-action@v\d+",
+            "terraform-apply-dev.yml must use jdx/mise-action (with a pinned "
+            "major version) to install mise",
         )
         self.assertIn(
             "mise install",
