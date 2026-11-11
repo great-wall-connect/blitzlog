@@ -11,7 +11,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/great-wall-connect/blitzlog)](https://github.com/great-wall-connect/blitzlog/commits/main)
 [![Open Source](https://img.shields.io/badge/open_source-✓-f5d90a)](#license)
 
-Blitzlog is an **open-source autonomous coding agent** for **GitHub**: label an issue, and it spins up an **AWS EC2 spot instance**, runs an **OpenCode agent** on your repo, opens a **pull request**, and shuts itself down. Two modes — fully **autonomous** end-to-end, or **assisted** via a Telegram bot — both self-hosted and AWS-native, with no SaaS lock-in.
+Blitzlog is an **open-source autonomous coding agent** for **GitHub**: label an issue, and it spins up an **AWS EC2 spot instance**, runs an **OpenCode agent** on your repo, opens a **pull request**, and shuts itself down. Two modes — fully **autonomous** end-to-end, or **assisted** via a chat bot — both self-hosted and AWS-native, with no SaaS lock-in.
 
 ![Blitzlog demo — issue to PR end-to-end](assets/blitzlog-demo.gif)
 
@@ -42,7 +42,7 @@ GitHub issue (labeled "autonomous")
 Two modes:
 
 - **Autonomous** — full-auto: the agent closes the issue end-to-end.
-- **Assisted** — interactive via a Telegram bot, with the same underlying pipeline but the human stays in the loop.
+- **Assisted** — interactive via a chat bot, with the same underlying pipeline but the human stays in the loop. Currently Telegram; Slack and other enterprise platforms are being evaluated (see [docs/CHAT_PLATFORMS.md](docs/CHAT_PLATFORMS.md)).
 
 ---
 
@@ -638,6 +638,14 @@ The bucket name is configurable in each stack's `-backend.hcl` file. Each stack 
 ---
 
 ## Per-user bot pool setup (assisted mode)
+
+> **Platform support is being evaluated.** Telegram is currently the only chat
+> platform, and it is hard-coded across the Lambda, bootstrap, container, and
+> Terraform. Support for Slack and other enterprise platforms is being
+> evaluated in [#189](https://github.com/great-wall-connect/blitzlog/issues/189);
+> see **[docs/CHAT_PLATFORMS.md](docs/CHAT_PLATFORMS.md)** for the current
+> analysis, recommendation, and roadmap. The setup below describes the
+> existing Telegram-only path.
 
 The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
 
