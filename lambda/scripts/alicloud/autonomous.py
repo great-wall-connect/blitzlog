@@ -128,12 +128,12 @@ log "Starting autonomous opencode agent via systemd watchdog..."
 # session artifacts to OSS, releases the bot pool lock, and terminates
 # the ECS instance.
 #
-# KNOWN LIMITATION (issue #126 Phase 5): the watchdog's log upload
-# uses the AWS-side `blitzlog_s3_*` library
-# (infra/aws/packer/scripts-docker-ubuntu/watchdog.sh). On the
-# Alicloud path the upload will fail silently (`|| true` swallow) —
-# the MNS DLQ + FC dead-letter config catch the eventual session-
-# export failure.
+# Issue #125: the watchdog is now the Alicloud variant
+# (infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh), which uses
+# the `blitzlog_oss_*` library (ossutil) and the Aliyun metadata
+# service. The known limitation that used to sit here — the watchdog
+# uploading logs with the AWS-side `blitzlog_s3_*` library, so every
+# upload failed silently on the `|| true` swallow — is resolved.
 #
 # Write the env file the watchdog reads. Tailscale + local LLM env
 # vars are passed through so the container can join a Tailnet and
@@ -168,16 +168,13 @@ GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 OPENCODE_SERVER_USERNAME="agent"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
 # Issue #145: the Alicloud path has no EventBridge Scheduler
-# equivalent in this PR (no token-refresh chain — the 1h GitHub
-# token cap is operationally visible). The watchdog's refresh
-# branch is a no-op on Alicloud until the Aliyun scheduler
-# equivalent lands (Phase 5 follow-up).
-GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
+# equivalent, so there is no token-refresh chain and no schedule
+# group to tear down. The Alicloud watchdog (issue #125) does not
+# read GITHUB_TOKEN_SCHED_GROUP at all.
 ENVEOF
 
 # Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog
-# runs the agent container, waits for exit, then does AWS cleanup.
-# (Cleanup is still AWS-shaped on the Alicloud path — Phase 5
-# follow-up adds the Alicloud equivalents.)
+# runs the agent container, waits for exit, then does the Alicloud
+# cleanup (OSS upload + ECS terminate + bot-lock release).
 sudo systemctl start blitzlog-agent.service
 """

@@ -1238,6 +1238,89 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "ram.tf must grant oss:GetObject for the FC code download",
         )
 
+    def test_ecs_agent_policy_grants_put_object_for_its_own_env_prefix(self):
+        """Issue #125: the ECS agent role must allow `oss:PutObject`
+        on `${var.environment}/*`.
+
+        This is the RAM half of the log-upload contract: the upload
+        code (lambda/scripts/alicloud/{autonomous,assisted}.py)
+        prefixes keys with `$BLITZLOG_ENV/`, and this grant must match
+        that prefix. If a future refactor narrows the resource
+        pattern to e.g. a hard-coded `prod/*` literal, the upload
+        silently fails (swallowed by `|| true`).
+
+        The AWS-side analogue is the
+        `s3:PutObject` grant on
+        `${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*`
+        asserted by `TestEnvNamespacing`.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:PutObject",
+            ram,
+            "ecs_agent_policy must include oss:PutObject — without it, the "
+            "watchdog's `blitzlog_oss_put ... /var/log/backend-bootstrap.log "
+            "...` upload fails with AccessDenied and is silently swallowed "
+            "by `|| true`.",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/${var.environment}/*",
+            ram,
+            "ecs_agent_policy must grant on "
+            "${local.agent_logs_bucket_arn}/${var.environment}/* — the "
+            "log-upload code prefixes keys with $BLITZLOG_ENV/, so this is "
+            "the path the runtime actually uses.",
+        )
+
+    def test_ecs_agent_policy_grants_delete_object_for_bot_pool_locks(self):
+        """Issue #125: the watchdog releases the bot-pool lock with
+        `blitzlog_oss_rm` when the agent container exits.
+
+        Without `oss:DeleteObject` the lock is never released and the
+        same bot can never be picked up by the next run — a deadlock
+        that is invisible until the pool is exhausted.
+
+        The AWS-side analogue is the `s3:DeleteObject` grant on
+        `bot-pool-locks/*` in infra/aws/modules/core/iam.tf.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:DeleteObject",
+            ram,
+            "ecs_agent_policy must include oss:DeleteObject — the watchdog "
+            "releases the bot-pool lock with `blitzlog_oss_rm` and the "
+            "upload would fail with AccessDenied (swallowed by `|| true`).",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/bot-pool-locks/*",
+            ram,
+            "the delete grant must be scoped to bot-pool-locks/* — the "
+            "AWS-side analogue grants s3:DeleteObject on exactly that path.",
+        )
+
+    def test_ecs_agent_policy_grants_list_objects_for_lock_probe(self):
+        """Issue #125: the assisted-mode bootstrap probes for a
+        previous session's metadata.json with `blitzlog_oss_ls`, and
+        the watchdog's lock release checks whether the lock object
+        still exists.
+
+        The AWS-side analogue is the `s3:ListBucket` grant with a
+        `bot-pool-locks/*` prefix condition.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:ListObjects",
+            ram,
+            "ecs_agent_policy must include oss:ListObjects — the "
+            "assisted-mode session-restore probe uses `blitzlog_oss_ls`.",
+        )
+        self.assertIn(
+            '"oss:prefix" = "bot-pool-locks/*"',
+            ram,
+            "the list grant must be scoped to the bot-pool-locks/* prefix, "
+            "matching the AWS-side s3:ListBucket condition.",
+        )
+
     def test_terraform_pinned_to_1_16_6(self):
         """Every workflow that installs Terraform + mise.toml must
         use the same version (1.16.6). A drift between them causes

@@ -1496,5 +1496,158 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         )
 
 
+class TestAlicloudPackerJob(unittest.TestCase):
+    """Issue #125: release.yml grows an `alicloud-packer` job that
+    bakes the Alicloud ECS image and publishes its id to KMS.
+
+    The job is gated off by default (the `ENABLE_ALICLOUD_BAKE` repo
+    variable) so it cannot fire before the Alicloud Packer role is
+    provisioned.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RELEASE_YML.read_text()
+        import yaml
+
+        cls.wf = yaml.safe_load(cls.text)
+        cls.job = cls.wf["jobs"]["alicloud-packer"]
+
+    def test_job_exists(self):
+        self.assertIn(
+            "alicloud-packer",
+            self.wf["jobs"],
+            "release.yml must have an alicloud-packer job",
+        )
+
+    def test_job_is_gated_off_by_default(self):
+        """An unset repo variable must mean 'never runs'. The bake
+        needs the Alicloud Packer role, which is provisioned
+        separately — an ungated job would fail the whole release."""
+        self.assertIn(
+            "vars.ENABLE_ALICLOUD_BAKE",
+            str(self.job.get("if", "")),
+            "the alicloud-packer job must be gated on the "
+            "ENABLE_ALICLOUD_BAKE repo variable; unset means off",
+        )
+        self.assertEqual(
+            str(self.job.get("if", "")).strip(),
+            "${{ vars.ENABLE_ALICLOUD_BAKE == 'true' }}",
+            "the gate must be an exact == 'true' comparison so an unset "
+            "variable defaults to disabled",
+        )
+
+    def test_job_needs_the_release_job(self):
+        """The bake PULLS the agent image from ghcr.io, and the
+        `release` job is what pushes it. Running the bake first would
+        bake the previous image. `needs: release` also gives the job
+        the resolved `new_version` / `pr_number`, so the agent image
+        tag formula is shared with the AWS leg by construction and
+        cannot drift."""
+        self.assertEqual(
+            self.job.get("needs"),
+            "release",
+            "the alicloud-packer job must depend on the release job — the "
+            "bake pulls the agent image the release job pushes",
+        )
+
+    def test_job_does_not_block_the_deploy(self):
+        """A failed Alicloud bake must not fail the AWS deploy. The
+        Alicloud path degrades to "no baked agent image" (the
+        compute provider falls back to the public Ubuntu image), which
+        is strictly better than blocking the AWS deploy."""
+        deploy_needs = self.wf["jobs"]["deploy"].get("needs")
+        needs = (
+            [deploy_needs]
+            if isinstance(deploy_needs, str)
+            else list(deploy_needs or [])
+        )
+        self.assertNotIn(
+            "alicloud-packer",
+            needs,
+            "the deploy job must not depend on the alicloud-packer job — "
+            "an Alicloud bake failure must not block the AWS deploy",
+        )
+
+    def test_job_uses_the_alicloud_packer_template(self):
+        steps = self.job["steps"]
+        names = [s.get("name", "") for s in steps]
+        self.assertIn("Packer init", names)
+        self.assertIn("Packer build (bake ECS image, publish id to KMS)", names)
+
+        init_step = next(s for s in steps if s.get("name") == "Packer init")
+        self.assertEqual(
+            init_step.get("working-directory"),
+            "infra/alicloud/packer",
+            "the Alicloud bake must use the Alicloud Packer tree",
+        )
+        self.assertIn(
+            "agent-ecs-ubuntu.pkr.hcl",
+            init_step.get("run", ""),
+            "the Alicloud bake must build agent-ecs-ubuntu.pkr.hcl",
+        )
+
+    def test_job_publishes_to_the_kms_secret_path(self):
+        """The image id must land where the Alicloud compute provider
+        reads it: /blitzlog/<env>/agent-ami-id-ecs-ubuntu in KMS."""
+        build_step = next(
+            s
+            for s in self.job["steps"]
+            if s.get("name") == "Packer build (bake ECS image, publish id to KMS)"
+        )
+        self.assertIn(
+            "agent-ami-id-ecs-ubuntu",
+            build_step.get("run", ""),
+            "the bake must publish to the Alicloud KMS secret path",
+        )
+
+    def test_job_uses_the_shared_agent_image_tag_formula(self):
+        """The tag formula must match the AWS leg's byte-for-byte, or
+        the two legs bake DIFFERENT agent images."""
+        resolve = next(
+            s
+            for s in self.job["steps"]
+            if s.get("name") == "Resolve Packer vars from mode"
+        )
+        run = resolve.get("run", "")
+        self.assertIn('AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"', run)
+        self.assertIn('AGENT_IMAGE_TAG="v${NEW_VERSION}"', run)
+        # And it must read the version from the release job, not
+        # re-derive it (a second git-cliff run could drift).
+        env = resolve.get("env", {})
+        self.assertIn(
+            "needs.release.outputs.new_version",
+            str(env.get("NEW_VERSION", "")),
+            "the tag must come from the release job's resolved version, "
+            "not a second git-cliff run",
+        )
+        self.assertIn(
+            "needs.release.outputs.blitzlog_env",
+            str(env.get("BLITZLOG_ENV", "")),
+            "the environment must come from the release job's ref-gate "
+            "output so the two bakes cannot land in different envs",
+        )
+
+    def test_job_has_oidc_permissions(self):
+        permissions = self.job.get("permissions", {})
+        self.assertEqual(
+            permissions.get("id-token"),
+            "write",
+            "the job needs id-token: write for the OIDC role assumption",
+        )
+
+    def test_job_authenticates_against_the_alicloud_role(self):
+        steps = self.job["steps"]
+        creds = next(
+            (s for s in steps if "credentials" in s.get("name", "").lower()),
+            None,
+        )
+        self.assertIsNotNone(
+            creds,
+            "the job must have a step that assumes the Alicloud Packer role",
+        )
+        self.assertIn("blitzlog-packer-build-role", str(creds.get("with", {})))
+
+
 if __name__ == "__main__":
     unittest.main()

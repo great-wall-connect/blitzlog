@@ -737,6 +737,185 @@ jobs:
           echo "Baked scrummaster AMI: $AMI_ID -> $SSM_PARAM"
           echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
+  # ----------------------------------------------------------------
+  # The Alicloud image bake (issue #125). Runs as a SEPARATE JOB so
+  # it does not block the AWS leg's steps — but it DOES depend on the
+  # `release` job, because the bake pulls the agent image from ghcr.io
+  # and the `release` job is what pushes it. See the `needs:` comment
+  # on the job for the full reasoning.
+  #
+  # It applies the SAME ref-gate composite action as `release`, so the
+  # AWS agent AMI and the Alicloud agent image can never be published
+  # under different environments.
+  #
+  # It is NOT in the `deploy` job's `needs`: a failure here must not
+  # fail the AWS deploy. The Alicloud deploy path reads the image id
+  # from KMS at launch time and falls back to the public Ubuntu image
+  # when the parameter is missing, so an un-baked Alicloud image
+  # degrades to "no baked agent image" rather than "no deploy".
+  # ----------------------------------------------------------------
+  alicloud-packer:
+    # The name can't interpolate a step output (job `name:` is evaluated
+    # before steps run), so it just says what it does; the env lands in
+    # the logs and in the KMS secret path.
+    name: Bake Alicloud ECS image (after the agent image is pushed)
+
+    # GATED OFF until the Alicloud Packer role is provisioned and the
+    # operator opts in. Unset repo variable = never runs.
+    #
+    # To enable:
+    #   gh variable set ENABLE_ALICLOUD_BAKE --body true
+    if: ${{ vars.ENABLE_ALICLOUD_BAKE == 'true' }}
+
+    # `needs: release` is REQUIRED, not an optimisation. The bake
+    # pulls the agent image from ghcr.io (`03-bake-images.sh`), and
+    # the `release` job is what pushes it — so running the bake
+    # before the push would bake the PREVIOUS image (or fail with
+    # `unauthorized`/`manifest unknown`). It also gives the job the
+    # resolved `new_version` and `pr_number`, which together form the
+    # agent image tag — the tag formula is therefore shared with the
+    # AWS leg by construction, with no second git-cliff run that could
+    # drift.
+    #
+    # It is deliberately NOT in the `deploy` job's `needs`: a failure
+    # here must not fail the AWS deploy. The Alicloud deploy path
+    # reads the image id from KMS at launch time and falls back to the
+    # public Ubuntu image when the parameter is missing, so an
+    # un-baked Alicloud image degrades to "no baked agent image"
+    # rather than "no deploy".
+    needs: release
+    runs-on: ubuntu-26.04-arm
+
+    permissions:
+      contents: read
+      packages: read
+      # Required for OIDC into the Alicloud Packer build role.
+      id-token: write
+
+    env:
+      BUILD_REF: ${{ inputs.ref || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 1
+
+      # Same gate, same action, same decision. `mode` is always one of
+      # release / pr-test here — a refused ref fails this step, which
+      # fails the job, exactly as it fails `release`.
+      - name: Ref gate
+        id: ref-gate
+        uses: ./.github/actions/ref-gate
+        with:
+          build-ref: ${{ env.BUILD_REF }}
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: 1.16.1
+
+      # The Alicloud credentials. The `aliyun` CLI picks up the
+      # credentials the role assumption step exports (OIDC → STS →
+      # ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET /
+      # ALIBABA_CLOUD_SECURITY_TOKEN), so the Packer build and its
+      # post-processor share one session.
+      #
+      # The role is provisioned by infra/alicloud/bootstrap/packer-role.tf.
+      # The account id comes from a repo variable — the same shape the
+      # AWS leg uses for vars.AWS_ACCOUNT_ID.
+      - name: Configure Alicloud credentials (OIDC) for Packer
+        uses: aliyun/aliyun-credentials-action@v1
+        with:
+          role_arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-packer-build-role
+          region: ${{ vars.ALICLOUD_REGION || 'cn-hangzhou' }}
+
+      - name: Resolve Packer vars from mode
+        id: packer-vars
+        env:
+          BLITZLOG_ENV: ${{ needs.release.outputs.blitzlog_env }}
+          NEW_VERSION: ${{ needs.release.outputs.new_version }}
+          PR_NUMBER: ${{ needs.release.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # BLITZLOG_ENV (dev / prod) comes from the `release` job's
+          # ref-gate output — NOT re-derived here, so the two image
+          # bakes cannot drift onto different environments.
+          #
+          #   dev  <- pr-test:  last-writer-wins on /blitzlog/dev/...
+          #   prod <- release: /blitzlog/prod/...
+          #
+          # The agent image tag formula is byte-identical to the AWS
+          # leg's "Resolve Packer vars" step, and both legs read the
+          # same `new_version` / `pr_number` from the `release` job —
+          # so the two bakes cannot bake DIFFERENT agent images.
+          case "$BLITZLOG_ENV" in
+            dev)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}-pr${PR_NUMBER}"
+              ;;
+            prod)
+              AGENT_IMAGE_TAG="v${NEW_VERSION}"
+              ;;
+            *)
+              echo "FATAL: the release job reported BLITZLOG_ENV='$BLITZLOG_ENV'; expected dev or prod." >&2
+              exit 1
+              ;;
+          esac
+          # The Alicloud STT-model bucket. The AWS leg hard-codes
+          # `gwc-blitzlog-stt-models`; the Alicloud bucket is named
+          # after the OSS bucket Terraform created in
+          # infra/alicloud/bootstrap (see oss.tf) and is overridable
+          # for a self-hosted deployment.
+          STT_BUCKET="${ALICLOUD_STT_MODELS_BUCKET:-gwc-blitzlog-stt-models}"
+          echo "blitzlog_env=$BLITZLOG_ENV"      >> "$GITHUB_OUTPUT"
+          echo "stt_bucket=$STT_BUCKET"          >> "$GITHUB_OUTPUT"
+          echo "agent_image_tag=$AGENT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Packer init
+        working-directory: infra/alicloud/packer
+        run: packer init agent-ecs-ubuntu.pkr.hcl
+
+      - name: Packer build (bake ECS image, publish id to KMS)
+        id: packer
+        env:
+          BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
+          STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}
+          AGENT_IMAGE_TAG: ${{ steps.packer-vars.outputs.agent_image_tag }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hangzhou' }}
+          # GITHUB_TOKEN is consumed by 03-bake-images.sh to `docker login
+          # ghcr.io` before pulling the blitzlog-agent image. Empty when
+          # the secret isn't set; the script warns and the pull fails.
+          GH_TOKEN_FOR_PACKER: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # -force skips the "Do you want to proceed?" prompt that Packer
+          # emits in non-TTY / non-CI-detected contexts.
+          packer build -force \
+              -var "environment=${BLITZLOG_ENV}" \
+              -var "agent_image_tag=${AGENT_IMAGE_TAG}" \
+              -var "stt_models_bucket=${STT_BUCKET}" \
+              -var "github_token=${GH_TOKEN_FOR_PACKER}" \
+              -var "alicloud_region=${ALICLOUD_REGION}" \
+              agent-ecs-ubuntu.pkr.hcl
+          # Packer writes manifest.json (via the `manifest` post-processor
+          # in agent-ecs-ubuntu.pkr.hcl) with the build's artifact_id
+          # in the form "<region>:image-<id>". The same source of truth
+          # the 05-publish-ami-id.sh post-processor reads from.
+          if [ ! -r manifest.json ]; then
+            echo "FATAL: Packer did not write manifest.json (build may have failed before the post-processor ran)" >&2
+            exit 1
+          fi
+          IMAGE_ID=$(jq -r '.builds[-1].artifact_id' manifest.json | awk -F: '{print $2}')
+          if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+            echo "FATAL: could not extract image id from manifest.json:" >&2
+            jq . manifest.json | sed 's/^/    /' >&2
+            exit 1
+          fi
+          echo "Baked ECS image: $IMAGE_ID"
+          echo "Published to /blitzlog/${BLITZLOG_ENV}/agent-ami-id-ecs-ubuntu via the Packer post-processor (05-publish-ami-id.sh)."
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Apply terraform (${{ needs.release.outputs.mode == 'release' && 'prod' || 'dev' }})
     # Deliberately `needs: release` and NOT `[release, scrummaster-packer]`.

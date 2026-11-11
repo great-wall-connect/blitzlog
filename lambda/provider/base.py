@@ -28,6 +28,42 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from _env import logger
+
+
+def _error_code(exc: Exception) -> str:
+    """Return the cloud-neutral error code for `exc`, or "".
+
+    Each cloud SDK reports "this thing does not exist" differently:
+
+      * AWS (botocore) → `exc.response["Error"]["Code"]`
+      * Alicloud (Tea) → `exc.code`, e.g. `"Forbidden.ResourceNotExists"`
+      * a cloud-neutral wrapper → `exc.code`
+
+    The consumer (`ComputeProvider.get_agent_image_id`) compares the
+    result against a per-provider tuple of acceptable codes, so the
+    shape of the exception does not matter — only the code does.
+
+    Returns "" for an exception with no recognisable code, which
+    matches no provider's not-found tuple and therefore re-raises.
+    """
+    # botocore's ClientError: response["Error"]["Code"]
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error")
+        if isinstance(error, dict):
+            code = error.get("Code")
+            if isinstance(code, str):
+                return code
+
+    # Alicloud's TeaException and the cloud-neutral `_ProviderError`
+    # both expose `.code`.
+    code = getattr(exc, "code", None)
+    if isinstance(code, str):
+        return code
+
+    return ""
+
 
 @dataclass
 class LaunchSpec:
@@ -120,6 +156,94 @@ class ComputeProvider(ABC):
         fallback path when the Packer-baked image is missing or
         retired.
         """
+
+    # --- agent image id resolution (issue #125) ------------------------
+    #
+    # The Packer pipeline publishes the id of the baked agent image
+    # to the provider's `SecretStore` under a provider-specific
+    # suffix:
+    #
+    #   AWS      -> SSM Parameter Store
+    #              /blitzlog/<env>/agent-ami-id-docker-ubuntu
+    #   Alicloud -> KMS Secrets Manager
+    #              /blitzlog/<env>/agent-ami-id-ecs-ubuntu
+    #
+    # The two paths differ in the suffix AND in the error taxonomy
+    # ("this parameter does not exist" is `ParameterNotFound` on SSM
+    # and `Forbidden.ResourceNotExists` on KMS; "this image is
+    # retired" is `InvalidAMIID.NotFound` on EC2 and
+    # `InvalidImageId.NotFound` on ECS). The shared algorithm lives
+    # here so the per-provider differences are two class attributes
+    # rather than two copies of the fallback chain.
+
+    #: Suffix of the `SecretStore` parameter that holds the id of the
+    #: Packer-baked agent image. Overridden per provider.
+    agent_image_param_suffix: str = "agent-ami-id-docker-ubuntu"
+
+    #: Error codes that mean "the parameter does not exist" — the
+    #: signal to fall back to the cloud-published upstream image.
+    #: Overridden per provider.
+    secret_not_found_codes: tuple[str, ...] = ("ParameterNotFound", "404")
+
+    #: Error codes that mean "the image id is not launchable" — the
+    #: signal to clear the stale parameter and fall back.
+    #: Overridden per provider.
+    image_not_found_codes: tuple[str, ...] = (
+        "InvalidAMIID.NotFound",
+        "InvalidAMIID.Unavailable",
+    )
+
+    def get_agent_image_id(self, secret_store: SecretStore) -> str:
+        """Return the id of the Packer-baked agent image, falling
+        back to the cloud-published upstream Ubuntu image.
+
+        The fallback chain:
+
+          1. The parameter is missing → use the upstream image.
+          2. The image is retired / deregistered → clear the stale
+             parameter (best-effort) and use the upstream image.
+          3. Any other error → re-raise so the caller surfaces it.
+
+        Step 2 matters: a retired image id left in the store would
+        turn every subsequent webhook into a 500, so the store is
+        cleaned up rather than left holding a value that cannot be
+        launched.
+        """
+        from _env import _ssm_root  # late import to read env at call time
+
+        param_name = f"{_ssm_root()}/{self.agent_image_param_suffix}"
+        try:
+            image_id = secret_store.get(param_name, decrypt=False)
+        except Exception as e:
+            if _error_code(e) in self.secret_not_found_codes:
+                logger.info("No custom agent image at %s; falling back", param_name)
+                return self.get_latest_image("26.04")
+            raise
+
+        try:
+            self.describe_image(image_id)
+        except Exception as e:
+            code = _error_code(e)
+            if code in self.image_not_found_codes:
+                logger.warning(
+                    "Custom agent image %s is unlaunchable (%s); clearing the "
+                    "stored id and falling back",
+                    image_id,
+                    code,
+                )
+                try:
+                    secret_store.delete(param_name)
+                except Exception as del_err:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to delete stale agent-image id param %s: %s",
+                        param_name,
+                        del_err,
+                    )
+                return self.get_latest_image("26.04")
+            raise
+
+        logger.info("Using custom agent image: %s", image_id)
+        return image_id
 
     @abstractmethod
     def spot_prices(self, instance_types: list[str]) -> list[SpotQuote]:

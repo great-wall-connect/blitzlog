@@ -774,6 +774,136 @@ class TestCrossCloudErrorHelpers(unittest.TestCase):
         self.assertFalse(_is_not_found(exc))
 
 
+class _FakeAliError(Exception):
+    """Stand-in for an Alicloud SDK error.
+
+    The Alicloud SDK's `TeaException` exposes the error code on a
+    `.code` attribute; `provider.base._error_code` reads that
+    attribute. This fake reproduces the shape without pulling the
+    `alibabacloud_tea_openapi` dependency into the test.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class TestAlicloudAgentImageIdResolution(unittest.TestCase):
+    """Issue #125: the Alicloud path reads the id of the
+    Packer-baked ECS image from KMS Secrets Manager, with the same
+    fallback chain the AWS path has against SSM Parameter Store.
+
+    The chain:
+
+      1. The secret is missing → use the cloud-published Ubuntu image.
+      2. The image is retired → clear the stale secret, then use the
+         cloud-published Ubuntu image.
+      3. Any other error → re-raise.
+
+    Step 2 matters: a retired image id left in KMS would turn every
+    subsequent webhook into a 500.
+    """
+
+    def setUp(self):
+        self.compute = AlicloudCompute()
+
+    def _secret_store(self, value=None, error=None):
+        store = MagicMock()
+        if error is not None:
+            store.get.side_effect = error
+        else:
+            store.get.return_value = value
+        return store
+
+    def test_uses_the_aliyun_secret_suffix(self):
+        self.assertEqual(
+            self.compute.agent_image_param_suffix,
+            "agent-ami-id-ecs-ubuntu",
+            "the Alicloud path must read the KMS secret the Alicloud "
+            "Packer post-processor publishes",
+        )
+
+    def test_returns_the_stored_image_id_when_launchable(self):
+        store = self._secret_store(value="img-123")
+        with patch.object(
+            self.compute, "describe_image", return_value={"ok": True}
+        ) as describe:
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "img-123")
+        describe.assert_called_once_with("img-123")
+        store.delete.assert_not_called()
+
+    def test_reads_the_secret_from_the_env_scoped_path(self):
+        store = self._secret_store(value="img-123")
+        with patch.object(self.compute, "describe_image", return_value={}):
+            self.compute.get_agent_image_id(store)
+        name = store.get.call_args[0][0]
+        self.assertTrue(
+            name.endswith("/agent-ami-id-ecs-ubuntu"),
+            f"the secret name must carry the Alicloud suffix, got {name!r}",
+        )
+        self.assertIn("/blitzlog/", name, "the secret name must be env-scoped")
+
+    def test_falls_back_when_the_secret_is_missing(self):
+        """KMS reports a missing secret as
+        `Forbidden.ResourceNotExists`."""
+        error = _FakeAliError("Forbidden.ResourceNotExists")
+        store = self._secret_store(error=error)
+
+        with patch.object(
+            self.compute, "get_latest_image", return_value="public-image"
+        ) as latest:
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "public-image")
+        latest.assert_called_once_with("26.04")
+
+    def test_falls_back_and_clears_the_secret_when_the_image_is_retired(self):
+        """ECS reports a retired image as `InvalidImageId.NotFound`."""
+        error = _FakeAliError("InvalidImageId.NotFound")
+        store = self._secret_store(value="img-retired")
+
+        with (
+            patch.object(self.compute, "describe_image", side_effect=error),
+            patch.object(
+                self.compute, "get_latest_image", return_value="public-image"
+            ) as latest,
+        ):
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "public-image")
+        latest.assert_called_once_with("26.04")
+        store.delete.assert_called_once()
+        self.assertTrue(
+            store.delete.call_args[0][0].endswith("/agent-ami-id-ecs-ubuntu"),
+            "the stale secret must be cleared so the next launch does not "
+            "reuse the retired image id",
+        )
+
+    def test_reraises_unexpected_errors(self):
+        """An error that is neither "missing" nor "retired" must
+        surface — swallowing it would silently degrade every launch
+        to the public image."""
+        error = _FakeAliError("Forbidden.AccessDenied")
+        store = self._secret_store(error=error)
+
+        with (
+            patch.object(self.compute, "get_latest_image") as latest,
+            self.assertRaises(_FakeAliError),
+        ):
+            self.compute.get_agent_image_id(store)
+        latest.assert_not_called()
+
+    def test_reraises_unexpected_describe_errors(self):
+        error = _FakeAliError("Throttling")
+        store = self._secret_store(value="img-123")
+
+        with (
+            patch.object(self.compute, "describe_image", side_effect=error),
+            self.assertRaises(_FakeAliError),
+        ):
+            self.compute.get_agent_image_id(store)
+        store.delete.assert_not_called()
+
+
 class TestAlicloudFactoryDispatch(unittest.TestCase):
     """`BLITZLOG_PROVIDER=alicloud` must dispatch to the
     Alicloud implementations via the factory in

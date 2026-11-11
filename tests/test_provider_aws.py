@@ -256,5 +256,99 @@ class TestAwsComputeBuildUserDataDownloaderScript(unittest.TestCase):
         self.assertIn("bash /tmp/bootstrap.sh", script)
 
 
+class TestAwsAgentImageIdResolution(unittest.TestCase):
+    """Issue #125: the AWS path reads the id of the Packer-baked AMI
+    from SSM Parameter Store, with the fallback chain the Alicloud
+    path mirrors against KMS Secrets Manager.
+
+    The chain:
+
+      1. The parameter is missing (`ParameterNotFound` / `404`) → use
+         the Canonical-published Ubuntu image.
+      2. The AMI is retired (`InvalidAMIID.NotFound` /
+         `InvalidAMIID.Unavailable`) → clear the stale parameter, then
+         use the Canonical-published Ubuntu image.
+      3. Any other error → re-raise.
+    """
+
+    def setUp(self):
+        self.compute = AwsCompute()
+
+    def _secret_store(self, value=None, error=None):
+        store = MagicMock()
+        if error is not None:
+            store.get.side_effect = error
+        else:
+            store.get.return_value = value
+        return store
+
+    def test_uses_the_aws_parameter_suffix(self):
+        self.assertEqual(
+            self.compute.agent_image_param_suffix,
+            "agent-ami-id-docker-ubuntu",
+        )
+
+    def test_returns_the_stored_ami_id_when_launchable(self):
+        store = self._secret_store(value="ami-123")
+        with patch.object(
+            self.compute, "describe_image", return_value={"Images": []}
+        ) as describe:
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "ami-123")
+        describe.assert_called_once_with("ami-123")
+        store.delete.assert_not_called()
+
+    def test_reads_the_parameter_from_the_env_scoped_path(self):
+        store = self._secret_store(value="ami-123")
+        with patch.object(self.compute, "describe_image", return_value={}):
+            self.compute.get_agent_image_id(store)
+        name = store.get.call_args[0][0]
+        self.assertTrue(
+            name.endswith("/agent-ami-id-docker-ubuntu"),
+            f"the parameter name must carry the AWS suffix, got {name!r}",
+        )
+        self.assertIn("/blitzlog/", name, "the parameter name must be env-scoped")
+
+    def test_falls_back_when_the_parameter_is_missing(self):
+        store = self._secret_store(error=_client_error("ParameterNotFound"))
+        with patch.object(
+            self.compute, "get_latest_image", return_value="public-ami"
+        ) as latest:
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "public-ami")
+        latest.assert_called_once_with("26.04")
+
+    def test_falls_back_and_clears_the_parameter_when_the_ami_is_retired(self):
+        store = self._secret_store(value="ami-retired")
+        with (
+            patch.object(
+                self.compute,
+                "describe_image",
+                side_effect=_client_error("InvalidAMIID.NotFound"),
+            ),
+            patch.object(
+                self.compute, "get_latest_image", return_value="public-ami"
+            ) as latest,
+        ):
+            result = self.compute.get_agent_image_id(store)
+        self.assertEqual(result, "public-ami")
+        latest.assert_called_once_with("26.04")
+        store.delete.assert_called_once()
+        self.assertTrue(
+            store.delete.call_args[0][0].endswith("/agent-ami-id-docker-ubuntu"),
+            "the stale parameter must be cleared so the next launch does "
+            "not reuse the retired AMI id",
+        )
+
+    def test_reraises_unexpected_errors(self):
+        store = self._secret_store(error=_client_error("AccessDeniedException"))
+        with (
+            patch.object(self.compute, "get_latest_image") as latest,
+            self.assertRaises(ClientError),
+        ):
+            self.compute.get_agent_image_id(store)
+        latest.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

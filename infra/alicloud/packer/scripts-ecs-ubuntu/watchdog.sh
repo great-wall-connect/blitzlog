@@ -1,0 +1,475 @@
+#!/bin/bash
+# /usr/local/bin/watchdog.sh — HOST-SIDE lifecycle manager for the
+# blitzlog-agent container on Aliyun ECS.
+#
+# The Alicloud analogue of
+# infra/aws/packer/scripts-docker-ubuntu/watchdog.sh (issue #125).
+#
+# Started by the blitzlog-agent systemd unit on instance boot. The
+# watchdog:
+#   1. Loads the pre-baked agent image into dockerd
+#   2. Starts the container with the right env vars + volume mounts
+#   3. Waits for the container to exit (any reason: shutdown tool,
+#      idle, opencode finished, spot interruption, etc.)
+#   4. Uploads container + host logs to OSS
+#   5. Uploads session artifacts the container wrote to /workspace/.blitzlog/
+#   6. Releases the bot-pool lock
+#   7. Terminates the ECS instance
+#
+# The container has NO Alicloud credentials — all OSS work happens here
+# on the host, which has the ECS instance RAM role.
+#
+# PROVIDER-SPECIFIC SUBSTITUTIONS vs the AWS watchdog:
+#   * `aws s3 cp/rm/ls`  → the `blitzlog_oss_*` library (ossutil)
+#   * `S3_LOGS_BUCKET`   → `OSS_LOGS_BUCKET`
+#   * `S3_LOG_PREFIX`    → `OSS_LOG_PREFIX`
+#   * IMDSv2 @ 169.254.169.254 → Aliyun metadata @ 100.100.100.200
+#   * `aws ssm get-parameter` → `aliyun kms GetSecretValue`
+#   * `aws ec2 terminate-instances` → `aliyun ecs DeleteInstances`
+#   * IMDS egress block  → 100.100.100.200 instead of 169.254.169.254
+#
+# Everything else — the hardening contract, the container hardening
+# flags, the volume mounts, the shutdown watcher, the log upload
+# ordering, the cleanup ordering — is deliberately identical. The host
+# image is single-cloud by construction, so the backend is baked in
+# rather than dispatched at runtime.
+
+set -euo pipefail
+# Packer-baked signature: identifies the single agent image loaded
+# into dockerd. /root/blitzlog.env is written by the Packer build
+# alongside the image save step, with chmod 400 root:root. We source
+# it BEFORE /etc/blitzlog.env so AGENT_IMAGE_REPO / AGENT_IMAGE_TAG
+# are available when we build the docker run command.
+source /root/blitzlog.env
+source /etc/blitzlog.env
+# Issue #125: single source of truth for host-side OSS calls. Falls
+# through to the caller's `log()` (defined below) for ERROR output.
+source /usr/local/bin/blitzlog_oss_uploader.sh
+# Issue #164: the canonical container-hardening contract (dropped
+# capabilities, no-new-privileges, pids-limit, init, and the one
+# documented Tailscale capability exemption). Sourced from the AMI —
+# the Packer `file` provisioner uploads it and 02-systemd.sh copies it
+# to /usr/local/bin/. The contract file itself is POSIX (no arrays, no
+# bashisms) so the mise dev tasks can source it under /bin/sh too.
+#
+# `set -euo pipefail` is already in effect: if the contract file is
+# missing from the AMI, this `source` fails and the watchdog aborts
+# BEFORE the container starts. Fail-closed and loud — a container that
+# silently ran without its hardening flags would be far worse.
+source /usr/local/bin/container-hardening.env
+export HOME=/root
+
+LOG_FILE="/var/log/backend-bootstrap.log"
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"; }
+
+# Issue #164: expand the hardening contract into bash arrays we can
+# splat into `docker run`. `read -r -a` is a bashism, which is fine —
+# the watchdog is #!/bin/bash. (The contract FILE stays POSIX so the
+# mise dev tasks can source it under /bin/sh.)
+read -r -a HARDENING_ARGS <<<"$BLITZLOG_HARDENING_FLAGS"
+read -r -a TAILSCALE_ARGS <<<"$BLITZLOG_TAILSCALE_FLAGS"
+read -r -a TMPFS_ARGS <<<"$BLITZLOG_TMPFS_MOUNTS"
+
+# Load the baked agent image
+sudo docker load -i /opt/blitzlog/images/blitzlog-agent.tar.gz
+
+# Pre-create .blitzlog (owned by host, so container's writes can't fail
+# with permission denied) and .idle as a "container is alive" marker.
+# We do NOT pre-create .shutdown — that's only created when the agent's
+# shutdown tool runs assisted-shutdown.sh (as its LAST step, after
+# exporting the session). This avoids a race against the watchdog's
+# own exit-detection logic.
+mkdir -p /workspace/.blitzlog
+touch /workspace/.idle
+
+# Issue #164: the container runs as a specific uid
+# (BLITZLOG_CONTAINER_UID, see the hardening contract). A bind mount
+# preserves the SOURCE's ownership, so the host paths the container
+# writes to must be owned by that uid — otherwise the agent's first
+# write fails with EACCES and the entrypoint aborts under `set -e`.
+#
+# The chown covers /workspace itself (the container clones the repo
+# there) plus the pre-created markers above (the container re-touches
+# /workspace/.idle on every start).
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /workspace
+
+# Compute the Aliyun metadata token + region + instance id (host
+# credentials come from the ECS instance RAM role).
+#
+# The Aliyun metadata service is the IMDSv2 equivalent at
+# 100.100.100.200. The token header names differ from AWS's:
+# `X-aliyun-ecs-metadata-token` (vs `X-aws-ec2-metadata-token`).
+TOKEN=$(curl -s -X PUT 'http://100.100.100.200/latest/api/token' \
+    -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60')
+INSTANCE_ID=$(curl -s -H "X-aliyun-ecs-metadata-token: $TOKEN" \
+    http://100.100.100.200/latest/meta-data/instance-id)
+REGION=$(curl -s -H "X-aliyun-ecs-metadata-token: $TOKEN" \
+    http://100.100.100.200/latest/meta-data/region-id)
+export ALIBABA_CLOUD_REGION="$REGION"
+
+# Write the env file the container reads (and that shutdown.sh sources).
+# Tailscale + local LLM env vars are passed through so the container
+# can join a Tailnet (if TAILSCALE_AUTH_KEY is set) and point opencode
+# at a local-LLM endpoint (if LOCAL_LLM_ENDPOINT is set). The container's
+# entrypoint handles the actual setup; the bootstrap is just plumbing.
+cat > /etc/blitzlog.env <<ENVEOF
+MODE="${MODE:-assisted}"
+ISSUE_NUMBER="${ISSUE_NUMBER}"
+REPO="${REPO}"
+BLITZLOG_ENV="${BLITZLOG_ENV}"
+OSS_LOGS_BUCKET="${OSS_LOGS_BUCKET}"
+SESSION_ARCHIVE_BUCKET="${SESSION_ARCHIVE_BUCKET}"
+SESSION_ARCHIVE_PREFIX="${SESSION_ARCHIVE_PREFIX}"
+OSS_LOG_PREFIX="${OSS_LOG_PREFIX}"
+OPENCODE_API_KEY="${OPENCODE_API_KEY}"
+OPENCODE_MODEL="${OPENCODE_MODEL}"
+OPENCODE_PROMPT="${OPENCODE_PROMPT:-}"
+LOCAL_LLM_ENDPOINT="${LOCAL_LLM_ENDPOINT:-}"
+LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"
+LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-}"
+LOCAL_LLM_FALLBACK="${LOCAL_LLM_FALLBACK:-closed}"
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-agent}"
+OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-}"
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
+TELEGRAM_BOT_NAME="${TELEGRAM_BOT_NAME:-}"
+TELEGRAM_SENDER_LOGIN="${TELEGRAM_SENDER_LOGIN:-}"
+# Audit-trail identity (issue #119). The bootstrap fetched
+# these from /blitzlog/users/<owner>/git-author/{name,email} and
+# sourced them into scope; we re-emit them here so the
+# rewrite of /etc/blitzlog.env (which overwrites the bootstrap's
+# write) doesn't lose them. The container's entrypoint.sh
+# reads GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL and runs
+# `git config --global user.{name,email}` so agent commits
+# are attributed to the operator, not root@<hostname>.
+GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-}"
+GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"
+STT_MODEL="${STT_MODEL:-base.en}"
+STT_LANGUAGE="${STT_LANGUAGE:-en}"
+ALIBABA_CLOUD_REGION="${REGION}"
+ENVEOF
+
+# Pull the GitHub token from KMS (autonomous mode needs it for git push).
+#
+# The Alicloud path has NO token-refresh chain: the AWS side schedules
+# an EventBridge Scheduler chain that re-mints the installation token
+# every 30 min (issue #145), and Aliyun has no equivalent wired up
+# yet (see infra/alicloud/modules/core/function_compute.tf). So the
+# token is read ONCE here, and the 1 h GitHub hard cap is operationally
+# visible. The refresh branch below is written so that it stays inert
+# until the Aliyun scheduler equivalent lands: it is guarded on
+# GITHUB_TOKEN_SSM_PARAM, which the Alicloud bootstrap does not set.
+if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    GITHUB_TOKEN=$(aliyun kms GetSecretValue \
+        --SecretName "${GITHUB_TOKEN_SSM_PARAM}" \
+        --region "$REGION" \
+        --output json 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['SecretData'])" 2>/dev/null || echo "")
+    if [ -n "$GITHUB_TOKEN" ]; then
+        mkdir -p "/root/gh-config/${INSTANCE_ID}"
+        mkdir -p /root/.git-credentials.d
+        printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" \
+            > /root/.git-credentials.d/github
+        chmod 600 /root/.git-credentials.d/github
+        cat > "/root/gh-config/${INSTANCE_ID}/hosts.yml" <<EOF
+github.com:
+    oauth_token: ${GITHUB_TOKEN}
+    git_protocol: https
+EOF
+        git config --global credential.helper \
+            'store --file /root/.git-credentials.d/github'
+        # Issue #164: hand the credential files to the container's uid. A
+        # bind mount preserves the source's ownership, so a root-owned
+        # 0600 file would be unreadable from inside a container that
+        # does not run as root.
+        chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" \
+            /root/.git-credentials.d "/root/gh-config/${INSTANCE_ID}"
+    fi
+fi
+
+# Random opencode server password — written to env, then read by container
+OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 16)
+export OPENCODE_SERVER_PASSWORD
+echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> /etc/blitzlog.env
+
+# Start the blitzlog-agent container. /var/log/blitzlog and /workspace
+# are host-mounted so the container's logs and session artifacts are
+# accessible to the watchdog after the container exits.
+mkdir -p /var/log/blitzlog
+mkdir -p /workspace
+
+# Issue #164: the container runs as an unprivileged uid and its rootfs
+# is read-only, so every host path it writes to has to be owned by
+# that uid. /var/log/blitzlog holds the container's logs (the watchdog
+# uploads them to OSS after the run). /workspace was already chowned
+# above, right after its marker files were created.
+chown -R "$BLITZLOG_CONTAINER_UID:$BLITZLOG_CONTAINER_GID" /var/log/blitzlog
+
+# Common env vars (passed to every container launch).
+COMMON_ARGS=(
+    -e "MODE=$MODE"
+    -e "ISSUE_NUMBER=$ISSUE_NUMBER"
+    -e "REPO=$REPO"
+    -e "OPENCODE_MODEL=$OPENCODE_MODEL"
+    -e "OPENCODE_PROMPT=$OPENCODE_PROMPT"
+    -e "OPENCODE_API_KEY=$OPENCODE_API_KEY"
+    -e "LOCAL_LLM_ENDPOINT=$LOCAL_LLM_ENDPOINT"
+    -e "LOCAL_LLM_MODEL=$LOCAL_LLM_MODEL"
+    -e "LOCAL_LLM_API_KEY=$LOCAL_LLM_API_KEY"
+    -e "LOCAL_LLM_FALLBACK=$LOCAL_LLM_FALLBACK"
+    -e "TAILSCALE_AUTH_KEY=$TAILSCALE_AUTH_KEY"
+    -e "OPENCODE_SERVER_USERNAME=$OPENCODE_SERVER_USERNAME"
+    -e "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD"
+    -e "BLITZLOG_ENV=$BLITZLOG_ENV"
+    -e "OSS_LOGS_BUCKET=$OSS_LOGS_BUCKET"
+    -e "SESSION_ARCHIVE_BUCKET=$SESSION_ARCHIVE_BUCKET"
+    -e "SESSION_ARCHIVE_PREFIX=$SESSION_ARCHIVE_PREFIX"
+    -e "OSS_LOG_PREFIX=$OSS_LOG_PREFIX"
+    # Issue #164: GITHUB_TOKEN is deliberately NOT passed to the
+    # container. The host owns the credential files and mounts them
+    # READ-ONLY, so the agent gets its credentials without the token
+    # ever appearing in the container's environment (where `docker
+    # inspect` and every same-uid process could read it).
+    -e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME"
+    -e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL"
+    # Issue #165 / #175: the container has NO Alicloud credentials BY
+    # DESIGN. This makes the Aliyun SDKs refuse the instance metadata
+    # service (and therefore the instance RAM role) even if the
+    # network path is open — on top of the host-side iptables rule
+    # that drops metadata traffic from the container's network.
+    #
+    # The Alicloud analogue of the AWS side's
+    # `AWS_EC2_METADATA_DISABLED=true`. The Alibaba Cloud SDK
+    # credential chain falls back to the instance RAM role when no
+    # explicit credential is configured, so the container needs an
+    # explicit switch that disables that fallback.
+    -e "ALIBABA_CLOUD_ECS_METADATA_DISABLED=true"
+    -e "ALIBABA_CLOUD_IMDSV1_DISABLED=true"
+)
+
+# Mode-specific env vars. We don't reference these outside the
+# matching branch — `set -u` would otherwise kill the script when a
+# var that isn't declared in /etc/blitzlog.env for the current mode
+# is read. This is intentional: a future contributor adding a var the
+# watchdog should pass gets a loud failure, not a silent empty value.
+if [ "$MODE" = "assisted" ]; then
+    COMMON_ARGS+=(
+        -e "STT_MODEL=$STT_MODEL"
+        -e "STT_LANGUAGE=$STT_LANGUAGE"
+        -e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+        -e "TELEGRAM_BOT_NAME=$TELEGRAM_BOT_NAME"
+        -e "TELEGRAM_USER_ID=$TELEGRAM_USER_ID"
+    )
+fi
+
+# Tailscale needs CAP_NET_ADMIN (to create and configure the WireGuard
+# interface), CAP_NET_RAW (for `tailscale ping`'s ICMP probes) and the
+# /dev/net/tun character device (for the tunnel itself).
+#
+# This is the ONE and ONLY relaxation of --cap-drop=ALL in the whole
+# project, and it is granted ONLY when TAILSCALE_AUTH_KEY is set —
+# i.e. only on runs that actually enrol in a Tailnet. Every other run
+# gets --cap-drop=ALL and nothing else.
+#
+# The flags come from the canonical contract
+# (packages/images/agent/container-hardening.env) so the dev tasks in
+# mise.toml grant exactly the same exemption.
+#
+# Passing --device /dev/net/tun is what makes the in-container join
+# actually work. Before issue #164 the capability flags were passed
+# WITHOUT the device and `tailscaled` was started without
+# --tun=userspace-networking, so the join could never establish a
+# tunnel. The host-side counterpart is 01-system.sh, which loads the
+# `tun` module and creates /dev/net/tun on the AMI.
+TUNNEL_FLAGS=()
+if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+    TUNNEL_FLAGS=("${TAILSCALE_ARGS[@]}")
+fi
+
+# Host-side .shutdown watcher. Mirrors the local mise.toml
+# image-telegram-live-assisted watcher. Polls for the agent's shutdown
+# signal (touched by assisted-shutdown.sh, both for the user-invoked
+# shutdown tool and for spot-interrupt emergency save) and SIGTERMs the
+# container — otherwise the entrypoint's TERM trap is never triggered and
+# the `docker run` below blocks until Aliyun reclaims it.
+(
+    while [ ! -f /workspace/.shutdown ]; do
+            sleep 1
+    done
+    log ".shutdown detected; sending SIGTERM to blitzlog-agent"
+    sudo docker kill --signal TERM blitzlog-agent 2>/dev/null || true
+) &
+WATCHER_PID=$!
+
+# Defense in depth: clear any stale .shutdown left over from a crashed
+# previous run. watchdog.sh no longer pre-creates it, so on a fresh
+# instance .shutdown only ever appears because the agent's shutdown
+# tool or the spot_watchdog plugin just ran assisted-shutdown.sh.
+rm -f /workspace/.shutdown
+
+# Issue #164: the credential files are owned by the HOST and mounted
+# READ-ONLY (see the comment on the chown above). The container's uid
+# can read them but cannot write them, so the agent cannot tamper with
+# the host's copy of the token. The container's HOME is a tmpfs (see
+# TMPFS_ARGS above), so the two credential paths are bind-mounted
+# INSIDE it.
+#
+# `set -e` is active, so a non-zero `docker run` aborted the script
+# right here — before the cleanup below (log upload, bot-lock release,
+# instance terminate) could run. A failed agent run therefore left the
+# instance alive, the bot-pool lock held and the logs on the instance
+# instead of in OSS. Capture the exit code instead of letting errexit
+# kill the watchdog; the cleanup path runs either way and the script
+# exits with the container's code at the very end.
+CONTAINER_EXIT=0
+
+# Defense in depth (issue #175): block the instance metadata service
+# from the CONTAINER's network.
+#
+# The container runs as root on the docker bridge, so it can reach
+# 100.100.100.200 and assume the ECS instance RAM role. That role can
+# read KMS secrets the container must never see — the GitHub App's
+# private key and the webhook secret among them (issue #175) — so
+# "the container has no Alicloud credentials" is only true while it
+# cannot reach the metadata service.
+#
+# DOCKER-USER is only traversed by FORWARDED container traffic, so the
+# HOST's own metadata access (the watchdog's token + region fetches
+# above) is unaffected.
+#
+# This is FAIL-CLOSED. The first version of this rule was best-effort:
+# it logged a warning and started the agent anyway, so a boundary that
+# was not actually in force looked exactly like one that was — and the
+# gap went unnoticed for a release cycle (issue #175). If the rule
+# cannot be installed, the agent does not start; the cleanup path below
+# still runs, so the instance is not stranded.
+block_metadata_from_container() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        log "ERROR: iptables is not available — cannot block the Aliyun metadata service from the container network"
+        return 1
+    fi
+    if iptables -C DOCKER-USER -d 100.100.100.200 -j DROP >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! iptables -I DOCKER-USER -d 100.100.100.200 -j DROP >/dev/null 2>&1; then
+        log "ERROR: could not install the DOCKER-USER rule that blocks the Aliyun metadata service from the container network"
+        return 1
+    fi
+    return 0
+}
+
+run_agent_container() {
+    sudo docker run --name blitzlog-agent \
+        "${HARDENING_ARGS[@]}" \
+        "${TMPFS_ARGS[@]}" \
+        "${TUNNEL_FLAGS[@]}" \
+        "${COMMON_ARGS[@]}" \
+        -v /opt/whisper-stt/models:/opt/whisper-stt/models:ro \
+        -v "/root/.git-credentials.d:${BLITZLOG_CONTAINER_HOME}/.git-credentials.d:ro" \
+        -v "/root/gh-config/${INSTANCE_ID}:${BLITZLOG_CONTAINER_HOME}/.config/gh" \
+        -v /workspace:/workspace \
+        -v /var/log/blitzlog:/var/log/blitzlog \
+        "${AGENT_IMAGE_REPO}:${AGENT_IMAGE_TAG}"
+}
+
+if block_metadata_from_container; then
+    run_agent_container || CONTAINER_EXIT=$?
+else
+    log "ERROR: refusing to start the agent container — without the metadata block it could assume the ECS instance role and read KMS secrets it must not see (issue #175)"
+    CONTAINER_EXIT=1
+fi
+# The watcher auto-exits once it sends SIGTERM (the while loop ends
+# when .shutdown appears). If .shutdown was never touched (autonomous
+# mode finished, agent ran to completion), the watcher is still
+# polling — kill it explicitly.
+kill "$WATCHER_PID" 2>/dev/null || true
+wait "$WATCHER_PID" 2>/dev/null || true
+
+log "Container exited with code $CONTAINER_EXIT"
+
+# Decode known LLM-provider API errors into actionable log lines.
+if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "insufficient_balance|insufficient balance|\(1008\)" /var/log/blitzlog/opencode.log; then
+    log "ACTIONABLE: LLM provider returned insufficient balance / HTTP 1008."
+    log "ACTIONABLE: The token-plan account for $OPENCODE_MODEL has zero credits."
+    log "ACTIONABLE: Top up at the provider console before retrying."
+fi
+if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "Unauthorized|invalid_api_key|\(401\)" /var/log/blitzlog/opencode.log; then
+    log "ACTIONABLE: LLM provider rejected the API key (HTTP 401)."
+    log "ACTIONABLE: Rotate /blitzlog/$BLITZLOG_ENV/opencode/api-key in KMS and re-run terraform apply."
+fi
+if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?requests|\(429\)" /var/log/blitzlog/opencode.log; then
+    log "ACTIONABLE: LLM provider returned a rate-limit error (HTTP 429)."
+    log "ACTIONABLE: Wait for the quota window to reset, then re-trigger."
+fi
+
+# Stamp every object from this run with the same timestamp+instance prefix,
+# so all files from one ECS run sort together and never overwrite each
+# other (or a previous run's files on the same issue).
+RUN_TS=$(date -u +%Y%m%d_%H%M)
+RUN_TAG="${RUN_TS}_i${INSTANCE_ID}"
+
+# Defensive default for images baked before OSS_LOG_PREFIX was added to
+# the bootstrap env file. Falls back to the legacy flat env/logs/ path so
+# a mid-deploy window (new lambda, old image) doesn't produce
+# double-slash keys.
+: "${OSS_LOG_PREFIX:=${BLITZLOG_ENV}/logs}"
+
+# Upload container + host logs to OSS (BOTH per user request).
+for log in /var/log/blitzlog/*.log /var/log/backend-bootstrap.log; do
+    [ -f "$log" ] || continue
+    log_name=$(basename "$log")
+    log "Uploading $log_name to OSS"
+    blitzlog_oss_put "${OSS_LOGS_BUCKET}" \
+        "${OSS_LOG_PREFIX}/${RUN_TAG}_${log_name}" \
+        "$log" || true
+done
+
+# Upload session artifacts the container wrote to /workspace/.blitzlog/
+for f in /workspace/.blitzlog/*; do
+    [ -f "$f" ] || continue
+    fname=$(basename "$f")
+    log "Uploading $fname to OSS"
+    blitzlog_oss_put "${SESSION_ARCHIVE_BUCKET:-${OSS_LOGS_BUCKET}}" \
+        "${SESSION_ARCHIVE_PREFIX}/${RUN_TAG}_${fname}" \
+        "$f" || true
+done
+
+# Release the bot pool lock (OSS delete) — required so the same bot can
+# be picked up by the next agent run.
+if [ -n "${TELEGRAM_BOT_NAME:-}" ] && [ -n "${TELEGRAM_SENDER_LOGIN:-}" ]; then
+    log "Releasing bot pool lock for ${TELEGRAM_SENDER_LOGIN}/${TELEGRAM_BOT_NAME}"
+    blitzlog_oss_rm "${OSS_LOGS_BUCKET}" \
+        "bot-pool-locks/${TELEGRAM_SENDER_LOGIN}/${TELEGRAM_BOT_NAME}.json" \
+        2>/dev/null || true
+fi
+
+# Clean up container
+sudo docker rm -f blitzlog-agent || true
+
+# Clean up instance-owned Alicloud state BEFORE terminating this instance.
+# Once DeleteInstances runs, the instance is shutting down and
+# subsequent API calls from this script may fail. Both cleanups are
+# idempotent.
+#
+# ORDER MATTERS: the token secret is deleted first so a (future)
+# refresh chain cannot re-create it — the chain writes the token into
+# KMS, so deleting the KMS secret first would leave a window in which
+# a firing iteration re-creates it — a zombie token that outlives the
+# run.
+log "Tearing down instance-owned Alicloud state"
+if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
+    log "Deleting KMS token at ${GITHUB_TOKEN_SSM_PARAM}"
+    aliyun kms DeleteSecret \
+        --SecretName "${GITHUB_TOKEN_SSM_PARAM}" \
+        --ForceDeleteWithoutRecovery "true" \
+        --region "$REGION" 2>/dev/null || true
+fi
+
+# Terminate the ECS instance
+log "Terminating instance ${INSTANCE_ID}"
+aliyun ecs DeleteInstances \
+    --RegionId "$REGION" \
+    --InstanceId "$INSTANCE_ID" 2>/dev/null || true
+
+exit "$CONTAINER_EXIT"
