@@ -10,7 +10,7 @@
 #
 # The bucket + region below are the REAL ones for the blitzlog
 # Alicloud account (the same bucket the bootstrap stack's
-# bootstrap-backend.hcl uses, so every Alicloud stack shares one
+# bootstrap-backend.hcl.example uses, so every Alicloud stack shares one
 # state bucket, keyed per-env).
 #
 # CREDENTIALS. The `oss` backend needs an Alicloud credential. It

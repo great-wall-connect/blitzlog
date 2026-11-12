@@ -56,8 +56,17 @@ class TestAlicloudBackendConstantsAreConsistent(unittest.TestCase):
     """
 
     def test_backend_hcl_examples_use_the_real_bucket_and_region(self):
+        """The `.example` files are the committed templates — they are
+        what CI can see, and what an operator copies.
+
+        Note: the bootstrap stack's REAL `bootstrap-backend.hcl` is
+        gitignored (`.gitignore`: `infra/**/*-backend.hcl`), so it is
+        not in the repo — hence the `.example` sibling. The test
+        below also checks the real file when it is present locally, so
+        a drift between the two is caught on the machine that has it.
+        """
         for path in (
-            os.path.join(ALICLOUD_BOOTSTRAP, "bootstrap-backend.hcl"),
+            os.path.join(ALICLOUD_BOOTSTRAP, "bootstrap-backend.hcl.example"),
             os.path.join(ALICLOUD_DEV, "dev-backend.hcl.example"),
             os.path.join(ALICLOUD_PROD, "prod-backend.hcl.example"),
         ):
@@ -78,6 +87,30 @@ class TestAlicloudBackendConstantsAreConsistent(unittest.TestCase):
                 f"{path} still names the nonexistent bucket "
                 "'gwc-infra-tfstate' (no hyphen)",
             )
+
+    def test_local_bootstrap_backend_matches_the_example(self):
+        """The bootstrap stack's real `bootstrap-backend.hcl` is
+        gitignored, so it exists only on the operator's machine. When
+        it is there, it must agree with the committed example —
+        otherwise the local bootstrap apply writes state to a
+        different place than CI reads."""
+        real = os.path.join(ALICLOUD_BOOTSTRAP, "bootstrap-backend.hcl")
+        if not os.path.isfile(real):
+            self.skipTest(
+                "bootstrap-backend.hcl is gitignored and not present on "
+                "this machine (CI, and any clone without a local copy)"
+            )
+        text = _read(real)
+        self.assertIn(
+            f'bucket = "{STATE_BUCKET}"',
+            text,
+            f"{real} must name the REAL state bucket {STATE_BUCKET!r}",
+        )
+        self.assertIn(
+            f'region = "{REGION}"',
+            text,
+            f"{real} must use the real bucket region {REGION!r}",
+        )
 
     def test_backend_blocks_in_the_stacks_match(self):
         """The `backend "oss"` blocks carry a default region — it must

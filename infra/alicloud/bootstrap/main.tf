@@ -26,10 +26,10 @@ terraform {
   }
 
   # The OSS backend. The bucket / key / region are supplied via
-  # `-backend-config` (see bootstrap-backend.hcl); the credential
-  # comes from the ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY env
-  # vars, or from the `profile` below, which reads
-  # `~/.aliyun/config.json`.
+  # `-backend-config` (see bootstrap-backend.hcl.example); the
+  # credential comes from the ALICLOUD_ACCESS_KEY /
+  # ALICLOUD_SECRET_KEY env vars, or from the `profile` below, which
+  # reads `~/.aliyun/config.json`.
   #
   # The default region here matches the account's bucket region
   # (cn-hongkong). The backend's region MUST match the bucket's

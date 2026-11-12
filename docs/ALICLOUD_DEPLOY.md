@@ -65,13 +65,17 @@ and the two CI roles (the Packer build role and the deploy role).
 ```bash
 cd infra/alicloud/bootstrap
 cp terraform.tfvars.example terraform.tfvars   # if not already present
+cp bootstrap-backend.hcl.example bootstrap-backend.hcl
 # edit terraform.tfvars: alicloud_region, bucket names
 terraform init -backend-config=bootstrap-backend.hcl
 terraform apply
 ```
 
 The state bucket (`gwc-infra-tf-state`) and its region
-(`cn-hongkong`) come from `bootstrap-backend.hcl`.
+(`cn-hongkong`) come from `bootstrap-backend.hcl`. Note that the real
+`*-backend.hcl` files are **gitignored** (`.gitignore`:
+`infra/**/*-backend.hcl`) — the committed `.example` files are the
+templates you copy.
 
 ### Credentials for the local apply
 
