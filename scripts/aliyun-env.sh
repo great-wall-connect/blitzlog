@@ -47,6 +47,46 @@
 # expiry, so you get told to re-login instead of a generic
 # "Authorization header is invalid" from whatever tool failed.
 
+# This script is normally SOURCED, so `set -euo pipefail` below would
+# leave errexit and nounset switched on in the caller's shell. zsh keeps
+# errexit off in interactive shells precisely so a failing command does
+# not kill the session; a sourced script can turn it back on, and the
+# first non-zero command then takes the whole shell down. Snapshot the
+# caller's options and restore them on exit so only this script's body
+# runs under strict mode.
+
+__aliyun_env_errexit=off
+__aliyun_env_nounset=off
+__aliyun_env_pipefail=off
+case $- in *e*) __aliyun_env_errexit=on ;; esac
+case $- in *u*) __aliyun_env_nounset=on ;; esac
+if (set -o | grep -q '^pipefail .*on$'); then __aliyun_env_pipefail=on; fi
+
+# Restore the caller's options. The failure path calls this BEFORE
+# bailing out: an EXIT trap would run too late, once the shell has
+# already decided to exit.
+__aliyun_env_restore_opts() {
+    case "$__aliyun_env_errexit" in
+        on) set -e ;;
+        off) set +e ;;
+    esac
+    case "$__aliyun_env_nounset" in
+        on) set -u ;;
+        off) set +u ;;
+    esac
+    case "$__aliyun_env_pipefail" in
+        on) set -o pipefail ;;
+        off) set +o pipefail ;;
+    esac
+}
+
+# Failure path. `return` rather than `exit` because a sourced script's
+# `exit` terminates the calling shell; `return` only ends the script.
+__aliyun_env_fail() {
+    __aliyun_env_restore_opts
+    return 1
+}
+
 set -euo pipefail
 
 CONFIG_FILE="${ALICLOUD_CONFIG_FILE:-$HOME/.aliyun/config.json}"
@@ -54,13 +94,15 @@ CONFIG_FILE="${ALICLOUD_CONFIG_FILE:-$HOME/.aliyun/config.json}"
 if [ ! -r "$CONFIG_FILE" ]; then
     echo "aliyun-env: cannot read $CONFIG_FILE" >&2
     echo "  Run 'aliyun configure --profile default' first." >&2
-    exit 1
+    __aliyun_env_fail
+    return 1 2>/dev/null || exit 1
 fi
 
 PYTHON_BIN="$(command -v python3 || command -v python || true)"
 if [ -z "$PYTHON_BIN" ]; then
     echo "aliyun-env: python3 not found on PATH" >&2
-    exit 1
+    __aliyun_env_fail
+    return 1 2>/dev/null || exit 1
 fi
 
 # Read the profile, emit the exports, and report the expiry.
@@ -158,10 +200,14 @@ if expiry:
 PY
 }
 
-EXPORTS="$(read_profile)" || exit 1
+EXPORTS="$(read_profile)" || {
+    __aliyun_env_fail
+    return 1 2>/dev/null || exit 1
+}
 
 if [ "${1:-}" = "--print" ]; then
     printf '%s\n' "$EXPORTS"
+    __aliyun_env_restore_opts
     exit 0
 fi
 
@@ -171,3 +217,5 @@ eval "$EXPORTS"
 
 # Tell the user it worked, without echoing any secret material.
 echo "aliyun-env: exported Alicloud credentials (region ${ALIBABA_CLOUD_REGION:-unknown})" >&2
+
+__aliyun_env_restore_opts
