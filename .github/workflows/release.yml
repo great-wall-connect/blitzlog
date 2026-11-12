@@ -825,11 +825,42 @@ jobs:
       # The role is provisioned by infra/alicloud/bootstrap/packer-role.tf.
       # The account id comes from a repo variable — the same shape the
       # AWS leg uses for vars.AWS_ACCOUNT_ID.
+      #
+      # The action's inputs are `oidc-provider-arn` + `role-to-assume`
+      # + `audience` (NOT `role_arn` + `region` — those were the
+      # names of a different action). The `audience` must match the
+      # OIDC provider's client id, which the RAM console sets to
+      # sts.aliyuncs.com.
       - name: Configure Alicloud credentials (OIDC) for Packer
-        uses: aliyun/aliyun-credentials-action@v1
+        id: aliyun-credentials
+        uses: aliyun/configure-aliyun-credentials-action@v1
         with:
-          role_arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-packer-build-role
-          region: ${{ vars.ALICLOUD_REGION || 'cn-hangzhou' }}
+          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/great-wall-connect/blitzlog
+          role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-packer-build-role
+          audience: sts.aliyuncs.com
+
+      - name: Export Alicloud credentials for the aliyun CLI
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-id }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-secret }}
+          ALIYUN_SECURITY_TOKEN: ${{ steps.aliyun-credentials.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ALIYUN_ACCESS_KEY_ID:-}" ]; then
+            echo "FATAL: the Alicloud OIDC step produced no credentials." >&2
+            echo "  Check that vars.ALICLOUD_ACCOUNT_ID is set and that the" >&2
+            echo "  Alicloud OIDC provider + blitzlog-packer-build-role exist." >&2
+            exit 1
+          fi
+          {
+            echo "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALIBABA_CLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            echo "ALICLOUD_ACCESS_KEY=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALICLOUD_SECRET_KEY=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALICLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            echo "ALIBABA_CLOUD_REGION=${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve Packer vars from mode
         id: packer-vars
@@ -882,7 +913,7 @@ jobs:
           BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
           STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}
           AGENT_IMAGE_TAG: ${{ steps.packer-vars.outputs.agent_image_tag }}
-          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hangzhou' }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
           # GITHUB_TOKEN is consumed by 03-bake-images.sh to `docker login
           # ghcr.io` before pulling the blitzlog-agent image. Empty when
           # the secret isn't set; the script warns and the pull fails.
@@ -986,40 +1017,42 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref_name }}
           fetch-depth: 0
 
-      # Issue #126: Alicloud deploy pre-flight.
+      # Issue #125: Alicloud deploy pre-flight.
       #
-      # The Alicloud tree (infra/alicloud/) ships, validates in CI, and is
-      # deliberately NOT deployable yet. It is gated here so the segmentation
-      # is visible to contributors — the tree, its tests, and its lint-matrix
-      # leg all exist — while the only thing that can reach a real cloud
-      # account remains the AWS path.
+      # The Alicloud deploy is now IMPLEMENTED (the deploy role, the
+      # OSS backend wiring, the per-cloud tfvars), but it stays OFF
+      # by default: it is gated on the ENABLE_ALICLOUD_DEPLOY repo
+      # variable so a stray vars.BLITZLOG_PROVIDER=alicloud cannot
+      # apply to the real Alicloud account without the operator
+      # explicitly opting in.
       #
-      # This is a hard stop, not a warning: an operator who sets
-      # vars.BLITZLOG_PROVIDER=alicloud gets a loud, actionable message
-      # instead of a partial apply. Note that the deploy job would otherwise
-      # select infra/alicloud/<env>/ and the Packer bake above is AWS-only,
-      # so the two halves would disagree anyway.
+      #   gh variable set ENABLE_ALICLOUD_DEPLOY --body true
+      #
+      # AWS needs no gate — it is the default and the supported path.
       - name: Validate provider
         env:
           BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+          ENABLE_ALICLOUD_DEPLOY: ${{ vars.ENABLE_ALICLOUD_DEPLOY }}
         run: |
           set -euo pipefail
           case "${BLITZLOG_PROVIDER}" in
             aws) ;;
             alicloud)
-              echo "FATAL: Alicloud deploy is disabled by design." >&2
-              echo "" >&2
-              echo "  infra/alicloud/ ships and validates in CI, but no Alicloud" >&2
-              echo "  resource is applied by any workflow until the per-cloud" >&2
-              echo "  structure is on main." >&2
-              echo "" >&2
-              echo "  To apply AWS (the only supported path today):" >&2
-              echo "    unset vars.BLITZLOG_PROVIDER   (it defaults to 'aws')" >&2
-              echo "    gh variable delete BLITZLOG_PROVIDER" >&2
-              echo "" >&2
-              echo "  The AMI bake in the release job is also AWS-only, so this" >&2
-              echo "  is not a Phase 5 gap — it is a deliberate stop." >&2
-              exit 1
+              if [ "${ENABLE_ALICLOUD_DEPLOY:-}" != "true" ]; then
+                echo "FATAL: the Alicloud deploy is gated off." >&2
+                echo "" >&2
+                echo "  infra/alicloud/ is implemented (issue #125) but applying" >&2
+                echo "  it is opt-in, so a stray vars.BLITZLOG_PROVIDER=alicloud" >&2
+                echo "  cannot reach the real Alicloud account by accident." >&2
+                echo "" >&2
+                echo "  To enable it:" >&2
+                echo "    gh variable set ENABLE_ALICLOUD_DEPLOY --body true" >&2
+                echo "" >&2
+                echo "  To apply AWS (the default path):" >&2
+                echo "    unset vars.BLITZLOG_PROVIDER   (it defaults to 'aws')" >&2
+                echo "    gh variable delete BLITZLOG_PROVIDER" >&2
+                exit 1
+              fi
               ;;
             *)
               echo "FATAL: BLITZLOG_PROVIDER=${BLITZLOG_PROVIDER} is not a recognised provider. Use 'aws' or 'alicloud'." >&2
@@ -1062,6 +1095,19 @@ jobs:
       # so the build never depends on `ensurepip._bundled`. See the
       # lambda.tf `local-exec` comment block for the rationale.
       - name: Pre-build Lambda bundle
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+          # Issue #125: the per-cloud requirements file. The AWS
+          # bundle must NOT ship the alibaba SDKs and the Alicloud
+          # bundle must NOT ship boto3's AWS-only extras — the
+          # per-cloud split is what keeps the AWS zip small (see
+          # infra/aws/modules/core/variables.tf:lambda_requirements).
+          LAMBDA_REQUIREMENTS_FILE: ${{ env.BLITZLOG_PROVIDER == 'alicloud' && 'requirements-alicloud.txt' || 'requirements-aws.txt' }}
+          # The Alicloud core module reads its zip from
+          # infra/alicloud/modules/core/build; the AWS one from
+          # infra/aws/modules/core/build. Both are built so the
+          # plan's `data.archive_file` finds a directory to hash.
+          BUILD_DIR: ${{ env.BLITZLOG_PROVIDER == 'alicloud' && 'infra/alicloud/modules/core/build' || 'infra/aws/modules/core/build' }}
         run: |
           set -euo pipefail
           PYTHON_BIN=""
@@ -1075,22 +1121,22 @@ jobs:
             echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
             exit 1
           fi
-          BUILD_DIR=infra/aws/modules/core/build
-          rm -rf "$BUILD_DIR" infra/aws/modules/core/.build-venv
+          MODULE_DIR="infra/${BLITZLOG_PROVIDER}/modules/core"
+          BUILD_DIR="${MODULE_DIR}/build"
+          VENV_DIR="${MODULE_DIR}/.build-venv"
+          rm -rf "$BUILD_DIR" "$VENV_DIR"
           mkdir -p "$BUILD_DIR"
           cp -r lambda "$BUILD_DIR"/
           mkdir -p "$BUILD_DIR/lambda/packages/whisper-stt-shim"
           cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
-          "$PYTHON_BIN" -m venv --without-pip infra/aws/modules/core/.build-venv
-          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/aws/modules/core/.build-venv/bin/python3
-          # ${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} lets a future
-          # alicloud terraform-apply-dev job flip this to
-          # requirements-alicloud.txt without touching the script body.
-          # The alibaba SDKs (oss2, alibabacloud_kms20160120,
+          "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
+          curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3"
+          # ${LAMBDA_REQUIREMENTS_FILE} is set per provider above: the
+          # alibaba SDKs (oss2, alibabacloud_kms20160120,
           # alibabacloud_ecs20140526) belong to requirements-alicloud.txt
           # and are NOT shipped to the AWS deploy.
-          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
-          rm -rf infra/aws/modules/core/.build-venv
+          "$VENV_DIR/bin/pip" install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE}" -t "$BUILD_DIR"
+          rm -rf "$VENV_DIR"
 
       - name: Configure AWS credentials (OIDC) for terraform
         uses: aws-actions/configure-aws-credentials@v6
@@ -1100,6 +1146,60 @@ jobs:
           # is used by the Packer workflow above.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/blitzlog-deploy-role
           aws-region: ap-east-1
+
+      # Issue #125: Alicloud credentials for the Alicloud deploy path.
+      #
+      # The Alicloud deploy role (infra/alicloud/bootstrap/deploy-role.tf)
+      # is assumed via GitHub Actions OIDC, mirroring the AWS leg. The
+      # action exports the temporary credentials; we forward them under
+      # the names BOTH the Alicloud provider and the `oss` terraform
+      # backend read:
+      #
+      #   * ALIBABA_CLOUD_ACCESS_KEY_ID / _SECRET / _SECURITY_TOKEN —
+      #     the provider's credential chain (the names the HashiCorp
+      #     docs mark as Recommended).
+      #   * ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY /
+      #     ALICLOUD_SECURITY_TOKEN — the `oss` BACKEND's chain.
+      #
+      # The backend resolves credentials BEFORE the provider is
+      # configured, so it needs its own env var names; setting both
+      # sets is what makes `terraform init` work against OSS without
+      # writing anything to the runner's disk.
+      #
+      # The OIDC PROVIDER itself is registered out-of-band in the
+      # Alicloud RAM console (there is no terraform resource for it in
+      # provider 2.x) — see docs/ALICLOUD_DEPLOY.md.
+      - name: Configure Alicloud credentials (OIDC) for terraform
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        id: aliyun-credentials
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/great-wall-connect/blitzlog
+          role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-deploy-role
+          audience: sts.aliyuncs.com
+
+      - name: Export Alicloud credentials for the provider and the OSS backend
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-id }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-secret }}
+          ALIYUN_SECURITY_TOKEN: ${{ steps.aliyun-credentials.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ALIYUN_ACCESS_KEY_ID:-}" ]; then
+            echo "FATAL: the Alicloud OIDC step produced no credentials." >&2
+            echo "  Check that vars.ALICLOUD_ACCOUNT_ID is set and that the" >&2
+            echo "  Alicloud OIDC provider + blitzlog-deploy-role exist." >&2
+            exit 1
+          fi
+          {
+            echo "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALIBABA_CLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            echo "ALICLOUD_ACCESS_KEY=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALICLOUD_SECRET_KEY=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALICLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+          } >> "$GITHUB_ENV"
 
       # Fetch per-env deploy config + secrets from SSM Parameter
       # Store. The deploy role (infra/aws/bootstrap/deploy-role.tf)
@@ -1126,13 +1226,13 @@ jobs:
       # "GitHub App auth failed" deep inside the Lambda at
       # runtime.
       #
-      # Issue #126: this step is AWS-only. The Alicloud path
-      # uses the operator's `alicloud.tfvars` (gitignored, copied
-      # from `alicloud.tfvars.example`) directly via -var-file
-      # in the `terraform plan` step above. The Phase 5
-      # follow-up will add a KMS Secrets fetch (mirroring this
-      # step) once the Aliyun OIDC role is provisioned in
-      # infra/alicloud/bootstrap/deploy-role.tf.
+      # Issue #126/#125: this step is AWS-only. The Alicloud path
+      # gets its TF_VAR_* from the KMS Secrets Manager fetch below,
+      # which is the direct analogue of this step — the Alicloud
+      # `SecretStore` implementation IS KMS, and the secret paths
+      # are byte-for-byte identical to the SSM paths
+      # (/blitzlog/<env>/<service>/<name>), so the same
+      # leaf-name → TF_VAR_<name> mapping works unchanged.
       - name: Render TF_VAR_* env from SSM
         if: env.BLITZLOG_PROVIDER == 'aws'
         env:
@@ -1189,6 +1289,124 @@ jobs:
             "TF_VAR_" + ($leaf | gsub("-";"_")) + "<<EOF\n" + .Value + "\nEOF"
           ' /tmp/ssm-params.json >> "$GITHUB_ENV"
 
+      # Issue #125: the Alicloud analogue of the SSM fetch above.
+      #
+      # The Alicloud `SecretStore` implementation is KMS Secrets
+      # Manager (lambda/provider/alicloud.py::AlicloudSecretStore),
+      # and the secret paths are byte-for-byte identical to the SSM
+      # paths (/blitzlog/<env>/<service>/<name>), so the same
+      # leaf-name → TF_VAR_<name> mapping applies unchanged.
+      #
+      # This is what replaces the gitignored `alicloud.tfvars` for
+      # the CI path: the secrets live in KMS (managed by the
+      # bootstrap stack), so the runner never needs a secrets file
+      # on disk. The values are written to GITHUB_ENV in heredoc
+      # form so multi-line PEM private keys survive intact, and
+      # they never touch the runner's filesystem.
+      #
+      # The KMS list is NOT path-prefixed the way SSM's
+      # get-parameters-by-path is — KMS has no "list by path"
+      # semantics (see AlicloudSecretStore.get_by_path, which
+      # lists and filters client-side). So this shells out to
+      # `aliyun kms ListSecrets` and reads the ones it needs.
+      - name: Render TF_VAR_* env from KMS
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        env:
+          BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+        run: |
+          set -euo pipefail
+
+          KMS_ROOT="/blitzlog/${BLITZLOG_ENV}"
+
+          # The `aliyun` CLI is not installed on the runner by
+          # default. Install the same pinned build the baked host
+          # image uses (infra/alicloud/packer/scripts-ecs-ubuntu/
+          # 01-system.sh) so the two paths cannot drift.
+          if ! command -v aliyun >/dev/null 2>&1; then
+            cd /tmp
+            curl -fsSL -o aliyun-cli.tgz \
+              https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.6-amd64.tgz
+            tar -xzf aliyun-cli.tgz
+            sudo mv aliyun /usr/local/bin/aliyun
+            sudo chmod +x /usr/local/bin/aliyun
+            rm -f aliyun-cli.tgz
+          fi
+
+          # The secret names the core module provisions, mapped to
+          # the TF variable each one feeds. The AWS-side list is the
+          # same set of TF variables; see the SSM step above.
+          #   github-app/id               -> github_app_id
+          #   github-app/private-key      -> github_app_private_key
+          #   github-app/installation-id  -> github_app_installation_id
+          #   github-webhook/secret       -> github_webhook_secret
+          #   opencode/api-key            -> opencode_api_key
+          #   stt/api-key                 -> stt_api_key
+          #   stt/model                   -> stt_model
+          #   stt/language                -> stt_language
+          #   stt/models-bucket           -> stt_models_bucket_name
+          declare -a KMS_SECRETS=(
+            "github-app/id"
+            "github-app/private-key"
+            "github-app/installation-id"
+            "github-webhook/secret"
+            "opencode/api-key"
+            "stt/api-key"
+            "stt/model"
+            "stt/language"
+            "stt/models-bucket"
+          )
+
+          for secret in "${KMS_SECRETS[@]}"; do
+            name="${KMS_ROOT}/${secret}"
+            value=$(aliyun kms GetSecretValue \
+              --SecretName "$name" \
+              --region "$ALICLOUD_REGION" \
+              --output json 2>/dev/null \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["SecretData"], end="")' 2>/dev/null || true)
+            if [ -z "$value" ]; then
+              echo "FATAL: the KMS secret ${name} is missing or empty." >&2
+              echo "  Run 'cd infra/alicloud/dev && terraform apply' first to" >&2
+              echo "  create the secret, then set its real value with:" >&2
+              echo "    aliyun kms PutSecretValue --SecretName ${name} --SecretData <real> --region $ALICLOUD_REGION" >&2
+              exit 1
+            fi
+            # The leaf name maps to the TF variable: the last
+            # path segment with hyphens replaced by underscores,
+            # EXCEPT for the two whose TF variable name differs from
+            # the leaf (`github-app/id` -> github_app_id,
+            # `github-app/private-key` -> github_app_private_key,
+            # `github-app/installation-id` -> github_app_installation_id,
+            # `github-webhook/secret` -> github_webhook_secret,
+            # `opencode/api-key` -> opencode_api_key,
+            # `stt/api-key` -> stt_api_key,
+            # `stt/models-bucket` -> stt_models_bucket_name).
+            case "$secret" in
+              github-app/id)              var=github_app_id ;;
+              github-app/private-key)     var=github_app_private_key ;;
+              github-app/installation-id) var=github_app_installation_id ;;
+              github-webhook/secret)      var=github_webhook_secret ;;
+              opencode/api-key)           var=opencode_api_key ;;
+              stt/api-key)                var=stt_api_key ;;
+              stt/model)                  var=stt_model ;;
+              stt/language)               var=stt_language ;;
+              stt/models-bucket)          var=stt_models_bucket_name ;;
+              *) echo "FATAL: unhandled KMS secret ${secret}" >&2; exit 1 ;;
+            esac
+            # Heredoc form so multi-line PEM private keys survive.
+            {
+              echo "TF_VAR_${var}<<EOF"
+              echo "$value"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          done
+
+          # The OSS bucket names are not secrets — they are plain
+          # TF variables the operator configures. They come from the
+          # repo variables so the runner does not need a tfvars file.
+          echo "TF_VAR_agent_logs_bucket_name=${ALICLOUD_AGENT_LOGS_BUCKET:-gwc-blitzlog-agent-logs}" >> "$GITHUB_ENV"
+          echo "TF_VAR_alicloud_region=${ALICLOUD_REGION}" >> "$GITHUB_ENV"
+
       # Backend config is passed inline so no `*.hcl` file is
       # materialized on the runner. The bucket comes from the
       # repo variable TF_BACKEND_BUCKET (with a default of
@@ -1200,15 +1418,28 @@ jobs:
       #
       # Issue #126: when BLITZLOG_PROVIDER=alicloud, the backend
       # switches from AWS S3 to Alicloud OSS. The state bucket
-      # name comes from vars.TF_BACKEND_BUCKET_OSS (default
-      # `gwc-infra-tfstate` so the standard install needs no
-      # operator action), the region is hard-coded cn-hangzhou to
-      # match the bootstrap role's trust policy.
+      # name comes from vars.TF_BACKEND_BUCKET_OSS.
+      #
+      # Issue #125: the Alicloud defaults were corrected to the
+      # REAL bucket + region. The state bucket `gwc-infra-tf-state`
+      # (hyphen) lives in cn-hongkong — the previous default
+      # (`gwc-infra-tfstate`, no hyphen, cn-hangzhou) named a
+      # bucket that does not exist in a region that is not the
+      # bucket's, which fails with "Authorization header is
+      # invalid" rather than a clear "no such bucket". An OSS
+      # bucket name is globally unique but its REGION is not, so
+      # the region must match the bucket's.
+      #
+      # The Alicloud credentials come from the "Configure
+      # Alicloud credentials" step above, which exports both the
+      # ALIBABA_CLOUD_* (provider) and ALICLOUD_* (backend) env
+      # var names.
       - name: terraform init
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         env:
           TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
-          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tfstate' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tf-state' }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
           BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
@@ -1216,7 +1447,7 @@ jobs:
             terraform init -input=false \
               -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
               -backend-config="key=${{ env.STATE_KEY }}" \
-              -backend-config="region=cn-hangzhou"
+              -backend-config="region=${ALICLOUD_REGION}"
           else
             terraform init -input=false \
               -backend-config="bucket=${TF_BACKEND_BUCKET}" \
@@ -1233,6 +1464,14 @@ jobs:
       # AWS path, `alicloud.tfvars` for the Alicloud path). The
       # files are gitignored operator-side; the example file in the
       # same directory is the template.
+      #
+      # Issue #125: the Alicloud path no longer NEEDS the tfvars
+      # file in CI. The secrets now come from KMS (the "Render
+      # TF_VAR_* env from KMS" step) and the non-secret variables
+      # come from repo variables, so the plan runs from a fresh
+      # checkout with no operator file on disk. The tfvars file is
+      # still used when it exists (it lets an operator override the
+      # non-secret values locally), but it is no longer required.
       - name: terraform plan
         id: plan
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
@@ -1249,11 +1488,11 @@ jobs:
           # TF_VAR_* env from SSM" step above, so NO -var-file is needed
           # or wanted — matching the pre-#126 behaviour byte for byte.
           #
-          # Alicloud: there is no SSM fetch for that provider yet
-          # (Phase 5), so the operator's per-provider tfvars file IS the
-          # source of config and is required. The naming convention is
-          # `<provider>.tfvars`; the `.tfvars.example` beside it is the
-          # template.
+          # Alicloud: same shape after issue #125 — the KMS render
+          # step supplies the secrets as TF_VAR_*, and the
+          # non-secret variables come from repo variables. An
+          # `alicloud.tfvars` file, if the operator has left one in
+          # place, still wins for the values it sets.
           #
           # Regression: #126 made -var-file unconditional and FATAL'd when
           # absent. `<provider>.tfvars` is gitignored, so it can never
@@ -1266,9 +1505,7 @@ jobs:
           elif [ -f "${TFVARS_FILE}" ]; then
             terraform plan -no-color -input=false -var-file="${TFVARS_FILE}" -out=tfplan
           else
-            echo "FATAL: ${TFVARS_FILE} not found in $(pwd). Copy the *.tfvars.example to ${TFVARS_FILE} and fill in the values." >&2
-            echo "  The Alicloud path has no SSM-backed TF_VAR_* render yet (Phase 5), so the tfvars file is required there." >&2
-            exit 1
+            terraform plan -no-color -input=false -out=tfplan
           fi
 
       - name: Upload plan artifact

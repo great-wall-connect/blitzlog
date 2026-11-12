@@ -1,7 +1,7 @@
 variable "alicloud_region" {
-  description = "Alicloud region for all resources"
+  description = "Alicloud region for all resources. Defaults to cn-hongkong — the region the blitzlog Alicloud account's OSS buckets live in (the state bucket `gwc-infra-tf-state` and the shared agent-logs / STT-models buckets). AWS analogue: aws_region."
   type        = string
-  default     = "cn-hangzhou"
+  default     = "cn-hongkong"
 }
 
 variable "vpc_id" {

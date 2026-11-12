@@ -1337,8 +1337,13 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         cls.text = RELEASE_YML.read_text()
 
     def test_validate_provider_step_present(self):
-        """The deploy job must include a Validate provider step
-        that fails fast on alicloud.
+        """The deploy job must include a Validate provider step.
+
+        Issue #125: the Alicloud deploy is now IMPLEMENTED, so the
+        step no longer refuses it outright — it refuses it unless the
+        operator has explicitly opted in via the ENABLE_ALICLOUD_DEPLOY
+        repo variable. The refusal is still a hard stop with an
+        actionable message.
         """
         self.assertRegex(
             self.text,
@@ -1348,20 +1353,50 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "release.yml must include a 'Validate provider' step that reads "
             "env.BLITZLOG_PROVIDER",
         )
-        # The case statement for alicloud must fail with a clear error.
-        # The wording was reworded when Alicloud deploy was gated off on
-        # purpose (rather than merely not-yet-supported): the message now
-        # tells the operator HOW to get back to a supported state.
         self.assertIn(
-            "FATAL: Alicloud deploy is disabled by design.",
+            "FATAL: the Alicloud deploy is gated off.",
             self.text,
-            "release.yml must fail fast when BLITZLOG_PROVIDER=alicloud",
+            "release.yml must fail fast when BLITZLOG_PROVIDER=alicloud and "
+            "the deploy is not enabled",
         )
         self.assertIn(
             "unset vars.BLITZLOG_PROVIDER",
             self.text,
             "the alicloud guard must tell the operator how to return to a "
             "supported state, not just that it failed",
+        )
+
+    def test_alicloud_deploy_is_opt_in(self):
+        """Issue #125: the Alicloud deploy must be gated on the
+        ENABLE_ALICLOUD_DEPLOY repo variable.
+
+        The Alicloud path reaches a REAL account. A stray
+        vars.BLITZLOG_PROVIDER=alicloud must not apply to it by
+        accident — so the gate is an exact `== 'true'` comparison on
+        an unset-by-default repo variable.
+        """
+        import yaml
+
+        wf = yaml.safe_load(self.text)
+        deploy = wf["jobs"]["deploy"]
+        step = next(s for s in deploy["steps"] if s.get("name") == "Validate provider")
+        env = step.get("env", {})
+        self.assertEqual(
+            env.get("ENABLE_ALICLOUD_DEPLOY"),
+            "${{ vars.ENABLE_ALICLOUD_DEPLOY }}",
+            "the Validate provider step must read the ENABLE_ALICLOUD_DEPLOY "
+            "repo variable",
+        )
+        self.assertIn(
+            'if [ "${ENABLE_ALICLOUD_DEPLOY:-}" != "true" ]; then',
+            step.get("run", ""),
+            "the gate must be an exact == 'true' comparison so an unset "
+            "variable defaults to disabled",
+        )
+        self.assertIn(
+            "gh variable set ENABLE_ALICLOUD_DEPLOY --body true",
+            step.get("run", ""),
+            "the refusal must tell the operator how to enable it",
         )
 
     def test_detect_step_does_not_reference_gate_shell_vars(self):
@@ -1474,6 +1509,12 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
     def test_terraform_init_switches_backend_by_provider(self):
         """The `terraform init` step must switch between S3 (AWS)
         and OSS (Alicloud) backends based on BLITZLOG_PROVIDER.
+
+        Issue #125: the Alicloud branch's region is now a VARIABLE
+        (`${ALICLOUD_REGION}`), not a literal — the default is
+        cn-hongkong, the region the real state bucket lives in, but
+        an operator with a bucket elsewhere needs to be able to
+        override it.
         """
         self.assertIn(
             "TF_BACKEND_BUCKET_OSS",
@@ -1490,10 +1531,66 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "release.yml terraform init must use region=ap-east-1 for the AWS S3 backend",
         )
         self.assertIn(
-            "region=cn-hangzhou",
+            '-backend-config="region=${ALICLOUD_REGION}"',
             self.text,
-            "release.yml terraform init must use region=cn-hangzhou for the Alicloud OSS backend",
+            "release.yml terraform init must pass the Alicloud region as a "
+            "variable — the OSS backend's region MUST match the bucket's",
         )
+
+    def test_alicloud_backend_defaults_match_the_real_bucket(self):
+        """Issue #125: the previous Alicloud defaults named a bucket
+        that does not exist (`gwc-infra-tfstate`, no hyphen) in a
+        region that is not the bucket's (`cn-hangzhou`).
+
+        An OSS bucket name is globally unique but its REGION is not,
+        so a region mismatch fails with "Authorization header is
+        invalid" rather than a clear "no such bucket" — which is
+        exactly the confusion this pins down.
+        """
+        import yaml
+
+        wf = yaml.safe_load(self.text)
+        deploy = wf["jobs"]["deploy"]
+        init_step = next(
+            s for s in deploy["steps"] if s.get("name") == "terraform init"
+        )
+        env = init_step.get("env", {})
+
+        self.assertEqual(
+            env.get("TF_BACKEND_BUCKET_OSS"),
+            "${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tf-state' }}",
+            "the Alicloud state bucket default must be the REAL bucket "
+            "name (hyphenated), matching infra/alicloud/bootstrap/"
+            "bootstrap-backend.hcl",
+        )
+        self.assertEqual(
+            env.get("ALICLOUD_REGION"),
+            "${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}",
+            "the Alicloud region default must be cn-hongkong — the region "
+            "the state bucket actually lives in",
+        )
+
+    def test_no_alicloud_stack_still_says_cn_hangzhou(self):
+        """The region default must be consistent across the whole
+        Alicloud tree — a stack in cn-hangzhou writing to a
+        cn-hongkong bucket fails the same way the backend did."""
+        for path in (
+            REPO_ROOT / "infra" / "alicloud" / "bootstrap" / "variables.tf",
+            REPO_ROOT / "infra" / "alicloud" / "dev" / "variables.tf",
+            REPO_ROOT / "infra" / "alicloud" / "prod" / "variables.tf",
+        ):
+            text = path.read_text()
+            self.assertIn(
+                'default     = "cn-hongkong"',
+                text,
+                f"{path} must default alicloud_region to cn-hongkong",
+            )
+            self.assertNotIn(
+                "cn-hangzhou",
+                text,
+                f"{path} still mentions cn-hangzhou — the Alicloud "
+                "region defaults must be consistent",
+            )
 
 
 class TestAlicloudPackerJob(unittest.TestCase):

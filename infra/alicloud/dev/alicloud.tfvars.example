@@ -4,7 +4,7 @@
 # App + a sandbox repo. See infra/aws/dev/terraform.tfvars.example for
 # the AWS-side analogue.
 
-alicloud_region = "cn-hangzhou"
+alicloud_region = "cn-hongkong"
 
 # VPC and VSwitches: leave vpc_id empty to let the module create a new
 # VPC; supply pre-existing ids to reuse a VPC from another stack. Same

@@ -6,7 +6,7 @@
 #
 # AWS analogue: infra/aws/bootstrap/terraform.tfvars.example.
 
-alicloud_region = "cn-hangzhou"
+alicloud_region = "cn-hongkong"
 
 # Globally unique OSS bucket names (same constraint as S3).
 agent_logs_bucket_name = "blitzlog-bootstrap-agent-logs"

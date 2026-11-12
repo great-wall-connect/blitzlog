@@ -43,7 +43,6 @@ locals {
   # infra/alicloud/modules/core/oss.tf:36-37 does.
   stt_models_bucket_arn = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.stt_models.bucket}"
 }
-
 resource "alicloud_ram_role" "packer_build" {
   role_name   = "blitzlog-packer-build-role"
   description = "Packer build role for the blitzlog Alicloud ECS image (assumed via GitHub OIDC)"

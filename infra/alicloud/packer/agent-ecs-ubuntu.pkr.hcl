@@ -35,8 +35,8 @@ variable "stt_models_bucket" {
 
 variable "alicloud_region" {
   type        = string
-  description = "Aliyun region to build in. The image is published to this region's KMS Secrets Manager."
-  default     = "cn-hangzhou"
+  description = "Aliyun region to build in. The image is published to this region's KMS Secrets Manager. Defaults to cn-hongkong — the region the blitzlog Alicloud account's OSS buckets live in."
+  default     = "cn-hongkong"
 }
 
 variable "github_token" {

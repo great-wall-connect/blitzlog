@@ -4,7 +4,7 @@
 # + your real user repos. See infra/aws/prod/terraform.tfvars.example
 # for the AWS-side analogue.
 
-alicloud_region = "cn-hangzhou"
+alicloud_region = "cn-hongkong"
 
 # VPC and VSwitches.
 vpc_id         = ""

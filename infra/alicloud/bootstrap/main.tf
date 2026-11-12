@@ -25,10 +25,25 @@ terraform {
     }
   }
 
+  # The OSS backend. The bucket / key / region are supplied via
+  # `-backend-config` (see bootstrap-backend.hcl); the credential
+  # comes from the ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY env
+  # vars, or from the `profile` below, which reads
+  # `~/.aliyun/config.json`.
+  #
+  # The default region here matches the account's bucket region
+  # (cn-hongkong). The backend's region MUST match the bucket's
+  # region — an OSS bucket name is globally unique, but its region
+  # is not, so a mismatch fails with "Authorization header is
+  # invalid" rather than a clear "wrong region" error.
   backend "oss" {
     bucket = ""
     key    = ""
-    region = "cn-hangzhou"
+    region = "cn-hongkong"
+    # The profile name in ~/.aliyun/config.json (written by
+    # `aliyun configure --profile <name>`). Empty by default so the
+    # env-var path is used unless the operator opts in.
+    profile = ""
   }
 }
 
