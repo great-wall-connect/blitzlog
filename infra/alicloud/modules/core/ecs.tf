@@ -1,32 +1,25 @@
 # Analogue of infra/aws/modules/core/ec2.tf.
 #
-# Aliyun ECS + VPC + VSwitch + SecurityGroup mirror the AWS EC2 +
-# VPC + Subnet + SecurityGroup setup. The agent host is launched from
-# the FC function via `AlicloudCompute.run_instances` (same shape as
-# the AWS-side `AwsCompute.run_instances`), so this file does NOT
-# create the ECS instance itself — only the network plumbing.
+# Aliyun ECS + SecurityGroup mirror the AWS EC2 + SecurityGroup
+# setup. The agent host is launched from the FC function via
+# `AlicloudCompute.run_instances` (same shape as the AWS-side
+# `AwsCompute.run_instances`), so this file does NOT create the ECS
+# instance itself — only the network plumbing.
 #
 # Aliyun SGs default-deny inbound just like AWS, so the
 # SSH-from-admin rule ports 1-to-1. The `count = length(cidrs) > 0`
 # guard at infra/aws/modules/core/ec2.tf:27 is preserved.
-
-resource "alicloud_vpc" "agent" {
-  count      = var.vpc_id == "" ? 1 : 0
-  vpc_name   = "blitzlog-${var.environment}-vpc"
-  cidr_block = "10.0.0.0/16"
-}
-
-# One VSwitch per element of var.vswitch_ids. If the operator passes
-# a single ID, the count is 1; the AWS path uses a single
-# ec2_subnet_id. The list shape future-proofs multi-AZ.
-resource "alicloud_vswitch" "agent" {
-  count        = length(var.vswitch_ids)
-  vswitch_name = "blitzlog-${var.environment}-vswitch-${count.index}"
-  cidr_block   = cidrsubnet("10.0.0.0/16", 8, count.index)
-  vpc_id       = var.vpc_id
-  zone_id      = element(["cn-hangzhou-a", "cn-hangzhou-b", "cn-hangzhou-c", "cn-hangzhou-d", "cn-hangzhou-e", "cn-hangzhou-f", "cn-hangzhou-g", "cn-hangzhou-h", "cn-hangzhou-i"], count.index)
-  description  = "VSwitch for the blitzlog agent (env: ${var.environment}, AZ ${count.index})"
-}
+#
+# THE VPC AND VSWITCHES ARE NOT HERE. They live in the bootstrap
+# stack (infra/alicloud/bootstrap/network.tf), which owns the shared
+# network for the account — Alicloud has no default VPC per region,
+# and dev + prod share one account, so a per-env VPC would have to
+# dodge the overlapping-CIDR rejection. The per-env stacks take
+# `vpc_id` + `vswitch_ids` as REQUIRED inputs; the operator copies
+# them out of the bootstrap stack's outputs.
+#
+# (This mirrors the AWS side, where the core module also has no
+# `aws_vpc` resource — AWS has a default VPC per account.)
 
 resource "alicloud_security_group" "agent_sg" {
   security_group_name = "blitzlog-${var.environment}-agent-sg"

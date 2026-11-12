@@ -714,9 +714,12 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
                     break
             i += 1
         block = fc[start : i + 1]
-        self.assertIn(
-            'BLITZLOG_PROVIDER     = "alicloud"',
+        # Whitespace-insensitive: `terraform fmt` realigns the `=`
+        # in the block, so pinning the exact padding would break on
+        # a reformat that changes nothing semantic.
+        self.assertRegex(
             block,
+            r'BLITZLOG_PROVIDER\s*=\s*"alicloud"',
             f'environment_variables must set BLITZLOG_PROVIDER = "alicloud"; got:\n{block}',
         )
 

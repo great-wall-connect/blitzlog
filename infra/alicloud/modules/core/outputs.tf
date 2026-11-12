@@ -25,6 +25,16 @@ output "ec2_security_group_id" {
   value       = alicloud_security_group.agent_sg.id
 }
 
+output "vpc_id" {
+  description = "The shared agent VPC the ECS instances and security group live in. Echoes the input — the network itself is owned by the bootstrap stack (infra/alicloud/bootstrap/network.tf)."
+  value       = var.vpc_id
+}
+
+output "vswitch_ids" {
+  description = "The shared agent VSwitches an ECS launch can land in. Echoes the input — the network itself is owned by the bootstrap stack."
+  value       = var.vswitch_ids
+}
+
 output "ec2_instance_profile_name" {
   description = "RAM role name for ECS agent role. AWS analogue: ec2_instance_profile_name (IAM instance profile). On Alicloud the RAM role is attached directly to the ECS instance via the RunInstances `RamRoleName` parameter, so this is just the role name."
   value       = alicloud_ram_role.ecs_agent_role.role_name

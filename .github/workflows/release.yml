@@ -1314,6 +1314,9 @@ jobs:
         env:
           BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
           ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          # The shared agent network (see the note further down).
+          ALICLOUD_VPC_ID: ${{ vars.ALICLOUD_VPC_ID }}
+          ALICLOUD_VSWITCH_IDS: ${{ vars.ALICLOUD_VSWITCH_IDS }}
         run: |
           set -euo pipefail
 
@@ -1406,6 +1409,30 @@ jobs:
           # repo variables so the runner does not need a tfvars file.
           echo "TF_VAR_agent_logs_bucket_name=${ALICLOUD_AGENT_LOGS_BUCKET:-gwc-blitzlog-agent-logs}" >> "$GITHUB_ENV"
           echo "TF_VAR_alicloud_region=${ALICLOUD_REGION}" >> "$GITHUB_ENV"
+          # The shared agent network. Alicloud has NO default VPC per
+          # region, so the VPC + VSwitches are created by the
+          # bootstrap stack (infra/alicloud/bootstrap/network.tf) and
+          # the operator copies its outputs into these repo
+          # variables:
+          #
+          #   cd infra/alicloud/bootstrap && terraform output vpc_id
+          #   cd infra/alicloud/bootstrap && terraform output vswitch_ids
+          #
+          # Both are REQUIRED by the per-env stacks — an ECS launch
+          # needs a VSwitch, and the launch fails without one.
+          if [ -z "${ALICLOUD_VPC_ID:-}" ] || [ -z "${ALICLOUD_VSWITCH_IDS:-}" ]; then
+            echo "FATAL: ALICLOUD_VPC_ID and ALICLOUD_VSWITCH_IDS must be set." >&2
+            echo "  The Alicloud bootstrap stack owns the agent VPC + VSwitches." >&2
+            echo "  Get them with:" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output vpc_id" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output vswitch_ids" >&2
+            echo "  then set them as repo variables:" >&2
+            echo "    gh variable set ALICLOUD_VPC_ID --body <vpc-id>" >&2
+            echo "    gh variable set ALICLOUD_VSWITCH_IDS --body '<id1>,<id2>'" >&2
+            exit 1
+          fi
+          echo "TF_VAR_vpc_id=${ALICLOUD_VPC_ID}" >> "$GITHUB_ENV"
+          echo "TF_VAR_vswitch_ids=[\"${ALICLOUD_VSWITCH_IDS//,/\",\"}\"]" >> "$GITHUB_ENV"
 
       # Backend config is passed inline so no `*.hcl` file is
       # materialized on the runner. The bucket comes from the

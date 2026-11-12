@@ -532,5 +532,206 @@ class TestAlicloudBundleBuildTargetsTheRightModule(unittest.TestCase):
         )
 
 
+def _variable_block(text, name):
+    """Return the body of `variable "<name>" { ... }` from a .tf file.
+
+    Brace-balanced, so a nested `validation { ... }` block does not
+    terminate the search early. Returns "" when the variable is
+    absent.
+    """
+    marker = f'variable "{name}" {{'
+    start = text.find(marker)
+    if start == -1:
+        return ""
+    i = text.index("{", start)
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1 : j]
+    return ""
+
+
+class TestAlicloudNetworkIsOwnedByTheBootstrap(unittest.TestCase):
+    """Alicloud has NO default VPC per region (unlike AWS, where every
+    account has one), so the deployment MUST create a VPC and at least
+    one VSwitch — `RunInstances` requires a `VSwitchId`.
+
+    The bootstrap stack owns that network. dev and prod share one
+    Alicloud account, and Alicloud rejects a second VPC whose CIDR
+    overlaps an existing one (`OperationDenied.CidrBlockOverlapped`),
+    so per-env VPCs would need per-env CIDRs. One shared VPC sidesteps
+    that entirely.
+
+    The per-env stacks therefore take `vpc_id` + `vswitch_ids` as
+    REQUIRED inputs, and the core module must NOT create the network.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bootstrap = _read(os.path.join(ALICLOUD_BOOTSTRAP, "network.tf"))
+        cls.core_ecs = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/ecs.tf")
+        )
+        cls.core_vars = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/variables.tf")
+        )
+        cls.core_fc = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/function_compute.tf")
+        )
+
+    def test_bootstrap_creates_the_vpc_and_vswitches(self):
+        self.assertIn(
+            'resource "alicloud_vpc" "agent"',
+            self.bootstrap,
+            "the bootstrap stack must create the VPC — Alicloud has no " "default one",
+        )
+        self.assertIn(
+            'resource "alicloud_vswitch" "agent"',
+            self.bootstrap,
+            "the bootstrap stack must create the VSwitches — an ECS "
+            "launch requires one",
+        )
+
+    def test_vswitch_is_wired_to_the_vpc(self):
+        """The VSwitch must attach to the CREATED VPC, not to a
+        variable — the whole bug class this replaces was wiring the
+        VSwitch to an empty `var.vpc_id`."""
+        self.assertRegex(
+            self.bootstrap,
+            r"vpc_id\s*=\s*alicloud_vpc\.agent\.id",
+            "the VSwitch must attach to the VPC the bootstrap creates",
+        )
+
+    def test_vswitch_zones_come_from_a_variable(self):
+        """The zone list must NOT be hard-coded — the earlier
+        `cn-hangzhou-*` list was the wrong region, and the account's
+        actual zone set is per-account anyway (this one has
+        cn-hongkong-b/c/d and NO cn-hongkong-a)."""
+        self.assertIn(
+            "var.vswitch_zone_ids[count.index]",
+            self.bootstrap,
+            "the VSwitch zone must come from a variable",
+        )
+        self.assertNotIn(
+            "cn-hangzhou-",
+            self.bootstrap,
+            "the hard-coded cn-hangzhou zone list must be gone — it was "
+            "the wrong region",
+        )
+
+    def test_cidr_is_a_variable(self):
+        self.assertIn(
+            "cidr_block  = var.vpc_cidr_block",
+            self.bootstrap,
+            "the VPC's CIDR must come from a variable",
+        )
+        self.assertIn(
+            "cidrsubnet(var.vpc_cidr_block, 8, count.index)",
+            self.bootstrap,
+            "the VSwitch CIDRs must be carved out of the VPC's block",
+        )
+
+    def test_core_module_does_not_create_the_network(self):
+        """The core module consumes the network; it does not create
+        it. This mirrors the AWS side, which also has no `aws_vpc`
+        resource (AWS has a default VPC)."""
+        self.assertNotIn(
+            'resource "alicloud_vpc"',
+            self.core_ecs,
+            "the core module must not create a VPC — the bootstrap owns it",
+        )
+        self.assertNotIn(
+            'resource "alicloud_vswitch"',
+            self.core_ecs,
+            "the core module must not create VSwitches — the bootstrap " "owns them",
+        )
+
+    def test_core_module_inputs_are_required(self):
+        """No default: an empty `vpc_id` means the security group is
+        created with no VPC, and an empty `vswitch_ids` means the
+        launch has nowhere to land."""
+        for name in ("vpc_id", "vswitch_ids"):
+            block = _variable_block(self.core_vars, name)
+            self.assertTrue(block, f"the core module must declare {name}")
+            self.assertNotRegex(
+                block,
+                r"^\s*default\s*=",
+                f"{name} must have NO default — it is required. An empty "
+                "default means the ECS launch has no VSwitch.",
+            )
+
+    def test_vswitch_ids_must_not_be_empty(self):
+        """A required variable can still be an empty list, and
+        `var.vswitch_ids[0]` on an empty list is a plan-time
+        'Invalid index' — an unhelpful error for what is really a
+        missing-configuration problem."""
+        block = _variable_block(self.core_vars, "vswitch_ids")
+        self.assertIn(
+            "length(var.vswitch_ids) > 0",
+            block,
+            "vswitch_ids must be validated as non-empty — the on-demand "
+            "fallback path reads vswitch_ids[0]",
+        )
+
+    def test_lambda_gets_the_network(self):
+        """The FC function is what launches the ECS instance, so it
+        needs the VPC + VSwitches as env vars.
+
+        `ALIYUN_DEFAULT_VSWITCH_ID` was NEVER set before this: the
+        provider's on-demand fallback path reads it
+        (lambda/provider/alicloud.py) and passed an empty
+        `v_switch_id` to RunInstances, so the launch failed with an
+        unhelpful API error.
+        """
+        self.assertIn("VPC_ID", self.core_fc)
+        self.assertIn("VSWITCH_IDS", self.core_fc)
+        self.assertIn(
+            "ALIYUN_DEFAULT_VSWITCH_ID = var.vswitch_ids[0]",
+            self.core_fc,
+            "the on-demand fallback path needs a default VSwitch",
+        )
+
+    def test_env_stacks_require_the_network(self):
+        for env in ("dev", "prod"):
+            text = _read(os.path.join(REPO_ROOT, "infra/alicloud", env, "variables.tf"))
+            for name in ("vpc_id", "vswitch_ids"):
+                block = _variable_block(text, name)
+                self.assertTrue(
+                    block, f"infra/alicloud/{env}/variables.tf must declare {name}"
+                )
+                self.assertNotRegex(
+                    block,
+                    r"^\s*default\s*=",
+                    f"infra/alicloud/{env}/variables.tf: {name} must have "
+                    "NO default — it is required",
+                )
+
+    def test_workflow_renders_the_network_variables(self):
+        """CI has no tfvars file, so the required network variables
+        must be rendered from repo variables."""
+        text = _read(RELEASE_YML)
+        self.assertIn(
+            "TF_VAR_vpc_id=${ALICLOUD_VPC_ID}",
+            text,
+            "the Alicloud path must render TF_VAR_vpc_id from the repo " "variable",
+        )
+        self.assertIn(
+            "TF_VAR_vswitch_ids=",
+            text,
+            "the Alicloud path must render TF_VAR_vswitch_ids from the "
+            "repo variable",
+        )
+        self.assertIn(
+            "ALICLOUD_VPC_ID and ALICLOUD_VSWITCH_IDS must be set",
+            text,
+            "the render step must fail loudly when the network variables "
+            "are missing — the plan would otherwise prompt for them",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

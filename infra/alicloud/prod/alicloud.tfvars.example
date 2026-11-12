@@ -6,9 +6,18 @@
 
 alicloud_region = "cn-hongkong"
 
-# VPC and VSwitches.
-vpc_id         = ""
-vswitch_ids    = []
+# VPC and VSwitches — REQUIRED. Alicloud has no default VPC per
+# region (unlike AWS), so the shared agent network must exist before
+# an ECS instance can be launched. The bootstrap stack creates it:
+#
+#   cd infra/alicloud/bootstrap && terraform output vpc_id
+#   cd infra/alicloud/bootstrap && terraform output vswitch_ids
+#
+# dev and prod SHARE this VPC — their security groups keep them
+# separate. Alicloud rejects a second VPC with an overlapping CIDR,
+# which is why the network is created once, in the bootstrap.
+vpc_id         = "REPLACE_ME_vpc_id"
+vswitch_ids    = ["REPLACE_ME_vswitch_id"]
 
 # SSH ingress: empty = no SSH ingress.
 ssh_allowed_cidrs = []

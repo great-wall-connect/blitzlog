@@ -15,15 +15,18 @@ variable "alicloud_region" {
 }
 
 variable "vpc_id" {
-  description = "VPC ID for ECS instances and security group. AWS analogue: same name (vpc_id)."
+  description = "ID of the shared agent VPC. REQUIRED — Alicloud has no default VPC per region, so an ECS launch needs one. Copy it from the bootstrap stack's output: 'cd infra/alicloud/bootstrap && terraform output vpc_id'. AWS analogue: same name (vpc_id)."
   type        = string
-  default     = ""
 }
 
 variable "vswitch_ids" {
-  description = "VSwitch IDs for ECS preemptible instances. ECS supports multiple VSwitches per VPC, so we accept a list. AWS analogue: ec2_subnet_id (single Subnet)."
+  description = "IDs of the agent VSwitches. REQUIRED — an ECS launch requires a VSwitch, and the spot launcher picks one by AZ. Copy them from the bootstrap stack's output: 'terraform output vswitch_ids'. AWS analogue: ec2_subnet_id (single Subnet)."
   type        = list(string)
-  default     = []
+
+  validation {
+    condition     = length(var.vswitch_ids) > 0
+    error_message = "vswitch_ids must contain at least one VSwitch id. An ECS launch requires a VSwitch, and the on-demand fallback path reads vswitch_ids[0] — an empty list fails the plan with 'Invalid index'. Copy the list from the bootstrap stack: 'terraform output vswitch_ids'."
+  }
 }
 
 variable "ssh_allowed_cidrs" {

@@ -55,12 +55,30 @@ gh variable set ALICLOUD_ACCOUNT_ID --body <account-id>
 
 Every Alicloud role ARN in the workflows is built from it.
 
+### 1c. The agent network ids (after the first bootstrap apply)
+
+The CI plan needs the shared VPC + VSwitches, and CI has no tfvars
+file — so they come from repo variables:
+
+```bash
+gh variable set ALICLOUD_VPC_ID --body <vpc-id>
+gh variable set ALICLOUD_VSWITCH_IDS --body '<id1>,<id2>,<id3>'
+```
+
+Get the values from the bootstrap stack (§3):
+
+```bash
+cd infra/alicloud/bootstrap && terraform output vpc_id
+cd infra/alicloud/bootstrap && terraform output vswitch_ids
+```
+
 ---
 
 ## 2. Bootstrap
 
 Creates the shared OSS buckets (agent-logs, STT models), the KMS CMK,
-and the two CI roles (the Packer build role and the deploy role).
+the two CI roles (the Packer build role and the deploy role), and the
+**shared agent VPC + VSwitches** (`network.tf`).
 
 ```bash
 cd infra/alicloud/bootstrap
@@ -130,6 +148,43 @@ aliyun kms PutSecretValue \
   --SecretData "$(cat private-key.pem)" \
   --region cn-hongkong
 ```
+
+### The agent network
+
+Alicloud has **no default VPC per region** (unlike AWS, where every
+account has one), so a VPC and at least one VSwitch must exist before
+an ECS instance can be launched — `RunInstances` requires a
+`VSwitchId`.
+
+The bootstrap stack creates that network (`network.tf`): one VPC and
+one VSwitch per zone. dev and prod **share** it — their security
+groups keep them separate. (Alicloud rejects a second VPC with an
+overlapping CIDR, so a per-env VPC would need a per-env CIDR; one
+shared network sidesteps that.)
+
+Copy the bootstrap's outputs into the env's tfvars:
+
+```bash
+cd infra/alicloud/bootstrap
+terraform output vpc_id
+terraform output vswitch_ids
+```
+
+```hcl
+# infra/alicloud/dev/alicloud.tfvars
+vpc_id      = "vpc-j6cx5ca2zktpkq7c89w8r"
+vswitch_ids = ["vsw-...", "vsw-...", "vsw-..."]
+```
+
+Both are **required** — an empty value fails the plan with a clear
+message rather than an ECS launch error at runtime.
+
+> **The zone set is per-ACCOUNT, not per-region.** This account has
+> `cn-hongkong-b`, `-c` and `-d` — there is **no** `cn-hongkong-a`,
+> and creating a VSwitch there fails with `ResourceNotAvailable`
+> ("Resource you requested is not available in this region or zone").
+> Check yours with `aliyun vpc DescribeZones --RegionId <region>` and
+> override `vswitch_zone_ids` in the bootstrap if they differ.
 
 The secret names mirror the AWS SSM paths:
 
