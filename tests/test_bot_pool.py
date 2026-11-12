@@ -10,6 +10,7 @@ import provider
 from bot_pool import (
     acquire_bot_token,
     get_local_llm_config,
+    get_opencode_profile,
     get_telegram_user_id,
     parse_telegram_decision,
 )
@@ -669,6 +670,188 @@ class TestGetLocalLlmConfig(unittest.TestCase):
             "Path"
         ]
         self.assertEqual(called_path, "/blitzlog/users/daniel-sarosi-gwc/local-llm")
+        self.assertNotIn("/blitzlog/dev/", called_path)
+        self.assertNotIn("/blitzlog/prod/", called_path)
+
+
+def _opencode_pages(params, login="octocat"):
+    return [
+        {
+            "Parameters": [
+                {
+                    "Name": f"/blitzlog/users/{login}/opencode/{key}",
+                    "Value": value,
+                }
+                for key, value in params.items()
+            ]
+        }
+    ]
+
+
+class TestGetOpencodeProfile(unittest.TestCase):
+    """The per-user model + credential (issue #165, level 2 of the
+    three-level model selection)."""
+
+    def setUp(self):
+        provider.reset_provider_singletons()
+
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_without_a_login(self, mock_boto3_client):
+        self.assertIsNone(get_opencode_profile(""))
+
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_no_params(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("provider.aws._boto3_client")
+    def test_returns_none_when_path_missing(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound"}}, "GetParametersByPath"
+        )
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("provider.aws._boto3_client")
+    def test_reads_model_key_and_provider(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "api-key": "sk-ant-secret",
+                "provider": "anthropic",
+            }
+        )
+        profile = get_opencode_profile("octocat")
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.model, "anthropic/claude-sonnet-4")
+        self.assertTrue(profile.has_api_key)
+        self.assertEqual(profile.provider, "anthropic")
+        self.assertEqual(profile.base_url, "")
+
+    @patch("provider.aws._boto3_client")
+    def test_never_returns_the_key_material(self, mock_boto3_client):
+        """The credential must not cross back into the caller — only
+        a boolean does. Key material in the Lambda's memory would
+        end up in logs or in the rendered user-data."""
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {"api-key": "sk-ant-secret"}
+        )
+        profile = get_opencode_profile("octocat")
+        self.assertTrue(profile.has_api_key)
+        self.assertNotIn("sk-ant-secret", repr(profile))
+        self.assertFalse(hasattr(profile, "api_key"))
+
+    @patch("provider.aws._boto3_client")
+    def test_no_key_means_no_credential(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {"model": "anthropic/claude-sonnet-4", "provider": "anthropic"}
+        )
+        profile = get_opencode_profile("octocat")
+        self.assertFalse(profile.has_api_key)
+
+    @patch("llm_guard._resolve_endpoint_ips")
+    @patch("provider.aws._boto3_client")
+    def test_accepts_public_base_url(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": "acme/llama",
+                "api-key": "sk-secret",
+                "provider": "acme",
+                "base-url": "https://llm.example.com/v1",
+            }
+        )
+        mock_resolve.return_value = ["93.184.216.34"]
+        profile = get_opencode_profile("octocat")
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.base_url, "https://llm.example.com/v1")
+
+    @patch("llm_guard._resolve_endpoint_ips")
+    @patch("provider.aws._boto3_client")
+    def test_rejects_private_base_url_without_opt_in(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": "acme/llama",
+                "api-key": "sk-secret",
+                "provider": "acme",
+                "base-url": "http://100.64.0.5:11434/v1",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        # The whole profile is rejected — falling back to the default
+        # endpoint would move the user's key to a host they did not
+        # choose.
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("llm_guard._resolve_endpoint_ips")
+    @patch("provider.aws._boto3_client")
+    def test_accepts_private_base_url_with_opt_in(
+        self, mock_boto3_client, mock_resolve
+    ):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": "acme/llama",
+                "api-key": "sk-secret",
+                "provider": "acme",
+                "base-url": "http://100.64.0.5:11434/v1",
+                "allow-private-cidrs": "true",
+            }
+        )
+        mock_resolve.return_value = ["100.64.0.5"]
+        profile = get_opencode_profile("octocat")
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.base_url, "http://100.64.0.5:11434/v1")
+
+    @patch("llm_guard._resolve_endpoint_ips")
+    @patch("provider.aws._boto3_client")
+    def test_rejects_imds_base_url(self, mock_boto3_client, mock_resolve):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": "acme/llama",
+                "api-key": "sk-secret",
+                "provider": "acme",
+                "base-url": "http://169.254.169.254/latest",
+            }
+        )
+        mock_resolve.return_value = ["169.254.169.254"]
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("provider.aws._boto3_client")
+    def test_rejects_an_invalid_model(self, mock_boto3_client):
+        """The per-user model lands in the EC2 user-data bash script,
+        so an invalid value rejects the WHOLE profile — the buyer
+        meant to run their own model, and silently falling back to the
+        org model would not be what they asked for."""
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {
+                "model": 'evil/x"; rm -rf / #',
+                "api-key": "sk-secret",
+                "provider": "evil",
+            }
+        )
+        self.assertIsNone(get_opencode_profile("octocat"))
+
+    @patch("provider.aws._boto3_client")
+    def test_reads_the_env_independent_user_namespace(self, mock_boto3_client):
+        mock_ssm = mock_boto3_client.return_value
+        mock_ssm.get_paginator.return_value.paginate.return_value = _opencode_pages(
+            {"model": "anthropic/claude-sonnet-4"}
+        )
+        get_opencode_profile("daniel-sarosi-gwc")
+        called_path = mock_ssm.get_paginator.return_value.paginate.call_args.kwargs[
+            "Path"
+        ]
+        self.assertEqual(called_path, "/blitzlog/users/daniel-sarosi-gwc/opencode")
         self.assertNotIn("/blitzlog/dev/", called_path)
         self.assertNotIn("/blitzlog/prod/", called_path)
 

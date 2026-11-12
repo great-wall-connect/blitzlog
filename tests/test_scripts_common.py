@@ -58,8 +58,28 @@ class TestSSMSecretsScript(unittest.TestCase):
         with patch.dict(os.environ, {"BLITZLOG_ENV": "dev"}):
             script = _read_secrets_from_ssm_script(42)
         self.assertIn("/blitzlog/dev/ephemeral/gh/$REPO/42", script)
-        self.assertIn("/blitzlog/dev/opencode/api-key", script)
         self.assertIn("export BLITZLOG_ENV=dev", script)
+
+    def test_api_key_is_fetched_from_the_resolved_param_path(self):
+        """Issue #165: the key path is rendered ONCE (in the header,
+        as OPENCODE_API_KEY_SSM_PARAM) and the secrets block reads it
+        from the environment. The path is always server-derived, so
+        there is no injection surface."""
+        script = _read_secrets_from_ssm_script(42)
+        self.assertIn(
+            'aws ssm get-parameter --name "$OPENCODE_API_KEY_SSM_PARAM"', script
+        )
+        self.assertIn("--with-decryption", script)
+        # The path is NOT interpolated into the fetch command any more.
+        self.assertNotIn("/opencode/api-key", script)
+
+    def test_resolved_param_path_is_used_when_given(self):
+        script = _read_secrets_from_ssm_script(
+            42, api_key_ssm_param="/blitzlog/users/octocat/opencode/api-key"
+        )
+        self.assertIn(
+            'aws ssm get-parameter --name "$OPENCODE_API_KEY_SSM_PARAM"', script
+        )
 
 
 class TestDecodeApiErrorsScript(unittest.TestCase):

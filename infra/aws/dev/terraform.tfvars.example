@@ -43,6 +43,33 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # alert_email               = "dev-team@example.com"             # CloudWatch alarm email
 # opencode_model            = "minimax-coding-plan/MiniMax-M3"   # provider/model ID passed to the dev OpenCode CLI
 # opencode_agent_max_steps  = 500                                # Max opencode iterations per session before forcing summarization. Raise for large multi-file tasks; lower for cost-sensitive runs.
+
+# Issue #165: the three-level model selection.
+#
+#   opencode_api_key_provider  — the provider your key belongs to. A
+#     credential is only ever used with a model whose provider matches
+#     it. Defaults to the provider prefix of opencode_model.
+# opencode_api_key_provider   = "minimax-coding-plan"
+#
+#   opencode_model_profiles — operator-registered aliases, selectable
+#     per task with a `model:<alias>` issue label. The alias is chosen
+#     by whoever labels the issue, so only register aliases you are
+#     happy to expose.
+# opencode_model_profiles = {
+#   fast = {
+#     model = "minimax-coding-plan/MiniMax-M2"
+#   }
+#   internal = {
+#     model    = "anthropic/claude-sonnet-4"
+#     base_url = "https://llm.internal/v1"
+#   }
+# }
+#
+#   opencode_allowed_providers — providers a raw
+#     `model:<provider>/<model>` label may name. Arbitrary endpoints
+#     are never reachable from a label. Empty means raw labels are
+#     rejected and only aliases are selectable.
+# opencode_allowed_providers = ["minimax-coding-plan"]
 # stt_api_url               = "http://127.0.0.1:7878/v1"
 # stt_api_key               = "any-non-empty-string"
 # stt_model                 = "base.en"                          # Whisper model name; model already in the shared bucket if you ran `upload_stt_model = true` against prod or dev

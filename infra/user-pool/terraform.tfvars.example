@@ -56,3 +56,41 @@ telegram_bot_tokens = {
 # local_llm_endpoint_allow_private_cidrs   = true
 # local_llm_fallback                       = "closed"
 # tailscale_auth_key                       = "tskey-auth-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Optional: bring your own inference model + credential (issue #165).
+#
+# Three levels of model selection, resolved per run — the higher
+# supersedes the lower:
+#
+#   1. per task   — a `model:<value>` issue label (see the README)
+#   2. per user   — the values below        <-- you are here
+#   3. per org    — the deployment default (var.opencode_model)
+#
+# The credential resolves on its own axis and supersedes the org's:
+# per-user credential -> org credential. A credential is only ever
+# used with a model whose provider matches it; a mismatch fails the
+# run fast rather than sending your key to the wrong provider.
+#
+# Constraints:
+#   - opencode_model is `provider/model` (e.g. anthropic/claude-sonnet-4).
+#     Leave it empty to run the org's default model.
+#   - opencode_api_key is YOUR credential. Leave it empty to use the
+#     org's credential. The key is stored as a SecureString; the
+#     Lambda never reads it — the EC2 host fetches it from the path.
+#   - opencode_api_key_provider declares which provider your key
+#     belongs to. It defaults to the provider prefix of
+#     opencode_model. Set it EXPLICITLY when opencode_model is empty:
+#     your key then runs the org's default model, which only works
+#     when the two providers match.
+#   - opencode_base_url is for a self-hosted / BYO endpoint. It
+#     requires opencode_api_key — the org credential is never sent
+#     to a custom endpoint. Must resolve to a public IP, or to a
+#     private one with opencode_base_url_allow_private_cidrs = true.
+#     Loopback and link-local (the instance metadata service) are
+#     always rejected.
+#
+# opencode_model                           = "anthropic/claude-sonnet-4"
+# opencode_api_key                         = "sk-ant-xxxxxxxxxxxxxxxx"
+# opencode_api_key_provider                = "anthropic"
+# opencode_base_url                        = "https://llm.internal/v1"
+# opencode_base_url_allow_private_cidrs    = true

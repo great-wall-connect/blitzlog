@@ -69,8 +69,39 @@ variable "local_llm_fallback" {
 }
 
 variable "tailscale_auth_key" {
-  description = "Auth key for per-run EC2 enrollment in the user's Tailscale Tailnet. Generate at https://login.tailscale.com/admin/settings/keys with Ephemeral: enabled and Tags: tag:blitzlog-agent. The same key can be reused across many runs; rotate by re-running terraform apply. Leave empty to skip per-run enrollment (e.g. when using a static subnet router or AWS Client VPN)."
+  description = "Auth key for per-run EC2 enrollment in the user's Tailscale Tailnet. Generate at https://login.tailscale.com/admin/settings/keys with Ephemeral: enabled and Tags: tag:blitzlog-agent. The same key can be reused across many runs; rotate by re-running terraform apply. Leave empty to skip per-run enrollment (e.g. when using a static subnet router, AWS Client VPN)."
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "opencode_model" {
+  description = "This buyer's default OpenCode model, in `provider/model` form (e.g. anthropic/claude-sonnet-4). Empty means 'no per-user model' — the org default (var.opencode_model in the core module) is used instead. Issue #165: this is level 2 of the three-level model selection (task label > per-user default > org default)."
+  type        = string
+  default     = ""
+}
+
+variable "opencode_api_key" {
+  description = "This buyer's own inference-provider credential (BYOK). Empty means 'no per-user credential' — the org credential is used instead. When set, this key supersedes the org credential and is bound to the selected model's provider: a mismatch fails the run fast rather than sending the key to the wrong provider. Stored as a SecureString; the Lambda never receives the key material, only the path the EC2 host reads it from."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "opencode_api_key_provider" {
+  description = "The provider this buyer's credential belongs to (e.g. anthropic). Defaults to the provider prefix of opencode_model when that is set. Set it explicitly when opencode_model is empty — the binding rule needs a declared provider to check the credential against (e.g. a buyer with their own key and no model of their own, running the org default model on their own key)."
+  type        = string
+  default     = ""
+}
+
+variable "opencode_base_url" {
+  description = "Optional base URL of a self-hosted / BYO inference endpoint (e.g. https://llm.internal/v1). Requires opencode_api_key — the org credential is never sent to a custom endpoint. Must resolve to a public IP or, with opencode_base_url_allow_private_cidrs = true, a private one. Loopback and link-local (the instance metadata service) are always rejected."
+  type        = string
+  default     = ""
+}
+
+variable "opencode_base_url_allow_private_cidrs" {
+  description = "Set true when opencode_base_url resolves to a private IP (RFC1918, ULA, or Tailscale CGNAT 100.64.0.0/10) — e.g. a self-hosted endpoint on the user's Tailnet. Public endpoints need no opt-in."
+  type        = bool
+  default     = false
 }

@@ -248,6 +248,16 @@ class TestWatchdogEnvPinning(unittest.TestCase):
             "the container must be told that the AWS SDK may not use IMDS",
         )
 
+    def test_model_selection_vars_reach_the_container(self):
+        """The resolved base URL and the credential path must survive
+        the /etc/blitzlog.env -> docker run -e hop."""
+        for var in ("OPENCODE_BASE_URL", "OPENCODE_API_KEY_SSM_PARAM"):
+            self.assertIn(
+                var,
+                self.unconditional,
+                f"{var} must be passed to the container by the watchdog",
+            )
+
     def test_imds_block_is_fail_closed(self):
         """Issue #175: a boundary that fails silently is
         indistinguishable from one that works.
@@ -301,24 +311,6 @@ class TestWatchdogEnvPinning(unittest.TestCase):
             system_sh,
             r"apt-get install[^\n]*\n(?:[^\n]*\\\n)*[^\n]*\biptables\b",
             "01-system.sh must install iptables explicitly (issue #175)",
-        )
-
-    def test_model_selection_vars_reach_the_container(self):
-        """Skipped on this branch.
-
-        The model-selection vars (OPENCODE_BASE_URL,
-        OPENCODE_API_KEY_SSM_PARAM) belong to issue #165's three-level
-        model selection, which is not on this branch — the assertion
-        would fail for a feature that does not exist here yet. It is
-        kept out rather than skipped so the file stays honest about
-        what it covers.
-        """
-        self.assertNotIn(
-            "OPENCODE_BASE_URL",
-            self.unconditional,
-            "OPENCODE_BASE_URL is issue #165's model-selection wiring; it "
-            "does not belong on this branch. If you are landing #165, "
-            "restore the assertion that it reaches the container.",
         )
 
 
