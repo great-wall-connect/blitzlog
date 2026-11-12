@@ -256,6 +256,41 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
         Effect = "Allow"
         Action = [
           "oss:GetObject",
+          "oss:PutObject",
+          # Issue #125: the watchdog releases the bot-pool lock with
+          # `blitzlog_oss_rm` when the agent container exits
+          # (infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh).
+          # Without oss:DeleteObject the lock would never be released
+          # and the same bot could not be picked up by the next run.
+          # The AWS-side analogue is the s3:DeleteObject grant on
+          # bot-pool-locks/* in infra/aws/modules/core/iam.tf:128.
+          "oss:DeleteObject",
+        ]
+        Resource = [
+          "${local.agent_logs_bucket_arn}/bot-pool-locks/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          # Issue #125: the assisted-mode bootstrap probes for a
+          # previous session's metadata.json with `blitzlog_oss_ls`,
+          # and the watchdog's lock release checks whether the lock
+          # object still exists. The AWS-side analogue is
+          # s3:ListBucket with a bot-pool-locks/* prefix condition.
+          "oss:ListObjects",
+        ]
+        Resource = local.agent_logs_bucket_arn
+        Condition = {
+          StringLike = {
+            "oss:prefix" = "bot-pool-locks/*"
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "oss:GetObject",
         ]
         # user-data/* is the function→ECS handoff for the bootstrap
         # script. The function writes one ephemeral script per ECS

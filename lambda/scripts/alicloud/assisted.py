@@ -230,17 +230,16 @@ OPENCODE_RESUMED="${{OPENCODE_RESUMED:-}}"
 OPENCODE_RESUMED_TITLE="${{OPENCODE_RESUMED_TITLE:-}}"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
 # Issue #145: the Alicloud path has no EventBridge Scheduler
-# equivalent in this PR. GITHUB_TOKEN_SCHED_GROUP is set so the
-# watchdog's refresh branch has the right group name to look up;
-# the actual schedule creation is a no-op until the Aliyun
-# scheduler equivalent lands (Phase 5 follow-up).
-GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
+# equivalent, so there is no token-refresh chain and no schedule
+# group to tear down. The Alicloud watchdog (issue #125) does not
+# read GITHUB_TOKEN_SCHED_GROUP at all — the AWS-side watchdog deletes
+# the group before it terminates the instance, and there is nothing
+# equivalent to delete here.
 ENVEOF
 
 # The unit is already enabled (Packer 02-systemd.sh). Just start it; the
 # watchdog will `docker run` the agent, wait for it to exit, then do all
-# AWS-dependent cleanup + terminate the instance.
-# (Cleanup is still AWS-shaped on the Alicloud path — Phase 5
-# follow-up adds the Alicloud equivalents.)
+# Alicloud-dependent cleanup (OSS upload + bot-lock release) + terminate
+# the ECS instance.
 sudo systemctl start blitzlog-agent.service
 """

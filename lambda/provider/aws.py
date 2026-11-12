@@ -149,6 +149,14 @@ class AwsCompute(ComputeProvider):
     subnet discovery, and the user-data downloader script.
     """
 
+    # Issue #125: the SSM parameter that holds the id of the
+    # Packer-baked agent AMI, published by
+    # infra/aws/packer/agent-docker-ubuntu.pkr.hcl. The Alicloud
+    # analogue is `agent-ami-id-ecs-ubuntu` in KMS Secrets Manager
+    # — the two must differ, because the Alicloud `SecretStore` is
+    # KMS-backed and cannot read an SSM parameter.
+    agent_image_param_suffix = "agent-ami-id-docker-ubuntu"
+
     def __init__(self, s3: ObjectStore | None = None) -> None:
         # `s3` is injected so the user-data upload (which is an
         # object-store operation, not a compute operation) routes

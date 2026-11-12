@@ -165,10 +165,15 @@ resource "alicloud_fcv3_function" "handler" {
     # AlicloudObjectStore. The OSS2 / KMS / ECS SDKs are bundled
     # in the zip from lambda/requirements-alicloud.txt
     # (alibabacloud_*).
-    BLITZLOG_PROVIDER     = "alicloud"
-    VPC_ID                = var.vpc_id
-    VSWITCH_IDS           = join(",", var.vswitch_ids)
-    ECS_SECURITY_GROUP_ID = alicloud_security_group.agent_sg.id
+    BLITZLOG_PROVIDER = "alicloud"
+    # The shared agent VPC + VSwitches (created by the bootstrap stack).
+    VPC_ID      = var.vpc_id
+    VSWITCH_IDS = join(",", var.vswitch_ids)
+    # The on-demand fallback path reads this when every spot candidate
+    # fails; without it the fallback passes an empty `v_switch_id` to
+    # RunInstances.
+    ALIYUN_DEFAULT_VSWITCH_ID = var.vswitch_ids[0]
+    ECS_SECURITY_GROUP_ID     = alicloud_security_group.agent_sg.id
     # Aliyun has no instance-profile concept; the RAM role name is
     # passed directly to RunInstances via the `RamRoleName` parameter.
     RAM_INSTANCE_PROFILE_NAME = alicloud_ram_role.ecs_agent_role.role_name

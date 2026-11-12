@@ -25,10 +25,25 @@ terraform {
     }
   }
 
+  # The OSS backend. The bucket / key / region are supplied via
+  # `-backend-config` (see bootstrap-backend.hcl.example); the
+  # credential comes from the ALICLOUD_ACCESS_KEY /
+  # ALICLOUD_SECRET_KEY env vars, or from the `profile` below, which
+  # reads `~/.aliyun/config.json`.
+  #
+  # The default region here matches the account's bucket region
+  # (cn-hongkong). The backend's region MUST match the bucket's
+  # region — an OSS bucket name is globally unique, but its region
+  # is not, so a mismatch fails with "Authorization header is
+  # invalid" rather than a clear "wrong region" error.
   backend "oss" {
     bucket = ""
     key    = ""
-    region = "cn-hangzhou"
+    region = "cn-hongkong"
+    # The profile name in ~/.aliyun/config.json (written by
+    # `aliyun configure --profile <name>`). Empty by default so the
+    # env-var path is used unless the operator opts in.
+    profile = ""
   }
 }
 
@@ -38,6 +53,22 @@ provider "alicloud" {
 
 resource "alicloud_oss_bucket" "agent_logs" {
   bucket = var.agent_logs_bucket_name
+
+  # The provider requires ignore_changes whenever a standalone
+  # sub-resource manages the same setting, or the bucket resource
+  # reverts the sub-resource's change on every apply.
+  #
+  # `versioning` is ignored although this bucket has no versioning
+  # sub-resource: the attribute is read back from OSS, so enabling
+  # versioning here by any means makes the bucket resource plan to
+  # disable it — and OSS refuses to un-enable versioning.
+  lifecycle {
+    ignore_changes = [
+      acl,
+      server_side_encryption_rule,
+      versioning,
+    ]
+  }
 }
 
 # Bucket ACL was deprecated in provider v1.220.0; it now lives on its
@@ -48,14 +79,9 @@ resource "alicloud_oss_bucket_acl" "agent_logs" {
   acl    = "private"
 }
 
-# Server-side encryption: SSE-KMS via the account's default CMK
-# (`acs:kms:${region}:${account}:key/<default-cmk-id>`). The AWS-side
-# analogue is `aws_s3_bucket_server_side_encryption_configuration`
-# with `sse_algorithm = "AES256"`. On Alicloud the SSE choice is
-# `KMS` (uses a CMK) or `AES256` (server-side AES with Aliyun-managed
-# key). We use AES256 for the shared bootstrap buckets to match the
-# AWS-side default; per-env buckets use KMS via the per-env CMK in
-# infra/alicloud/modules/core/kms.tf.
+# AES256 (Aliyun-managed key) for the shared bootstrap buckets, to
+# match the AWS-side default. Per-env buckets use KMS via the per-env
+# CMK in infra/alicloud/modules/core/kms.tf.
 resource "alicloud_oss_bucket_server_side_encryption" "agent_logs" {
   bucket        = alicloud_oss_bucket.agent_logs.bucket
   sse_algorithm = "AES256"
@@ -64,6 +90,24 @@ resource "alicloud_oss_bucket_server_side_encryption" "agent_logs" {
 resource "alicloud_oss_bucket" "stt_models" {
   bucket        = var.stt_models_bucket_name
   force_destroy = false
+
+  # The provider docs (alicloud_oss_bucket, "Using sub-resources with
+  # ignore_changes"): "you must add a lifecycle block with
+  # ignore_changes for the corresponding attribute on alicloud_oss_bucket
+  # ... Without ignore_changes, Terraform may attempt to revert changes
+  # made by the sub-resource on every apply."
+  #
+  # `versioning` matters most here: OSS cannot return a bucket to the
+  # unversioned state, so a bucket whose versioning was enabled
+  # out-of-band makes the bucket resource plan a change the API
+  # refuses to apply.
+  lifecycle {
+    ignore_changes = [
+      acl,
+      server_side_encryption_rule,
+      versioning,
+    ]
+  }
 }
 
 resource "alicloud_oss_bucket_acl" "stt_models" {
@@ -71,18 +115,14 @@ resource "alicloud_oss_bucket_acl" "stt_models" {
   acl    = "private"
 }
 
-# Versioning + public access block + encryption + lifecycle mirror
-# infra/aws/bootstrap/main.tf:41-86 1-to-1. The lifecycle rule uses
-# 30-day noncurrent version expiration (matches the AWS-side value).
+# Versioning is a one-way door on Alicloud: "Once enabled, versioning
+# cannot return to the Disabled state. It can only be suspended."
 #
-# NOTE: the aliyun/alicloud provider does NOT have a separate
-# `alicloud_oss_bucket_lifecycle_rule` resource — lifecycle is
-# expressed as a JSON `policy` attribute on the bucket itself (or
-# via the OSS console post-apply). The bootstrap defaults to no
-# lifecycle policy so the bucket matches the AWS-side default
-# behaviour; operators can add a lifecycle policy via the OSS
-# console after apply if they want the 30-day noncurrent expiration
-# the AWS-side configures. Documented as a follow-up.
+# The provider has no `alicloud_oss_bucket_lifecycle_rule` resource —
+# lifecycle is a JSON `policy` attribute on the bucket itself, so the
+# bootstrap leaves it unset to match the AWS-side default. Operators
+# wanting the 30-day noncurrent expiration the AWS side configures add
+# it via the OSS console.
 resource "alicloud_oss_bucket_versioning" "stt_models" {
   bucket = alicloud_oss_bucket.stt_models.bucket
   status = "Enabled"

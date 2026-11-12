@@ -5,11 +5,17 @@ user-data prologue that uses the S3 + SSM APIs from a Packer-baked
 Ubuntu AMI. The Alicloud side mirrors those three helpers with:
 
   - `script_header(...)` — same shape, with `OSS_LOGS_BUCKET`
-    instead of `S3_LOGS_BUCKET`, an inline `blitzlog_oss_*` bash
-    library (parallel to the AWS-side `blitzlog_s3_*`), and a
-    `source <(echo ...)` instead of `source /usr/local/bin/...`
-    because the Packer image is still AWS-only and the OSS library
-    doesn't live anywhere on the host.
+    instead of `S3_LOGS_BUCKET`, and the host-side `blitzlog_oss_*`
+    bash library (parallel to the AWS-side `blitzlog_s3_*`).
+
+Issue #125: the Alicloud AMI
+(`infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl`) now bakes the OSS
+library at `/usr/local/bin/blitzlog_oss_uploader.sh`, exactly as the
+AWS AMI bakes `blitzlog_uploader.sh` (issue #123). `script_header`
+sources the baked copy when it is present and falls back to an inline
+copy of the same library otherwise — the fallback is what lets a run
+finish against a host that is still on the pre-#125 public Ubuntu
+image.
 
   - `_read_secrets_from_kms_script(...)` — IMDSv2-equivalent (Aliyun
     metadata server at 100.100.100.200) + `aliyun kms GetSecretValue`
@@ -174,11 +180,17 @@ blitzlog_oss_rm() {
 # needed to call `kms:GetSecretValue` for the secret-fetch block.
 # `aliyun` picks up credentials from the ECS instance's RAM role
 # via the metadata server (same one used for ossutil auth).
+#
+# Issue #125: the Alicloud AMI bakes the `aliyun` CLI
+# (infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh), so on a
+# baked host the `command -v` guard below short-circuits and this
+# block costs nothing. The install stays as a fallback for hosts
+# still on the pre-#125 public Ubuntu image.
 _ALIYUN_CLI_INSTALL = r"""
-# Install the aliyun CLI for KMS secret fetch. The host image is
-# still AWS-only (issue #126 Phase 5 brings a per-cloud Packer
-# image); the OSS + KMS CLIs are installed by the user-data on
-# first launch. The Aliyun ECS instance RAM role grants
+# Install the aliyun CLI for KMS secret fetch. The Alicloud AMI
+# (issue #125) ships this CLI, so the guard normally short-circuits;
+# the install is the fallback for hosts still on the pre-#125 public
+# Ubuntu image. The Aliyun ECS instance RAM role grants
 # kms:GetSecretValue on /blitzlog/<env>/<service>/<name> paths
 # (see infra/alicloud/modules/core/ram.tf).
 if ! command -v aliyun >/dev/null 2>&1; then
@@ -198,12 +210,16 @@ fi
 # the aliyun CLI install above. Aliyun's `ossutil64` is the OSS
 # analogue of `aws s3`; the `--endpoint` flag picks the right
 # regional gateway.
+#
+# Issue #125: baked into the Alicloud AMI like the `aliyun` CLI, so
+# the guard short-circuits on a baked host.
 _OSSUTIL_INSTALL = r"""
 # Install ossutil for OSS operations (download whisper model,
 # upload logs, restore session state, ...). The AWS-side
-# `blitzlog_s3_*` is Packer-baked into the Ubuntu AMI; on the
-# Alicloud path the equivalent `blitzlog_oss_*` helpers wrap
-# ossutil, which is installed here on first launch.
+# `blitzlog_s3_*` is Packer-baked into the Ubuntu AMI; the Alicloud
+# AMI (issue #125) bakes the equivalent `blitzlog_oss_*` helpers and
+# ossutil itself, so this install is the fallback for hosts still on
+# the pre-#125 public Ubuntu image.
 if ! command -v ossutil >/dev/null 2>&1; then
     log "Installing ossutil for OSS operations..."
     cd /tmp
@@ -323,21 +339,33 @@ log() {{
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }}
 
-# Issue #126: the AWS-side bootstrap sources a Packer-baked bash
-# library at /usr/local/bin/blitzlog_uploader.sh. On the Alicloud
-# path the Packer image is still AWS-only, so the equivalent
-# `blitzlog_oss_*` library is inlined below. Sourced AFTER `log()`
-# is defined so library ERROR output uses the same channel.
+# Issue #125: the Alicloud AMI (infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl)
+# bakes the host-side OSS abstraction at /usr/local/bin/blitzlog_oss_uploader.sh,
+# exactly as the AWS AMI bakes blitzlog_uploader.sh (issue #123). Source it
+# when it is present — that is the canonical copy.
+#
+# The inline fallback below is kept for hosts still running the PUBLIC
+# Ubuntu image (the pre-#125 Alicloud path, which had no baked agent
+# image at all). It is the same library, byte-for-byte the same four
+# verbs; the fallback is what lets an in-flight run finish against an
+# old image while the baked image rolls out.
+#
+# Sourced AFTER `log()` is defined so library ERROR output uses the
+# same channel.
 {_ALIYUN_CLI_INSTALL}{_OSSUTIL_INSTALL}
-export BLITZLOG_OSS_HELPERS=$(cat <<'OSS_LIB_EOF'
+if [ -r /usr/local/bin/blitzlog_oss_uploader.sh ]; then
+    source /usr/local/bin/blitzlog_oss_uploader.sh
+else
+    export BLITZLOG_OSS_HELPERS=$(cat <<'OSS_LIB_EOF'
 {_BLITZLOG_OSS_HELPERS}
 OSS_LIB_EOF
 )
-unset BLITZLOG_OSS_HELPERS_NAME
-BLITZLOG_OSS_HELPERS_NAME="blitzlog_oss"
-# Source the inlined library. The heredoc + read-into-var pattern
-# survives the f-string escaping in script_header.
-eval "$BLITZLOG_OSS_HELPERS"
+    unset BLITZLOG_OSS_HELPERS_NAME
+    BLITZLOG_OSS_HELPERS_NAME="blitzlog_oss"
+    # Source the inlined library. The heredoc + read-into-var pattern
+    # survives the f-string escaping in script_header.
+    eval "$BLITZLOG_OSS_HELPERS"
+fi
 
 ISSUE_NUMBER={issue_number}
 REPO="{repo}"

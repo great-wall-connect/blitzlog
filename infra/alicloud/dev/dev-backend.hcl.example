@@ -1,14 +1,36 @@
 # Alicloud OSS backend config for the dev env.
 #
 # Mirror of infra/aws/dev/prod-backend.hcl.example. The OSS bucket
-# must be created manually (or via the bootstrap stack at
-# infra/alicloud/bootstrap/) before `terraform init` — backend
-# init does NOT create the bucket.
+# must exist before `terraform init` — backend init does NOT create
+# the bucket.
 #
 # Usage:
-#   terraform init -input=false \
-#     -backend-config=infra/alicloud/dev/dev-backend.hcl
+#   cp dev-backend.hcl.example dev-backend.hcl
+#   terraform init -input=false -backend-config=dev-backend.hcl
+#
+# The bucket + region below are the REAL ones for the blitzlog
+# Alicloud account (the same bucket the bootstrap stack's
+# bootstrap-backend.hcl.example uses, so every Alicloud stack shares one
+# state bucket, keyed per-env).
+#
+# CREDENTIALS. The `oss` backend needs an Alicloud credential. It
+# resolves them in this order:
+#   1. `-backend-config="access_key=..." -backend-config="secret_key=..."`
+#   2. the ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY env vars (or
+#      the ALIBABA_CLOUD_* equivalents)
+#   3. the `profile` + `shared_credentials_file` settings below,
+#      which read `~/.aliyun/config.json`
+#
+# Option 3 is the local-dev path. `aliyun configure --profile
+# <name>` writes `~/.aliyun/config.json`; the profile name must
+# match the `profile` key below.
+#
+# NOTE: the region MUST match the bucket's region. The state bucket
+# lives in cn-hongkong — an OSS bucket name is globally unique, but
+# its region is not, so pointing the backend at another region
+# fails with "Authorization header is invalid" or a 404.
 
-bucket = "blitzlog-dev-tfstate"
+bucket = "gwc-infra-tf-state"
 key    = "dev/blitzlog.tfstate"
-region = "cn-hangzhou"
+region = "cn-hongkong"
+profile = "default"

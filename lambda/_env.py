@@ -92,6 +92,36 @@ def _ssm_root() -> str:
     return f"/blitzlog/{_blitzlog_env()}"
 
 
+def _logs_bucket() -> str:
+    """The name of the bucket that holds the agent's run logs, the
+    session archives, the bot-pool locks, and the user-data handoff
+    scripts.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `S3_LOGS_BUCKET`  (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `OSS_LOGS_BUCKET` (infra/alicloud/modules/core/function_compute.tf)
+
+    Both names are accepted here, provider-preference first, so a
+    misconfigured deploy cannot silently fall through to the
+    placeholder. The fallback literal is the same one the pre-#125
+    call sites used.
+
+    Why this matters (issue #125): the bot-pool lock is written to
+    and released from this bucket, and the user-data script is
+    uploaded to it. Reading only `S3_LOGS_BUCKET` on the Alicloud
+    path resolved to the placeholder `<your-agent-logs-bucket>`, so
+    the lock was written to a bucket that does not exist and the
+    user-data downloader fetched from it. The Alicloud instance
+    would then boot without a bootstrap script.
+    """
+    for var in ("OSS_LOGS_BUCKET", "S3_LOGS_BUCKET"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return "<your-agent-logs-bucket>"
+
+
 # Environment name passed in by Terraform as a Lambda env var
 # (infra/aws/modules/core/lambda.tf). Used to namespace all per-env SSM
 # parameters under /blitzlog/<env>/... so prod and dev can coexist in

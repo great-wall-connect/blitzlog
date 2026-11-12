@@ -25,12 +25,11 @@ behaviour so the test suite and the consumer in
 
 import ipaddress
 import json
-import os
 import socket
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from _env import BOT_POOL_SSM_PATH, logger
+from _env import BOT_POOL_SSM_PATH, _logs_bucket, logger
 from botocore.exceptions import ClientError
 from llm_guard import (
     _ip_always_blocked,
@@ -231,7 +230,7 @@ def _get_lock(sender_login: str, bot_name: str, bucket: str) -> dict | None:
 def acquire_bot_token(
     sender_login: str, instance_id: str, repo: str, issue_number: int
 ) -> tuple[str, str] | None:
-    bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
+    bucket = _logs_bucket()
     pool = list_bot_pool(sender_login)
     if not pool:
         logger.error("No bot pool configured for user %s", sender_login)
@@ -283,7 +282,7 @@ def acquire_bot_token(
 def _update_lock_instance_id(
     sender_login: str, bot_name: str, instance_id: str, repo: str, issue_number: int
 ) -> None:
-    bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
+    bucket = _logs_bucket()
     lock_payload = json.dumps(
         {
             "instance_id": instance_id,

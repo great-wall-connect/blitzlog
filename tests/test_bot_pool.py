@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import provider
+from _env import _logs_bucket
 from bot_pool import (
     acquire_bot_token,
     get_local_llm_config,
@@ -38,6 +39,62 @@ def _boto3_dispatch(ssm=None, s3=None):
         return table[service]
 
     return _dispatch
+
+
+class TestLogsBucketResolution(unittest.TestCase):
+    """Issue #125: the logs bucket is named by a PROVIDER-SPECIFIC env
+    var — `S3_LOGS_BUCKET` on AWS, `OSS_LOGS_BUCKET` on Alicloud.
+
+    The bot-pool lock is written to and released from this bucket, and
+    the user-data script is uploaded to it. Before this, the call sites
+    read only `S3_LOGS_BUCKET`, so on the Alicloud path they resolved
+    to the placeholder `<your-agent-logs-bucket>`: the lock went to a
+    bucket that does not exist, and the user-data downloader fetched
+    from it — so the ECS instance booted without a bootstrap script.
+    """
+
+    def setUp(self):
+        self._saved = {
+            k: os.environ.get(k) for k in ("S3_LOGS_BUCKET", "OSS_LOGS_BUCKET")
+        }
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_prefers_the_oss_name_on_the_alicloud_path(self):
+        os.environ.pop("S3_LOGS_BUCKET", None)
+        os.environ["OSS_LOGS_BUCKET"] = "my-oss-logs"
+        self.assertEqual(_logs_bucket(), "my-oss-logs")
+
+    def test_falls_back_to_the_s3_name_on_the_aws_path(self):
+        os.environ.pop("OSS_LOGS_BUCKET", None)
+        os.environ["S3_LOGS_BUCKET"] = "my-s3-logs"
+        self.assertEqual(_logs_bucket(), "my-s3-logs")
+
+    def test_oss_name_wins_when_both_are_set(self):
+        """A half-applied Terraform that leaves both vars behind must
+        not silently pick the wrong bucket."""
+        os.environ["OSS_LOGS_BUCKET"] = "my-oss-logs"
+        os.environ["S3_LOGS_BUCKET"] = "my-s3-logs"
+        self.assertEqual(_logs_bucket(), "my-oss-logs")
+
+    def test_ignores_an_empty_value(self):
+        os.environ["OSS_LOGS_BUCKET"] = "  "
+        os.environ["S3_LOGS_BUCKET"] = "my-s3-logs"
+        self.assertEqual(
+            _logs_bucket(),
+            "my-s3-logs",
+            "a whitespace-only value must not shadow a real one",
+        )
+
+    def test_placeholder_when_neither_is_set(self):
+        os.environ.pop("OSS_LOGS_BUCKET", None)
+        os.environ.pop("S3_LOGS_BUCKET", None)
+        self.assertEqual(_logs_bucket(), "<your-agent-logs-bucket>")
 
 
 class TestAcquireBotToken(unittest.TestCase):

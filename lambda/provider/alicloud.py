@@ -401,6 +401,35 @@ class AlicloudCompute(ComputeProvider):
     lookup, and the user-data downloader script.
     """
 
+    # Issue #125: the Alicloud Packer pipeline
+    # (infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl) publishes the
+    # baked image id to KMS Secrets Manager — the Alicloud
+    # `SecretStore` implementation — under this suffix. The AWS
+    # analogue is `agent-ami-id-docker-ubuntu` in SSM Parameter
+    # Store. The two must differ: the AWS suffix would point at an
+    # SSM parameter that the KMS-backed store cannot read.
+    agent_image_param_suffix = "agent-ami-id-ecs-ubuntu"
+
+    # "The parameter does not exist". KMS encodes this as
+    # `Forbidden.ResourceNotExists` (see `_is_not_found` below); the
+    # AWS-side code is `ParameterNotFound` / `404`.
+    secret_not_found_codes = (
+        "Forbidden.ResourceNotExists",
+        "ResourceNotExists",
+        "ParameterNotFound",
+        "404",
+    )
+
+    # "The image id is not launchable". ECS reports a retired /
+    # deregistered image as `InvalidImageId.NotFound`; the AWS-side
+    # codes are `InvalidAMIID.NotFound` / `InvalidAMIID.Unavailable`.
+    image_not_found_codes = (
+        "InvalidImageId.NotFound",
+        "InvalidImageId.Unavailable",
+        "InvalidAMIID.NotFound",
+        "InvalidAMIID.Unavailable",
+    )
+
     def __init__(self, oss: ObjectStore | None = None) -> None:
         """`oss` is injected so callers that need an OSS
         reference (the user-data upload, which is an

@@ -714,9 +714,12 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
                     break
             i += 1
         block = fc[start : i + 1]
-        self.assertIn(
-            'BLITZLOG_PROVIDER     = "alicloud"',
+        # Whitespace-insensitive: `terraform fmt` realigns the `=`
+        # in the block, so pinning the exact padding would break on
+        # a reformat that changes nothing semantic.
+        self.assertRegex(
             block,
+            r'BLITZLOG_PROVIDER\s*=\s*"alicloud"',
             f'environment_variables must set BLITZLOG_PROVIDER = "alicloud"; got:\n{block}',
         )
 
@@ -790,15 +793,18 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "deploy job working-directory must use the provider prefix",
         )
 
-    def test_release_workflow_refuses_alicloud_deploy(self):
-        """No workflow may apply Alicloud resources — deliberately, not by omission.
+    def test_release_workflow_gates_alicloud_deploy(self):
+        """No workflow may apply Alicloud resources by accident.
 
-        The Alicloud tree ships and validates in CI so the aws/alicloud
-        segmentation is visible to contributors, but nothing may reach a
-        real Alicloud account until the per-cloud structure is on main. The
-        deploy job's `Validate provider` step is a hard stop: an operator who
-        sets `vars.BLITZLOG_PROVIDER=alicloud` gets a loud, actionable message
-        rather than a partial apply.
+        Issue #125: the Alicloud deploy is now IMPLEMENTED (deploy
+        role, OSS backend wiring, KMS-backed TF_VAR render), so the
+        deploy job's `Validate provider` step no longer refuses it
+        outright — it refuses it unless the operator has explicitly
+        opted in via the ENABLE_ALICLOUD_DEPLOY repo variable.
+
+        The opt-in matters because the Alicloud path reaches a REAL
+        account: a stray `vars.BLITZLOG_PROVIDER=alicloud` must not
+        apply to it by accident.
 
         `terraform-apply-dev.yml` needs no such guard because it is
         hardcoded to `infra/aws/dev` — it cannot reach an Alicloud stack at all.
@@ -807,7 +813,7 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         deploy_idx = text.find("deploy:\n")
         body = text[deploy_idx:]
         self.assertIn(
-            "FATAL: Alicloud deploy is disabled by design.",
+            "FATAL: the Alicloud deploy is gated off.",
             body,
             "the deploy job must refuse BLITZLOG_PROVIDER=alicloud with an "
             "actionable message",
@@ -818,6 +824,13 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             text,
             "BLITZLOG_PROVIDER must default to 'aws' so the common path "
             "never touches the guard",
+        )
+        # And the Alicloud path must be opt-in, not opt-out.
+        self.assertIn(
+            "ENABLE_ALICLOUD_DEPLOY",
+            body,
+            "the Alicloud deploy must be gated on the ENABLE_ALICLOUD_DEPLOY "
+            "repo variable — it reaches a real account",
         )
 
     def test_aws_plan_uses_ssm_env_not_a_tfvars_file(self):
@@ -877,10 +890,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
     def test_release_workflow_picks_oss_backend_for_alicloud(self):
         """The `terraform init` step must switch backends based on
         `BLITZLOG_PROVIDER`. AWS uses S3 + ap-east-1; Alicloud uses
-        OSS + cn-hangzhou.
+        OSS + the Alicloud region.
 
         Without the switch, the Alicloud apply would try to
         initialise an S3 backend (wrong cloud).
+
+        Issue #125: the Alicloud region is now a VARIABLE, defaulting
+        to cn-hongkong — the region the real state bucket lives in.
+        The previous literal (`cn-hangzhou`) named a region that is
+        not the bucket's, which fails with "Authorization header is
+        invalid" rather than a clear "no such bucket": an OSS bucket
+        name is globally unique but its REGION is not.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
@@ -891,9 +911,15 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "terraform init step must reference TF_BACKEND_BUCKET_OSS for the Alicloud path",
         )
         self.assertIn(
-            "region=cn-hangzhou",
+            '-backend-config="region=${ALICLOUD_REGION}"',
             body,
-            "terraform init step must use cn-hangzhou as the OSS backend region",
+            "terraform init step must pass the Alicloud region as a variable",
+        )
+        self.assertIn(
+            "vars.ALICLOUD_REGION || 'cn-hongkong'",
+            body,
+            "the Alicloud region default must be cn-hongkong — the region "
+            "the state bucket actually lives in",
         )
 
     # ------------------------------------------------------------------
@@ -1236,6 +1262,89 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "oss:GetObject",
             ram,
             "ram.tf must grant oss:GetObject for the FC code download",
+        )
+
+    def test_ecs_agent_policy_grants_put_object_for_its_own_env_prefix(self):
+        """Issue #125: the ECS agent role must allow `oss:PutObject`
+        on `${var.environment}/*`.
+
+        This is the RAM half of the log-upload contract: the upload
+        code (lambda/scripts/alicloud/{autonomous,assisted}.py)
+        prefixes keys with `$BLITZLOG_ENV/`, and this grant must match
+        that prefix. If a future refactor narrows the resource
+        pattern to e.g. a hard-coded `prod/*` literal, the upload
+        silently fails (swallowed by `|| true`).
+
+        The AWS-side analogue is the
+        `s3:PutObject` grant on
+        `${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*`
+        asserted by `TestEnvNamespacing`.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:PutObject",
+            ram,
+            "ecs_agent_policy must include oss:PutObject — without it, the "
+            "watchdog's `blitzlog_oss_put ... /var/log/backend-bootstrap.log "
+            "...` upload fails with AccessDenied and is silently swallowed "
+            "by `|| true`.",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/${var.environment}/*",
+            ram,
+            "ecs_agent_policy must grant on "
+            "${local.agent_logs_bucket_arn}/${var.environment}/* — the "
+            "log-upload code prefixes keys with $BLITZLOG_ENV/, so this is "
+            "the path the runtime actually uses.",
+        )
+
+    def test_ecs_agent_policy_grants_delete_object_for_bot_pool_locks(self):
+        """Issue #125: the watchdog releases the bot-pool lock with
+        `blitzlog_oss_rm` when the agent container exits.
+
+        Without `oss:DeleteObject` the lock is never released and the
+        same bot can never be picked up by the next run — a deadlock
+        that is invisible until the pool is exhausted.
+
+        The AWS-side analogue is the `s3:DeleteObject` grant on
+        `bot-pool-locks/*` in infra/aws/modules/core/iam.tf.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:DeleteObject",
+            ram,
+            "ecs_agent_policy must include oss:DeleteObject — the watchdog "
+            "releases the bot-pool lock with `blitzlog_oss_rm` and the "
+            "upload would fail with AccessDenied (swallowed by `|| true`).",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/bot-pool-locks/*",
+            ram,
+            "the delete grant must be scoped to bot-pool-locks/* — the "
+            "AWS-side analogue grants s3:DeleteObject on exactly that path.",
+        )
+
+    def test_ecs_agent_policy_grants_list_objects_for_lock_probe(self):
+        """Issue #125: the assisted-mode bootstrap probes for a
+        previous session's metadata.json with `blitzlog_oss_ls`, and
+        the watchdog's lock release checks whether the lock object
+        still exists.
+
+        The AWS-side analogue is the `s3:ListBucket` grant with a
+        `bot-pool-locks/*` prefix condition.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:ListObjects",
+            ram,
+            "ecs_agent_policy must include oss:ListObjects — the "
+            "assisted-mode session-restore probe uses `blitzlog_oss_ls`.",
+        )
+        self.assertIn(
+            '"oss:prefix" = "bot-pool-locks/*"',
+            ram,
+            "the list grant must be scoped to the bot-pool-locks/* prefix, "
+            "matching the AWS-side s3:ListBucket condition.",
         )
 
     def test_terraform_pinned_to_1_16_6(self):

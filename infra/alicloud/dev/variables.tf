@@ -1,19 +1,22 @@
 variable "alicloud_region" {
-  description = "Alicloud region for all resources"
+  description = "Alicloud region for all resources. Defaults to cn-hongkong — the region the blitzlog Alicloud account's OSS buckets live in (the state bucket `gwc-infra-tf-state` and the shared agent-logs / STT-models buckets). AWS analogue: aws_region."
   type        = string
-  default     = "cn-hangzhou"
+  default     = "cn-hongkong"
 }
 
 variable "vpc_id" {
-  description = "VPC ID for ECS instances and security group. Reuse the prod VPC or pick a separate one — same VPC is fine for dev since security groups are env-scoped."
+  description = "ID of the shared agent VPC. REQUIRED — Alicloud has no default VPC per region. Copy it from the bootstrap stack's output: 'cd infra/alicloud/bootstrap && terraform output vpc_id'. dev and prod share this VPC; their security groups keep them separate."
   type        = string
-  default     = ""
 }
 
 variable "vswitch_ids" {
-  description = "VSwitch IDs for ECS spot instances. One per AZ. Empty list = VSwitches will be created."
+  description = "IDs of the agent VSwitches. REQUIRED — an ECS launch requires a VSwitch. Copy them from the bootstrap stack's output: 'terraform output vswitch_ids'. One per AZ; the spot launcher picks one by AZ."
   type        = list(string)
-  default     = []
+
+  validation {
+    condition     = length(var.vswitch_ids) > 0
+    error_message = "vswitch_ids must contain at least one VSwitch id — an ECS launch requires a VSwitch. Copy the list from the bootstrap stack: 'terraform output vswitch_ids'."
+  }
 }
 
 variable "ssh_allowed_cidrs" {
