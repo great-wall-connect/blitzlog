@@ -733,5 +733,182 @@ class TestAlicloudNetworkIsOwnedByTheBootstrap(unittest.TestCase):
         )
 
 
+def _strip_hcl_comments(text):
+    """Return `text` with the `#` comments removed.
+
+    The bucket blocks CITE the resource names they do NOT use (e.g. the
+    provider-docs quote lists alicloud_oss_bucket_versioning), so a
+    naive substring check would match a comment. This strips comments
+    so the checks are about the CONFIG, not about the prose.
+    """
+    lines = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        out = []
+        quote = None
+        for ch in line:
+            if quote:
+                out.append(ch)
+                if ch == quote:
+                    quote = None
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                out.append(ch)
+                continue
+            if ch == "#":
+                break
+            out.append(ch)
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+class TestAlicloudBucketOneWayAttributesAreIgnored(unittest.TestCase):
+    """OSS bucket settings that cannot be undone must be ignored by
+    the bucket resource.
+
+    The provider docs (alicloud_oss_bucket, "Using sub-resources with
+    ignore_changes"):
+
+      "When using standalone sub-resources (e.g.
+       alicloud_oss_bucket_acl, alicloud_oss_bucket_server_side_encryption,
+       alicloud_oss_bucket_versioning, ...) alongside
+       alicloud_oss_bucket, you must add a lifecycle block with
+       ignore_changes for the corresponding attribute on
+       alicloud_oss_bucket. This prevents Terraform from detecting
+       spurious diffs caused by the same configuration being managed by
+       both the bucket resource and the standalone sub-resource.
+       Without ignore_changes, Terraform may attempt to revert changes
+       made by the sub-resource on every apply."
+
+    Why this matters on Alicloud specifically — two of the settings are
+    ONE-WAY DOORS:
+
+      * versioning: "Once enabled, versioning cannot return to the
+        Disabled state. It can only be suspended."
+      * encryption: the SSE algorithm is fixed at bucket creation.
+
+    So the bucket resource reading back `versioning = "Enabled"`
+    against a config with no versioning block makes Terraform plan to
+    set it to Disabled — a change the API refuses to apply. That is a
+    perpetual diff, and the only way out is a `terraform taint`, which
+    destroys the bucket (and, on Alicloud, burns the bucket NAME for
+    4-8 hours).
+
+    The fix is verified against the live account: a bucket whose
+    versioning was enabled out-of-band still plans "No changes".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main_tf = _read(os.path.join(ALICLOUD_BOOTSTRAP, "main.tf"))
+        cls.main_tf_code = _strip_hcl_comments(cls.main_tf)
+
+    def _bucket_block(self, name):
+        """Return the body of `resource "alicloud_oss_bucket" "<name>"`."""
+        marker = f'resource "alicloud_oss_bucket" "{name}" {{'
+        start = self.main_tf_code.find(marker)
+        self.assertNotEqual(start, -1, f"the bucket {name} must exist")
+        i = self.main_tf_code.index("{", start)
+        depth = 0
+        for j in range(i, len(self.main_tf_code)):
+            if self.main_tf_code[j] == "{":
+                depth += 1
+            elif self.main_tf_code[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.main_tf_code[i + 1 : j]
+        return ""
+
+    def _ignored_attributes(self, bucket_name):
+        """Return the set of attributes in the bucket's
+        `lifecycle.ignore_changes` list."""
+        block = self._bucket_block(bucket_name)
+        match = re.search(r"ignore_changes\s*=\s*\[(.*?)\]", block, flags=re.DOTALL)
+        self.assertIsNotNone(
+            match,
+            f"the {bucket_name} bucket must have a lifecycle.ignore_changes "
+            "block — the provider docs require it when a standalone "
+            "sub-resource manages the same setting",
+        )
+        return {m.strip() for m in match.group(1).split(",") if m.strip()}
+
+    def test_both_buckets_ignore_the_one_way_attributes(self):
+        for bucket in ("agent_logs", "stt_models"):
+            ignored = self._ignored_attributes(bucket)
+            for attr in ("acl", "server_side_encryption_rule", "versioning"):
+                self.assertIn(
+                    attr,
+                    ignored,
+                    f"the {bucket} bucket must ignore `{attr}` — it is "
+                    "managed by a standalone sub-resource, and OSS does "
+                    "not let Terraform revert it",
+                )
+
+    def test_versioning_is_ignored_even_without_a_sub_resource(self):
+        """`agent_logs` has NO versioning sub-resource — versioning is
+        enabled on the STT-models bucket only.
+
+        The bucket resource still READS the versioning attribute back
+        from OSS. So if versioning is ever enabled on this bucket (an
+        operator, a console click, a future sub-resource), the bucket
+        resource plans to set it back to Disabled — which OSS refuses.
+
+        The diff is identical whether or not a sub-resource exists, so
+        the ignore must be unconditional.
+        """
+        main = self.main_tf_code
+        # The agent_logs bucket must not have a versioning sub-resource.
+        acl_pos = main.find('resource "alicloud_oss_bucket_acl" "agent_logs"')
+        agent_bucket_block = self._bucket_block("agent_logs")
+        self.assertNotIn(
+            "alicloud_oss_bucket_versioning",
+            agent_bucket_block,
+            "the agent_logs bucket must not have a versioning sub-resource",
+        )
+        self.assertNotEqual(acl_pos, -1)
+
+        self.assertIn(
+            "versioning",
+            self._ignored_attributes("agent_logs"),
+            "agent_logs must ignore `versioning` even though it has no "
+            "versioning sub-resource — the attribute is read back from "
+            "OSS, and OSS refuses to un-enable it",
+        )
+
+    def test_ignore_lists_are_not_over_broad(self):
+        """The docs say: "You only need to include the attributes in
+        ignore_changes that correspond to the sub-resources you are
+        actually using." An over-broad list would silently stop
+        Terraform managing a setting it SHOULD manage."""
+        # These attributes have no sub-resource in this stack, so they
+        # must not be ignored — Terraform should keep reconciling them.
+        for attr in ("policy", "logging", "website", "cors_rule"):
+            for bucket in ("agent_logs", "stt_models"):
+                self.assertNotIn(
+                    attr,
+                    self._ignored_attributes(bucket),
+                    f"the {bucket} bucket must not ignore `{attr}` — there "
+                    "is no sub-resource for it, so Terraform should keep "
+                    "reconciling it",
+                )
+
+    def test_public_access_block_is_not_ignored(self):
+        """`alicloud_oss_bucket_public_access_block` has NO inline
+        equivalent on the bucket resource — there is no attribute to
+        ignore, and the setting is freely togglable, so it converges
+        normally."""
+        for bucket in ("agent_logs", "stt_models"):
+            self.assertNotIn(
+                "public_access_block",
+                self._ignored_attributes(bucket),
+                "there is no `public_access_block` attribute on "
+                "alicloud_oss_bucket — ignoring a non-existent attribute "
+                "would be a config error",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
