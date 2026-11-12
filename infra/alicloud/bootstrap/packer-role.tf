@@ -32,8 +32,12 @@
 # shared by this file and the bucket ARNs there.
 
 locals {
+  # The GitHub repo, as "owner/repo". The OIDC provider is registered
+  # under that path, and the `sub` claim matches on it — so it must
+  # NOT be prefixed with the org again, or the trust policy ends up
+  # matching "great-wall-connect/great-wall-connect/blitzlog" and no
+  # workflow can ever assume the role.
   github_repo = "great-wall-connect/blitzlog"
-  github_org  = "great-wall-connect"
 
   # Alicloud OSS bucket ARN format:
   #   acs:oss:<region>:<account-id>:<bucket-name>
@@ -54,7 +58,7 @@ resource "alicloud_ram_role" "packer_build" {
       {
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_org}/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
         }
         Action = "sts:AssumeRole"
         Condition = {
@@ -62,7 +66,7 @@ resource "alicloud_ram_role" "packer_build" {
             "oidc:token.actions.githubusercontent.com:aud" = "sts.aliyuncs.com"
           }
           StringLike = {
-            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_org}*/${local.github_repo}*:ref:refs/heads/*"
+            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}*:ref:refs/heads/*"
           }
         }
       },

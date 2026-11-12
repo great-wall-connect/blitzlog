@@ -21,9 +21,8 @@
 # mirrored here: the deploy runs on the GitHub Actions runner, not on
 # an ECS instance, so it does not need to be assumable by ECS.
 #
-# `local.github_org` / `local.github_repo` live in packer-role.tf —
-# Terraform allows ONE `locals` block per module, so the two roles
-# share the single one.
+# `local.github_repo` lives in packer-role.tf — Terraform allows ONE
+# `locals` block per module, so the two roles share the single one.
 
 resource "alicloud_ram_role" "deploy" {
   role_name   = "blitzlog-deploy-role"
@@ -39,7 +38,7 @@ resource "alicloud_ram_role" "deploy" {
         # OIDC provider's client id (sts.aliyuncs.com).
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_org}/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
         }
         Action = "sts:AssumeRole"
         Condition = {
@@ -47,7 +46,7 @@ resource "alicloud_ram_role" "deploy" {
             "oidc:token.actions.githubusercontent.com:aud" = "sts.aliyuncs.com"
           }
           StringLike = {
-            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_org}*/${local.github_repo}*:ref:refs/heads/*"
+            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}*:ref:refs/heads/*"
           }
         }
       },

@@ -344,6 +344,84 @@ class TestAlicloudOidcWiring(unittest.TestCase):
         self.assertIn("blitzlog-deploy-role", text)
 
 
+class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
+    """The RAM role trust policies must match the real GitHub OIDC
+    `sub` claim.
+
+    The claim for this repo is:
+        repo:great-wall-connect/blitzlog:ref:refs/heads/main
+
+    `local.github_repo` is already "owner/repo", so prefixing it with
+    the org again produced:
+        repo:great-wall-connect*/great-wall-connect/blitzlog*:ref:refs/heads/*
+
+    which matches NOTHING — so no workflow could ever assume the role.
+    The failure is silent: the assume-role step in CI fails with an
+    opaque error, and nothing in the plan looks wrong.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.packer = _read(os.path.join(ALICLOUD_BOOTSTRAP, "packer-role.tf"))
+        cls.deploy = _read(os.path.join(ALICLOUD_BOOTSTRAP, "deploy-role.tf"))
+        cls.workflow = _read(RELEASE_YML)
+
+    def test_no_role_prefixes_the_org_twice(self):
+        for name, text in (("packer", self.packer), ("deploy", self.deploy)):
+            self.assertNotIn(
+                "${local.github_org}",
+                text,
+                f"the {name} role must not reference local.github_org — "
+                "local.github_repo is already 'owner/repo', so prefixing "
+                "the org again produces a subject that matches nothing",
+            )
+            self.assertNotIn(
+                "github_org",
+                text,
+                f"the {name} role must not define or use a github_org "
+                "local — it is what caused the doubled subject",
+            )
+
+    def test_the_subject_matches_the_real_claim(self):
+        for name, text in (("packer", self.packer), ("deploy", self.deploy)):
+            self.assertIn(
+                '"oidc:token.actions.githubusercontent.com:sub" = '
+                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+                text,
+                f"the {name} role's sub condition must be "
+                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+            )
+
+    def test_the_oidc_provider_arn_matches_the_workflow(self):
+        """The role's Federated principal and the workflow's
+        `oidc-provider-arn` must name the SAME provider — the Alicloud
+        OIDC provider for a GitHub repo is registered under
+        `<org>/<repo>`."""
+        for name, text in (("packer", self.packer), ("deploy", self.deploy)):
+            self.assertIn(
+                "oidc-provider/${local.github_repo}",
+                text,
+                f"the {name} role's Federated principal must be "
+                "oidc-provider/<owner>/<repo>",
+            )
+        self.assertIn(
+            "oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:"
+            "oidc-provider/great-wall-connect/blitzlog",
+            self.workflow,
+            "the workflow's oidc-provider-arn must match the trust "
+            "policy's Federated principal",
+        )
+
+    def test_the_workflow_does_not_double_the_org_either(self):
+        """The workflow hard-codes the provider ARN — it must not
+        repeat the org there either."""
+        self.assertNotIn(
+            "oidc-provider/great-wall-connect/great-wall-connect",
+            self.workflow,
+            "the workflow's oidc-provider-arn must not repeat the org",
+        )
+
+
 class TestAlicloudDeployRoleExists(unittest.TestCase):
     """The deploy role has to exist, with an OIDC trust policy and
     the grants the apply needs."""
@@ -369,7 +447,7 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
             "the trust policy's audience must be sts.aliyuncs.com",
         )
         self.assertIn(
-            "repo:${local.github_org}*/${local.github_repo}*",
+            "repo:${local.github_repo}*:ref:refs/heads/*",
             self.text,
             "the trust policy must match the same branch wildcard as the "
             "packer role",
