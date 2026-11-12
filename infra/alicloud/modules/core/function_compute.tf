@@ -166,20 +166,12 @@ resource "alicloud_fcv3_function" "handler" {
     # in the zip from lambda/requirements-alicloud.txt
     # (alibabacloud_*).
     BLITZLOG_PROVIDER = "alicloud"
-    # The shared agent VPC + VSwitches (created by the bootstrap stack
-    # — Alicloud has no default VPC per region). The launcher needs
-    # them to place an ECS instance:
-    #   * VPC_ID  -> the DescribeVSwitches lookup (az_subnet_map)
-    #   * VSWITCH_IDS -> the comma-joined list the lookup filters on
+    # The shared agent VPC + VSwitches (created by the bootstrap stack).
     VPC_ID      = var.vpc_id
     VSWITCH_IDS = join(",", var.vswitch_ids)
-    # The VSwitch the on-demand fallback path uses when every spot
-    # candidate fails (lambda/provider/alicloud.py reads this). It was
-    # NEVER set before, so the fallback passed an empty
-    # `v_switch_id` to RunInstances and the launch failed with an
-    # unhelpful API error. The first VSwitch is the natural choice:
-    # the spot path prefers whichever zone is cheapest, and this is
-    # only the "nothing was available" path.
+    # The on-demand fallback path reads this when every spot candidate
+    # fails; without it the fallback passes an empty `v_switch_id` to
+    # RunInstances.
     ALIYUN_DEFAULT_VSWITCH_ID = var.vswitch_ids[0]
     ECS_SECURITY_GROUP_ID     = alicloud_security_group.agent_sg.id
     # Aliyun has no instance-profile concept; the RAM role name is

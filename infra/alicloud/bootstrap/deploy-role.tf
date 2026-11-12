@@ -1,25 +1,15 @@
 # Terraform deploy role for the Alicloud stacks (issue #125).
 #
 # The Alicloud analogue of infra/aws/bootstrap/deploy-role.tf. The
-# deploy workflow (.github/workflows/release.yml) assumes this role
-# via GitHub Actions OIDC when it runs `terraform apply` against
-# infra/alicloud/{dev,prod}.
+# deploy workflow assumes this role via GitHub Actions OIDC.
 #
-# The role is intentionally broad: `terraform apply` has to manage
-# EVERY resource the core module creates — Function Compute, RAM
-# roles + policies, API Gateway, MNS, KMS, OSS, VPC, VSwitch, security
-# groups. Narrowing any of those means a `terraform apply` fails
-# halfway with an AccessDenied.
+# The role is intentionally broad: `terraform apply` has to manage every
+# resource the core module creates, and narrowing any of them means the
+# apply fails halfway with an AccessDenied.
 #
-# Trust policy shape mirrors `alicloud_ram_role.packer_build` in
-# infra/alicloud/bootstrap/packer-role.tf — the same GitHub Actions
-# OIDC principal, the same `sub` wildcard — so the two roles share an
-# identical trust surface and one role cannot be assumed from a
-# branch the other cannot be assumed from.
-#
-# The `ecs.aliyuncs.com` service-principal statement is NOT
-# mirrored here: the deploy runs on the GitHub Actions runner, not on
-# an ECS instance, so it does not need to be assumable by ECS.
+# No `ecs.aliyuncs.com` service-principal statement, unlike the Packer
+# role: the deploy runs on the GitHub Actions runner, not on an ECS
+# instance.
 #
 # `local.github_repo` lives in packer-role.tf — Terraform allows ONE
 # `locals` block per module, so the two roles share the single one.
@@ -113,14 +103,10 @@ resource "alicloud_ram_policy" "deploy" {
         Resource = ["*"]
       },
       {
-        # The KMS secrets + CMK the core module creates. `terraform
-        # apply` must be able to CREATE the secrets (which carry the
-        # GitHub App private key and the webhook secret), so the grant
-        # has to include the write verbs — not just GetSecretValue.
-        #
-        # The resource patterns cover the per-env secrets
-        # (/blitzlog/<env>/...) and the per-user namespace
-        # (/blitzlog/users/...) that the user-pool stack writes.
+        # The KMS secrets + CMK the core module creates. The grant
+        # needs the write verbs, not just GetSecretValue — the apply
+        # creates the secrets that carry the GitHub App private key
+        # and the webhook secret.
         Sid    = "AllowKMSManagement"
         Effect = "Allow"
         Action = [
@@ -198,12 +184,9 @@ resource "alicloud_ram_policy" "deploy" {
         Resource = ["*"]
       },
       {
-        # The ECS instance role is attached to the launched agents.
-        # The deploy needs to create the role and pass it, but the
-        # spot-launch itself is done by the Lambda at runtime, not by
-        # terraform — so the launch verbs are deliberately NOT here.
-        # (The `ecs:RunInstances` grant for the agent lives on the
-        # FC execution role — see infra/alicloud/modules/core/ram.tf.)
+        # No `ecs:RunInstances` here — the spot-launch is done by the
+        # Lambda at runtime, not by terraform. That grant lives on the
+        # FC execution role (infra/alicloud/modules/core/ram.tf).
         Sid    = "AllowReadAgentResources"
         Effect = "Allow"
         Action = [
@@ -216,8 +199,6 @@ resource "alicloud_ram_policy" "deploy" {
         Resource = ["*"]
       },
       {
-        # Reading the account id + region for the resource ARNs the
-        # policy documents.
         Sid    = "AllowAccountRead"
         Effect = "Allow"
         Action = [

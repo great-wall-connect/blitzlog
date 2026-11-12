@@ -15,12 +15,12 @@ variable "alicloud_region" {
 }
 
 variable "vpc_id" {
-  description = "ID of the shared agent VPC. REQUIRED — Alicloud has no default VPC per region, so an ECS launch needs one. Copy it from the bootstrap stack's output: 'cd infra/alicloud/bootstrap && terraform output vpc_id'. AWS analogue: same name (vpc_id)."
+  description = "ID of the shared agent VPC, from the bootstrap stack's output ('terraform output vpc_id'). REQUIRED — Alicloud has no default VPC per region. AWS analogue: same name."
   type        = string
 }
 
 variable "vswitch_ids" {
-  description = "IDs of the agent VSwitches. REQUIRED — an ECS launch requires a VSwitch, and the spot launcher picks one by AZ. Copy them from the bootstrap stack's output: 'terraform output vswitch_ids'. AWS analogue: ec2_subnet_id (single Subnet)."
+  description = "IDs of the agent VSwitches, from the bootstrap stack's output ('terraform output vswitch_ids'). REQUIRED — an ECS launch needs one. AWS analogue: ec2_subnet_id."
   type        = list(string)
 
   validation {
