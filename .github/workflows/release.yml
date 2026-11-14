@@ -790,7 +790,13 @@ jobs:
       # set to "alicloud" because the AMI bake is AWS-only in
       # this PR; the Aliyun image builder is Phase 5.
       BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}
-      STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate' }}
+      # Issue #191: one state layout for both clouds — the key is
+      # `blitzlog/<env>.tfstate` under the shared state bucket. The
+      # Alicloud OSS branch below uses the SAME key (its backend
+      # block sets `prefix = ""` so the OSS backend stops
+      # prepending its default `env:` directory), so one expression
+      # serves both providers.
+      STATE_KEY: ${{ needs.release.outputs.mode == 'release' && 'blitzlog/prod.tfstate' || 'blitzlog/dev.tfstate' }}
       AWS_REGION: ap-east-1
 
     steps:
@@ -861,7 +867,7 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.16.6
+          terraform_version: 1.17.1
 
       # Build the Lambda bundle into `infra/aws/modules/core/build/`
       # BEFORE `terraform plan` runs. The data source
@@ -1016,7 +1022,7 @@ jobs:
       # `gwc-infra-tf-state` so the standard install needs no
       # operator action; the variable exists for non-default
       # state buckets), the key is per-env
-      # (<env>/blitzlog.tfstate), the region is hard-coded
+      # (blitzlog/<env>.tfstate), the region is hard-coded
       # ap-east-1 (matches the bootstrap role's trust policy).
       #
       # Issue #126: when BLITZLOG_PROVIDER=alicloud, the backend
@@ -1025,6 +1031,12 @@ jobs:
       # `gwc-infra-tfstate` so the standard install needs no
       # operator action), the region is hard-coded cn-hangzhou to
       # match the bootstrap role's trust policy.
+      #
+      # Issue #191: the OSS backend prepends its `prefix` (default
+      # `env:`) to the key, so `key=blitzlog/dev.tfstate` would
+      # resolve to `env:/blitzlog/dev.tfstate` — an object that does
+      # not exist. `prefix=` (empty) pins the object path to the key
+      # itself, which is the same layout the S3 backend uses.
       - name: terraform init
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         env:
@@ -1037,6 +1049,7 @@ jobs:
             terraform init -input=false \
               -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
               -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="prefix=" \
               -backend-config="region=cn-hangzhou"
           else
             terraform init -input=false \

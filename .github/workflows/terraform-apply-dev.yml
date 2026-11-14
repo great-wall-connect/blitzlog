@@ -53,7 +53,9 @@ jobs:
       cancel-in-progress: false
     env:
       BLITZLOG_ENV: dev
-      STATE_KEY: dev/blitzlog.tfstate
+      # Issue #191: the state key moved to the shared
+      # `blitzlog/<env>.tfstate` layout (same key on both clouds).
+      STATE_KEY: blitzlog/dev.tfstate
       AWS_REGION: ap-east-1
       # Default to the workflow's ref_name when the operator
       # leaves the input blank (typical when dispatched from
@@ -134,7 +136,7 @@ jobs:
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.16.6
+          terraform_version: 1.17.1
 
       - name: Configure AWS credentials (OIDC) for terraform
         uses: aws-actions/configure-aws-credentials@v6
@@ -229,7 +231,7 @@ jobs:
       # repo variable TF_BACKEND_BUCKET (with a default of
       # `gwc-infra-tf-state` so the standard install needs no
       # operator action; the variable exists for non-default
-      # state buckets), the key is `dev/blitzlog.tfstate`
+      # state buckets), the key is `blitzlog/dev.tfstate`
       # to match infra/aws/prod/main.tf's backend handoff, the region
       # is hard-coded ap-east-1.
       - name: terraform init

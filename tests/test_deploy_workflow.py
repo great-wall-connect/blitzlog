@@ -56,6 +56,10 @@ What this guards against (issue #92):
   group or the ref input.
 - Either workflow dropping the backend-config inline args
   (a ``*.hcl`` materialised on the runner is a leak vector).
+- The state key drifting between the deploy workflows, the deploy
+  role's S3 grant and the shipped backend templates (issue #191) —
+  a key that points at a deleted object reads an EMPTY state and
+  plans to recreate every resource.
 
 We parse the YAML with regex rather than pyyaml so we don't pull
 a new dev dependency in for what is fundamentally a set of shape
@@ -76,6 +80,23 @@ DEPLOY_ROLE_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "deploy-role.tf"
 PACKER_ROLE_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "packer-role.tf"
 SECRETS_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "secrets.tf"
 BOOTSTRAP_OUTPUTS_TF = REPO_ROOT / "infra" / "aws" / "bootstrap" / "outputs.tf"
+
+# Issue #191: the state-key layout. The SAME key appears in the deploy
+# workflows, in the deploy role's S3 grant and in the shipped backend
+# templates — see TestStateKeyLayout.
+STATE_KEYS_BY_ENV = {
+    "bootstrap": "blitzlog/bootstrap.tfstate",
+    "dev": "blitzlog/dev.tfstate",
+    "prod": "blitzlog/prod.tfstate",
+}
+BACKEND_EXAMPLES_BY_ENV = {
+    "bootstrap": "bootstrap-backend.hcl.example",
+    "dev": "dev-backend.hcl.example",
+    "prod": "prod-backend.hcl.example",
+}
+# The pre-#191 keys. The objects behind them are gone — a file that
+# still names one points at a deleted object.
+OLD_STATE_KEYS = ("dev/blitzlog.tfstate", "prod/blitzlog.tfstate")
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -258,31 +279,84 @@ class TestDeployRole(unittest.TestCase):
         )
 
     def test_state_bucket_scope_is_dev_and_prod(self):
-        """S3 state-bucket actions MUST be scoped to dev/* and prod/* prefixes.
+        """S3 state-bucket actions MUST be scoped to the two exact per-env keys.
 
-        A widened S3 grant (e.g. `arn:aws:s3:::<bucket>/*`) lets the
-        role delete the bootstrap state file or other unrelated
-        objects in the shared bucket.
+        Issue #191 moved the state layout to `blitzlog/<env>.tfstate`.
+        The grant MUST name the two deployable keys exactly:
+
+        - the old `dev/*` / `prod/*` prefixes match no object any
+          more, so keeping them would fail every deploy closed with
+          AccessDenied;
+        - a `blitzlog/*` wildcard would let the role DELETE the
+          bootstrap stack's own state (`blitzlog/bootstrap.tfstate`) —
+          a hard outage, because the bootstrap stack owns this very
+          role. The bootstrap stack is applied by the operator
+          locally, so the deploy role never needs its key.
         """
         body = _policy_body_for_role("deploy", self.text)
-        # The state-file resource patterns MUST be exactly
-        # dev/* and prod/* under the bucket.
-        for prefix in (
-            '"arn:aws:s3:::${var.tf_backend_bucket}/dev/*"',
-            '"arn:aws:s3:::${var.tf_backend_bucket}/prod/*"',
-        ):
+        for env in ("dev", "prod"):
+            arn = f'"arn:aws:s3:::${{var.tf_backend_bucket}}/blitzlog/{env}.tfstate"'
             self.assertIn(
-                prefix,
+                arn,
                 body,
-                f"deploy policy must scope S3 state-file access to {prefix} "
-                "(without per-env prefix the role can mutate the bootstrap state)",
+                f"deploy policy must scope S3 state-file access to {arn} "
+                "(the exact per-env key — the pre-#191 prefixes match no object)",
             )
+        # The bootstrap state now lives under the same prefix, so it
+        # MUST NOT be granted to the deploy role.
+        self.assertNotIn(
+            '"arn:aws:s3:::${var.tf_backend_bucket}/blitzlog/bootstrap.tfstate"',
+            body,
+            "deploy policy must NOT grant the bootstrap state key — the bootstrap "
+            "stack is applied by the operator locally, and the deploy role must "
+            "not be able to delete its state",
+        )
         # And MUST NOT have an unscoped state-bucket pattern.
         self.assertNotIn(
             '"arn:aws:s3:::${var.tf_backend_bucket}/*"',
             body,
             "deploy policy must NOT grant `arn:aws:s3:::${var.tf_backend_bucket}/*` "
             "without a per-env prefix (a leaked delete on the bootstrap state is a hard outage)",
+        )
+        # A `blitzlog/*` wildcard would cover the bootstrap key too.
+        self.assertNotIn(
+            '"arn:aws:s3:::${var.tf_backend_bucket}/blitzlog/*"',
+            body,
+            "deploy policy must NOT grant `arn:aws:s3:::${var.tf_backend_bucket}/blitzlog/*` "
+            "— the bootstrap state lives under the same prefix",
+        )
+        # The pre-#191 per-env prefixes must be gone.
+        for old in ("dev/*", "prod/*"):
+            self.assertNotIn(
+                f'"arn:aws:s3:::${{var.tf_backend_bucket}}/{old}"',
+                body,
+                f"deploy policy must NOT keep the pre-#191 `{old}` state grant "
+                "(the state layout moved to blitzlog/<env>.tfstate)",
+            )
+
+    def test_state_bucket_list_prefix_is_the_two_exact_keys(self):
+        """The ListBucket condition MUST name the same two exact keys.
+
+        The S3 backend lists the workspace directory with the default
+        `env:` prefix. This policy does not allow that, and it does
+        not need to: the backend only enumerates non-default
+        workspaces, so the denied listing is tolerated and the deploy
+        path still works. What the policy MUST NOT do is widen the
+        prefix — `blitzlog/*` would let the role list (and, through
+        the object grant, reach) the bootstrap state.
+        """
+        body = _policy_body_for_role("deploy", self.text)
+        m = re.search(r'"s3:prefix"\s*=\s*\[(?P<values>.*?)\]', body, re.DOTALL)
+        self.assertIsNotNone(
+            m,
+            "deploy policy must carry an s3:prefix condition on the ListBucket grant",
+        )
+        values = re.findall(r'"([^"]+)"', m.group("values"))
+        self.assertEqual(
+            sorted(values),
+            ["blitzlog/dev.tfstate", "blitzlog/prod.tfstate"],
+            "the ListBucket condition must list exactly the two deployable "
+            "state keys (issue #191)",
         )
 
     def test_ssm_scope_is_dev_and_prod_blitzlog_only(self):
@@ -1138,7 +1212,7 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "(no backend.hcl materialised on the runner)",
         )
         # The state key is rendered from `${{ env.STATE_KEY }}` at
-        # runtime; the env var is set to `dev/blitzlog.tfstate`
+        # runtime; the env var is set to `blitzlog/dev.tfstate`
         # earlier in the workflow. We just need to confirm the
         # -backend-config=key= line exists.
         self.assertRegex(
@@ -1293,6 +1367,176 @@ class TestTerraformApplyDevWorkflow(unittest.TestCase):
             "(puts Python 3.12 in ~/.local/share/mise/installs/python/... "
             "where the local-exec resolves it)",
         )
+
+
+class TestStateKeyLayout(unittest.TestCase):
+    """The state key MUST be the same string on every surface (issue #191).
+
+    The state layout is ``blitzlog/<env>.tfstate``. Four surfaces
+    carry that key:
+
+    - ``release.yml``'s deploy job (``STATE_KEY`` expression),
+    - ``terraform-apply-dev.yml``'s env block (``STATE_KEY``),
+    - the deploy role's S3 grant in ``deploy-role.tf``,
+    - the shipped ``*-backend.hcl.example`` templates the operator
+      copies.
+
+    If one of them moves without the others, CI either reads an EMPTY
+    state (the key points at a deleted object) and plans to recreate
+    every resource, or fails closed with ``AccessDenied``. This class
+    pins the surfaces together so a future key change cannot move one
+    without the others.
+    """
+
+    EXPECTED_KEYS = STATE_KEYS_BY_ENV
+    BACKEND_EXAMPLES = BACKEND_EXAMPLES_BY_ENV
+    OLD_KEYS = OLD_STATE_KEYS
+
+    @classmethod
+    def setUpClass(cls):
+        cls.release_text = RELEASE_YML.read_text()
+        cls.apply_dev_text = APPLY_DEV_YML.read_text()
+        cls.deploy_role_text = DEPLOY_ROLE_TF.read_text()
+
+    def _state_key_values(self, text):
+        """Return the set of state keys a workflow's STATE_KEY can resolve to.
+
+        release.yml uses a conditional expression
+        (``... && 'blitzlog/prod.tfstate' || 'blitzlog/dev.tfstate'``);
+        terraform-apply-dev.yml uses a literal. Both are handled here.
+        """
+        m = re.search(r"(?m)^\s*STATE_KEY:\s*(?P<value>.+)$", text)
+        self.assertIsNotNone(
+            m,
+            "the deploy workflow must declare a STATE_KEY env var",
+        )
+        raw = m.group("value").strip()
+        if raw.startswith("${{"):
+            # Conditional expression: keep only the quoted literals that
+            # look like state keys (the expression also quotes 'release').
+            return {k for k in re.findall(r"'([^']+)'", raw) if k.endswith(".tfstate")}
+        return {raw.strip("\"'")}
+
+    def _granted_state_keys(self):
+        """Return the state keys the deploy role's S3 grant names."""
+        body = _policy_body_for_role("deploy", self.deploy_role_text)
+        m = re.search(
+            r'Sid\s*=\s*"TerraformStateS3".*?Resource\s*=\s*\[(?P<values>.*?)\]',
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            m,
+            "deploy-role.tf must declare the TerraformStateS3 statement with a Resource list",
+        )
+        bucket_prefix = "arn:aws:s3:::${var.tf_backend_bucket}/"
+        return {
+            arn[len(bucket_prefix) :]
+            for arn in re.findall(r'"([^"]+)"', m.group("values"))
+            if arn.startswith(bucket_prefix) and arn.endswith(".tfstate")
+        }
+
+    def test_release_workflow_state_keys(self):
+        """release.yml MUST resolve to the two deployable state keys."""
+        self.assertEqual(
+            self._state_key_values(self.release_text),
+            {"blitzlog/prod.tfstate", "blitzlog/dev.tfstate"},
+            "release.yml's STATE_KEY must resolve to `blitzlog/prod.tfstate` "
+            "or `blitzlog/dev.tfstate` (issue #191)",
+        )
+
+    def test_apply_dev_workflow_state_key(self):
+        """terraform-apply-dev.yml MUST use the dev state key."""
+        self.assertEqual(
+            self._state_key_values(self.apply_dev_text),
+            {"blitzlog/dev.tfstate"},
+            "terraform-apply-dev.yml's STATE_KEY must be `blitzlog/dev.tfstate` "
+            "(issue #191)",
+        )
+
+    def test_backend_examples_pin_the_same_keys(self):
+        """The shipped backend templates MUST pin the same keys."""
+        for env, filename in self.BACKEND_EXAMPLES.items():
+            path = REPO_ROOT / "infra" / "aws" / env / filename
+            self.assertTrue(
+                path.exists(),
+                f"infra/aws/{env}/{filename} must exist so the state key is "
+                "pinned in git (issue #191)",
+            )
+            text = path.read_text()
+            m = re.search(r'(?m)^\s*key\s*=\s*"(?P<key>[^"]+)"', text)
+            self.assertIsNotNone(
+                m,
+                f"infra/aws/{env}/{filename} must set a `key` for the S3 backend",
+            )
+            self.assertEqual(
+                m.group("key"),
+                self.EXPECTED_KEYS[env],
+                f"infra/aws/{env}/{filename} must pin the state key "
+                f"`{self.EXPECTED_KEYS[env]}` (issue #191)",
+            )
+
+    def test_workflow_keys_are_a_subset_of_the_backend_templates(self):
+        """Every key CI can deploy MUST exist in the shipped templates.
+
+        The templates carry the bootstrap key too — the operator's
+        local stack uses it — so CI's two keys must be a subset.
+        """
+        template_keys = set(self.EXPECTED_KEYS.values())
+        self.assertLessEqual(
+            self._state_key_values(self.release_text),
+            template_keys,
+            "release.yml's state keys must exist in the shipped backend templates",
+        )
+        self.assertLessEqual(
+            self._state_key_values(self.apply_dev_text),
+            template_keys,
+            "terraform-apply-dev.yml's state key must exist in the shipped "
+            "backend templates",
+        )
+
+    def test_deploy_role_grants_exactly_the_deployable_keys(self):
+        """The deploy role's S3 grant MUST name exactly the two CI keys.
+
+        Not the bootstrap key (the operator applies that stack, and a
+        grant would let the role delete its state) and not a wildcard
+        (which would cover the bootstrap key anyway).
+        """
+        self.assertEqual(
+            self._granted_state_keys(),
+            {"blitzlog/prod.tfstate", "blitzlog/dev.tfstate"},
+            "the deploy role must be granted exactly the two deployable state "
+            "keys (issue #191)",
+        )
+
+    def test_no_surface_still_references_the_old_keys(self):
+        """No tracked file may still point at the pre-#191 keys.
+
+        The old keys were deleted from the bucket. A file that still
+        names one is either stale documentation or — worse — a
+        deployment path that would read an empty state.
+        """
+        files = [
+            RELEASE_YML,
+            APPLY_DEV_YML,
+            DEPLOY_ROLE_TF,
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "SECURITY.md",
+            REPO_ROOT / "infra" / "aws" / "bootstrap" / "terraform.tfvars.example",
+            REPO_ROOT / "infra" / "aws" / "dev" / "terraform.tfvars.example",
+            REPO_ROOT / "infra" / "aws" / "prod" / "terraform.tfvars.example",
+        ]
+        for env, filename in self.BACKEND_EXAMPLES.items():
+            files.append(REPO_ROOT / "infra" / "aws" / env / filename)
+        for path in files:
+            text = path.read_text()
+            for old in self.OLD_KEYS:
+                self.assertNotIn(
+                    old,
+                    text,
+                    f"{path.relative_to(REPO_ROOT)} still references the pre-#191 "
+                    f"state key `{old}`",
+                )
 
 
 class TestDeploySecretsParameters(unittest.TestCase):
