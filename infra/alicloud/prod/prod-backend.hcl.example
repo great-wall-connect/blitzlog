@@ -4,10 +4,17 @@
 # must be created manually (or via the bootstrap stack at
 # infra/alicloud/bootstrap/) before `terraform init`.
 #
+# Issue #191: the key is pinned to the shared `blitzlog/<env>.tfstate`
+# layout (same key the AWS S3 backend uses), and `prefix = ""` stops
+# the OSS backend from prepending its default `env:` directory — with
+# the default prefix the object would resolve to
+# `env:/blitzlog/prod.tfstate`, which does not exist.
+#
 # Usage:
 #   terraform init -input=false \
 #     -backend-config=infra/alicloud/prod/prod-backend.hcl
 
 bucket = "blitzlog-prod-tfstate"
-key    = "prod/blitzlog.tfstate"
+key    = "blitzlog/prod.tfstate"
+prefix = ""
 region = "cn-hangzhou"

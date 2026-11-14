@@ -91,6 +91,8 @@ Both `prod` and `dev` reference the same shared S3 buckets (`agent_logs` and `st
 cd infra/bootstrap
 cp terraform.tfvars.example terraform.tfvars
 # fill in: aws_region, agent_logs_bucket_name, stt_models_bucket_name
+cp bootstrap-backend.hcl.example bootstrap-backend.hcl
+# edit the bucket in bootstrap-backend.hcl if it is not gwc-infra-tf-state
 terraform init -backend-config=bootstrap-backend.hcl
 terraform plan
 terraform apply
@@ -110,16 +112,16 @@ cp infra/aws/prod/terraform.tfvars.example infra/aws/prod/terraform.tfvars
 
 Open `infra/aws/prod/terraform.tfvars` (the file is gitignored — never commit it) and fill in the required fields. See the example file for the full list, including the optional STT and alerting knobs.
 
-The state backend (`backend "s3"`) in `infra/aws/prod/main.tf` is generic — the `bucket` and `key` fields are intentionally empty. Supply them via the shipped `-backend.hcl` file:
+The state backend (`backend "s3"`) in `infra/aws/prod/main.tf` is generic — the `bucket` and `key` fields are intentionally empty. Supply them via the shipped `-backend.hcl` file (copy `infra/aws/prod/prod-backend.hcl.example` and edit it):
 
 ```hcl
 # infra/aws/prod/prod-backend.hcl
 bucket = "<your-tf-state-bucket>"
-key    = "prod/blitzlog.tfstate"
+key    = "blitzlog/prod.tfstate"
 region = "ap-east-1"
 ```
 
-Override the bucket if your state bucket is not `gwc-infra-tf-state`.
+Override the bucket if your state bucket is not `gwc-infra-tf-state`. The `key` is part of the shared state layout (`blitzlog/<env>.tfstate`) that the deploy workflows hard-code — see [State file layout](#state-file-layout).
 
 ### 3. Deploy production
 
@@ -167,12 +169,12 @@ Blitzlog runs in two isolated environments inside the same AWS account:
 
 | Env | Audience | Triggered by | Webhook | Lambda | SSM root | State key |
 |---|---|---|---|---|---|---|
-| `prod` | All real users + repos | Merges to `main` (manual apply) | `terraform output -chdir=infra/prod webhook_url` | `blitzlog-prod-handler` | `/blitzlog/prod` | `s3://<bucket>/prod/blitzlog.tfstate` |
-| `dev` | Maintainer + a sandbox repo | Any unstable branch (manual apply) | `terraform output -chdir=infra/dev webhook_url` | `blitzlog-dev-handler` | `/blitzlog/dev` | `s3://<bucket>/dev/blitzlog.tfstate` |
+| `prod` | All real users + repos | Merges to `main` (manual apply) | `terraform output -chdir=infra/prod webhook_url` | `blitzlog-prod-handler` | `/blitzlog/prod` | `s3://<bucket>/blitzlog/prod.tfstate` |
+| `dev` | Maintainer + a sandbox repo | Any unstable branch (manual apply) | `terraform output -chdir=infra/dev webhook_url` | `blitzlog-dev-handler` | `/blitzlog/dev` | `s3://<bucket>/blitzlog/dev.tfstate` |
 
 Each env has:
 
-- its own **state file** (separate `prod/` and `dev/` keys in the same S3 bucket) — concurrent applies don't contend on a DynamoDB lock
+- its own **state file** (separate `blitzlog/prod.tfstate` and `blitzlog/dev.tfstate` keys in the same S3 bucket) — concurrent applies don't contend on a DynamoDB lock
 - its own **resource names** (`blitzlog-prod-handler` vs `blitzlog-dev-handler`, `blitzlog-prod-webhook-api` vs `blitzlog-dev-webhook-api`, etc.) — no name collisions
 - its own **SSM namespace** (`/blitzlog/prod/*` vs `/blitzlog/dev/*`) — bot tokens, GitHub App creds, and ephemeral scratch space never leak between envs
 - its own **IAM roles** with policies **scoped to its own SSM prefix** — the prod Lambda role literally cannot read `/blitzlog/dev/*` and the dev Lambda role cannot read `/blitzlog/prod/*`
@@ -197,6 +199,7 @@ infra/
 │   │   ├── integration-test-role.tf
 │   │   ├── github-oidc-provider.tf
 │   │   ├── data-sources.tf
+│   │   ├── bootstrap-backend.hcl.example
 │   │   └── terraform.tfvars.example
 │   ├── modules/
 │   │   └── core/               # all AWS resources, parameterized by var.environment
@@ -319,6 +322,7 @@ swallow) — the MNS DLQ + FC dead-letter config catch the failure.
 4. **Apply:**
    ```bash
    cd infra/dev
+   cp dev-backend.hcl.example dev-backend.hcl   # edit the bucket if yours differs
    terraform init -backend-config=dev-backend.hcl
    terraform plan
    terraform apply
@@ -565,22 +569,46 @@ the state bucket). The setup is one-time per repo:
    > writes the new value to SSM in place; the next deploy picks
    > it up. Automated rotation is tracked in issue #120.
 
-The deploy workflows hard-code the state keys to `dev/blitzlog.tfstate`
-and `prod/blitzlog.tfstate` to match the existing layout in
+The deploy workflows hard-code the state keys to `blitzlog/dev.tfstate`
+and `blitzlog/prod.tfstate` to match the existing layout in
 [State file layout](#state-file-layout).
 
-### Migrating an existing single-env deployment to the new layout
+### Migrating to the `blitzlog/<env>.tfstate` state layout
 
-If you are upgrading from a pre-issue-#50 deploy where everything lived under `infra/` and the state was at `s3://<bucket>/blitzlog.tfstate`:
+The current layout is `blitzlog/<env>.tfstate` — see
+[State file layout](#state-file-layout). Deployments that pre-date it
+live under one of the older keys:
+
+| Old key | New key |
+|---|---|
+| `s3://<bucket>/blitzlog.tfstate` (pre-#50 single-env deploy) | `s3://<bucket>/blitzlog/prod.tfstate` |
+| `s3://<bucket>/<env>/blitzlog.tfstate` | `s3://<bucket>/blitzlog/<env>.tfstate` |
+| `s3://<bucket>/bootstrap/blitzlog-bootstrap.tfstate` | `s3://<bucket>/blitzlog/bootstrap.tfstate` |
+
+Migrate one stack at a time, **locally** — the operator runs this, never from CI:
 
 ```bash
-cd infra/prod
-terraform init -migrate-state -backend-config=prod-backend.hcl
-terraform plan    # review — every blitzlog-* resource will be replaced because names are now prefixed
-terraform apply
+# 1. Write the new backend file. The key is pinned in the shipped example;
+#    edit the bucket if yours is not gwc-infra-tf-state.
+cp infra/aws/prod/prod-backend.hcl.example infra/aws/prod/prod-backend.hcl
+
+# 2. Point the stack at the new key and copy the state across.
+cd infra/aws/prod
+terraform init -input=false -migrate-state -backend-config=prod-backend.hcl
+
+# 3. Verify: the plan MUST be empty (no resource is created or destroyed).
+terraform plan
+
+# 4. Only then remove the old object. The bucket is versioned, so the
+#    previous versions stay recoverable.
+aws s3 rm s3://<bucket>/<env>/blitzlog.tfstate
 ```
 
-The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/aws/prod/` should be empty.
+> **Order matters.** The deploy workflows hard-code the new keys and the
+> deploy role's IAM grants are scoped to them, so land both together. A CI
+> apply *before* the IAM is widened fails closed with `AccessDenied` (safe);
+> widening the IAM while the workflows still point at the old, deleted key
+> reads an EMPTY state and plans to recreate every resource (not safe).
 
 ### Migrating S3 buckets out of the prod stack into the bootstrap stack
 
@@ -615,16 +643,18 @@ After this, both buckets are owned by `infra/aws/bootstrap/`. `infra/aws/prod/` 
 
 ### State file layout
 
-All stacks share the same S3 state bucket, separated by key prefix:
+All stacks share the same S3 state bucket, separated by key:
 
 ```
 s3://gwc-infra-tf-state/
-├── bootstrap/blitzlog-bootstrap.tfstate   # infra/bootstrap — one-time bucket creation
-├── prod/blitzlog.tfstate                  # infra/prod
-└── dev/blitzlog.tfstate                   # infra/dev
+├── blitzlog/bootstrap.tfstate   # infra/aws/bootstrap — one-time bucket creation
+├── blitzlog/prod.tfstate        # infra/aws/prod
+└── blitzlog/dev.tfstate         # infra/aws/dev
 ```
 
-The bucket name is configurable in each stack's `-backend.hcl` file. Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+The bucket name is configurable in each stack's `-backend.hcl` file (the key is pinned to `blitzlog/<env>.tfstate` in the shipped `*-backend.hcl.example` files and hard-coded in the deploy workflows, so the CI and the operator's copy cannot drift apart). Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+
+The Alicloud OSS backend uses the same key layout. Its backend blocks pin `prefix = ""` so the OSS backend does not prepend its default `env:` directory to the key.
 
 > **CI concurrency.** The deploy workflows (`.github/workflows/release.yml`'s
 > `deploy` job and `.github/workflows/terraform-apply-dev.yml`) serialize

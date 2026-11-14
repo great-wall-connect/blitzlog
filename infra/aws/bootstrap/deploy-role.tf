@@ -85,10 +85,22 @@ resource "aws_iam_role_policy" "deploy" {
     Version = "2012-10-17"
     Statement = [
       {
-        # Terraform state file I/O. Scoped to the per-env keys under
-        # the shared state bucket so a single role can drive both
-        # dev and prod applies (each workflow passes its own
-        # `-backend-config=key=...`).
+        # Terraform state file I/O. Scoped to the EXACT per-env
+        # keys under the shared state bucket so a single role can
+        # drive both dev and prod applies (each workflow passes
+        # its own `-backend-config=key=...`).
+        #
+        # Issue #191: the keys moved to `blitzlog/<env>.tfstate`.
+        # They are listed EXACTLY, not as a `blitzlog/*` wildcard:
+        # the bootstrap stack's own state now lives under the same
+        # prefix (`blitzlog/bootstrap.tfstate`), and a blanket
+        # grant would let the deploy role DELETE the bootstrap
+        # state — a hard outage. The bootstrap stack is applied by
+        # the operator locally, so the deploy role never needs it.
+        #
+        # No lock-file grant is required: the backend sets no
+        # `use_lockfile` and there is no DynamoDB lock table, so no
+        # `.tflock` object is ever created.
         Sid    = "TerraformStateS3"
         Effect = "Allow"
         Action = [
@@ -97,11 +109,19 @@ resource "aws_iam_role_policy" "deploy" {
           "s3:DeleteObject",
         ]
         Resource = [
-          "arn:aws:s3:::${var.tf_backend_bucket}/dev/*",
-          "arn:aws:s3:::${var.tf_backend_bucket}/prod/*",
+          "arn:aws:s3:::${var.tf_backend_bucket}/blitzlog/dev.tfstate",
+          "arn:aws:s3:::${var.tf_backend_bucket}/blitzlog/prod.tfstate",
         ]
       },
       {
+        # ListBucket is narrowed to the same two exact keys. The
+        # backend's own workspace listing uses the default `env:`
+        # prefix, which this policy does not allow — the backend
+        # tolerates that denial because it only enumerates
+        # non-default workspaces, so the deploy path still works.
+        # Do NOT "fix" this by setting `workspace_key_prefix = ""`:
+        # that removes the tolerance and turns the denied listing
+        # into a hard `init` failure.
         Sid    = "TerraformStateBucketList"
         Effect = "Allow"
         Action = [
@@ -111,8 +131,8 @@ resource "aws_iam_role_policy" "deploy" {
         Condition = {
           StringLike = {
             "s3:prefix" = [
-              "dev/*",
-              "prod/*",
+              "blitzlog/dev.tfstate",
+              "blitzlog/prod.tfstate",
             ]
           }
         }
@@ -512,8 +532,8 @@ resource "aws_iam_role_policy" "deploy" {
         # `data "aws_s3_bucket" "stt_models"` data sources (and
         # the STT model download from the EC2 user-data) need to
         # read these. The bootstrap's S3 state-file grant is
-        # scoped to the state bucket's `dev/*` / `prod/*` prefix
-        # and doesn't cover these.
+        # scoped to the state bucket's exact `blitzlog/dev.tfstate`
+        # / `blitzlog/prod.tfstate` keys and doesn't cover these.
         Sid    = "SharedS3BucketRead"
         Effect = "Allow"
         Action = [

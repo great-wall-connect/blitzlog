@@ -896,6 +896,66 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "terraform init step must use cn-hangzhou as the OSS backend region",
         )
 
+    def test_oss_backend_blocks_pin_an_empty_prefix(self):
+        """Every Alicloud stack's `backend "oss"` block MUST set `prefix = ""`.
+
+        Issue #191 moved the state layout to `blitzlog/<env>.tfstate`
+        on BOTH clouds. The OSS backend prepends its `prefix`
+        (default `env:`) to the key, so without this pin the key
+        `blitzlog/dev.tfstate` would resolve to the object
+        `env:/blitzlog/dev.tfstate` — an object that does not exist.
+        The deploy would then read an EMPTY state and plan to
+        recreate every resource.
+        """
+        for stack in (
+            self.ALICLOUD_DEV / "main.tf",
+            self.ALICLOUD_PROD / "main.tf",
+            self.ALICLOUD_BOOTSTRAP / "main.tf",
+        ):
+            text = stack.read_text()
+            m = re.search(r'backend\s+"oss"\s*\{(?P<body>.*?)\}', text, re.DOTALL)
+            self.assertIsNotNone(
+                m,
+                f'{stack} must declare a `backend "oss"` block',
+            )
+            body = m.group("body")
+            self.assertRegex(
+                body,
+                r'(?m)^\s*prefix\s*=\s*""\s*$',
+                f'{stack}\'s OSS backend block must pin `prefix = ""` so the '
+                "OSS backend does not prepend its default `env:` directory "
+                "to the state key (issue #191)",
+            )
+
+    def test_oss_backend_examples_use_the_shared_key_layout(self):
+        """The Alicloud backend templates MUST use `blitzlog/<env>.tfstate`.
+
+        The Alicloud stacks share the AWS key layout, so a stale key
+        in the shipped template would point the operator at an
+        object that does not exist.
+        """
+        for env, filename in (
+            ("dev", "dev-backend.hcl.example"),
+            ("prod", "prod-backend.hcl.example"),
+        ):
+            path = self.REPO_ROOT / "infra" / "alicloud" / env / filename
+            self.assertTrue(path.exists(), f"{path} must exist")
+            text = path.read_text()
+            m = re.search(r'(?m)^\s*key\s*=\s*"(?P<key>[^"]+)"', text)
+            self.assertIsNotNone(m, f"{path} must set a `key` for the OSS backend")
+            self.assertEqual(
+                m.group("key"),
+                f"blitzlog/{env}.tfstate",
+                f"{path} must pin the shared `blitzlog/{env}.tfstate` key "
+                "(issue #191)",
+            )
+            self.assertRegex(
+                text,
+                r'(?m)^\s*prefix\s*=\s*""\s*$',
+                f'{path} must pin `prefix = ""` so the OSS backend does not '
+                "prepend its default `env:` directory (issue #191)",
+            )
+
     # ------------------------------------------------------------------
     # Provider-currency + deprecation-cleanup guards (PR #155 follow-up).
     # ------------------------------------------------------------------
@@ -933,7 +993,7 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         """All four Alicloud stacks must require Terraform >= 1.10.
 
         aliyun/alicloud 2.0's framework-provider features (ephemeral
-        resources) need >= 1.10; latest stable is 1.16.6. The PR
+        resources) need >= 1.10; latest stable is 1.17.1. The PR
         previously used ">= 1.0" which would have permitted a host
         too old to load the 2.0 provider.
         """
@@ -1238,18 +1298,21 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "ram.tf must grant oss:GetObject for the FC code download",
         )
 
-    def test_terraform_pinned_to_1_16_6(self):
+    def test_terraform_pinned_to_1_17_1(self):
         """Every workflow that installs Terraform + mise.toml must
-        use the same version (1.16.6). A drift between them causes
+        use the same version (1.17.1). A drift between them causes
         `terraform init` to silently re-pick a different provider
         set on CI vs local.
+
+        Issue #191 bumped the pin from 1.16.6 to 1.17.1 so CI runs
+        the same Terraform that wrote the migrated state files.
         """
         # mise.toml
         mise_toml = (self.REPO_ROOT / "mise.toml").read_text()
         self.assertIn(
-            'terraform = "1.16.6"',
+            'terraform = "1.17.1"',
             mise_toml,
-            'mise.toml must pin terraform = "1.16.6"',
+            'mise.toml must pin terraform = "1.17.1"',
         )
 
         # workflows
@@ -1260,16 +1323,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         ):
             text = (self.REPO_ROOT / wf_rel).read_text()
             self.assertIn(
-                "terraform_version: 1.16.6",
+                "terraform_version: 1.17.1",
                 text,
-                f"{wf_rel} must install terraform_version 1.16.6",
+                f"{wf_rel} must install terraform_version 1.17.1",
             )
-            # Old pin must be gone.
-            self.assertNotIn(
-                "terraform_version: 1.9.8",
-                text,
-                f"{wf_rel} must not still pin terraform 1.9.8",
-            )
+            # Old pins must be gone.
+            for stale in ("terraform_version: 1.9.8", "terraform_version: 1.16.6"):
+                self.assertNotIn(
+                    stale,
+                    text,
+                    f"{wf_rel} must not still pin {stale.split(': ')[1]}",
+                )
 
     def test_mise_tf_plan_points_at_real_dir(self):
         """The mise `tf-plan` / `tf-apply` tasks used to point at

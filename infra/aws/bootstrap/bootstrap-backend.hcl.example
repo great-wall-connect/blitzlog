@@ -1,0 +1,20 @@
+# AWS S3 backend config for the bootstrap stack.
+#
+# Copy to `bootstrap-backend.hcl` (gitignored) and adjust the bucket
+# if your state bucket is not the default `gwc-infra-tf-state`. The
+# bucket must exist before `terraform init` — backend init does NOT
+# create the bucket.
+#
+# The key is pinned to `blitzlog/bootstrap.tfstate` (issue #191): one
+# layout for every stack, `blitzlog/<env>.tfstate`. The CI deploy
+# workflows hard-code the same keys — see
+# .github/workflows/release.yml's STATE_KEY — so a change here must
+# move there too.
+#
+# Usage:
+#   terraform init -input=false \
+#     -backend-config=infra/aws/bootstrap/bootstrap-backend.hcl
+
+bucket = "gwc-infra-tf-state"
+key    = "blitzlog/bootstrap.tfstate"
+region = "ap-east-1"

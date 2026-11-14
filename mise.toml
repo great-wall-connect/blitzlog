@@ -1,6 +1,6 @@
 [tools]
 python = "3.12"
-terraform = "1.16.6"
+terraform = "1.17.1"
 packer = "1.16.1"
 
 [tasks.bootstrap]

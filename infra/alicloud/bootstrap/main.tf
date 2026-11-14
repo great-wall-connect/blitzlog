@@ -28,6 +28,12 @@ terraform {
   backend "oss" {
     bucket = ""
     key    = ""
+    # Issue #191: the OSS backend prepends `prefix` (default `env:`)
+    # to the key, so `key = "blitzlog/bootstrap.tfstate"` would
+    # resolve to the object `env:/blitzlog/bootstrap.tfstate`. Pinning
+    # the prefix to the empty string makes the object path identical
+    # to the key — the same layout the AWS S3 backend uses.
+    prefix = ""
     region = "cn-hangzhou"
   }
 }

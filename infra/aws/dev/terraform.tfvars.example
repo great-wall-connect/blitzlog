@@ -60,7 +60,7 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # SAME bucket a
 # SSM parameters land under /blitzlog/dev/users/<login>/... — never colliding
 # with prod bot tokens.
 
-# State file: S3 key is "dev/blitzlog.tfstate" in the bucket named in dev-backend.hcl.
+# State file: S3 key is "blitzlog/dev.tfstate" in the bucket named in dev-backend.hcl.
 # The dev state is independent of prod state — concurrent applies to both
 # environments do not contend on a DynamoDB lock.
 
