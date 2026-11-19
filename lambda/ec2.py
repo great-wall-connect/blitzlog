@@ -28,13 +28,16 @@ from provider import (
     get_object_store,
     get_secrets,
 )
-from provider.aws import AwsCompute
 
 # Fallback used when SPOT_INSTANCE_TYPES_JSON is unset or unparseable. Kept
 # in sync with the default of `var.spot_instance_types` in infra/aws/modules/core
 # /variables.tf — Terraform is the source of truth at deploy time; this only
 # protects unit tests and out-of-Lambda callers from a hard failure.
-_DEFAULT_SPOT_INSTANCE_TYPES = AwsCompute._default_spot_instance_types()
+# Resolved through the provider factory rather than `provider.aws`
+# directly: the AWS module imports boto3, which the Alicloud bundle
+# does not ship, so importing it here made the Alicloud handler
+# unimportable (`ModuleNotFoundError: No module named 'boto3'`).
+_DEFAULT_SPOT_INSTANCE_TYPES = get_compute()._default_spot_instance_types()
 
 
 def _load_spot_instance_types() -> list[str]:
@@ -46,11 +49,11 @@ def _load_spot_instance_types() -> list[str]:
     on parse failure so a misconfigured Terraform apply is visible in
     CloudWatch without aborting the request.
 
-    Implementation lives in `AwsCompute._load_spot_instance_types`
+    Implementation lives on the provider's compute class
     (post-#83). Kept as a top-level shim so `tests/test_ec2.py`
     can still import it via `from ec2 import _load_spot_instance_types`.
     """
-    return AwsCompute()._load_spot_instance_types()
+    return get_compute()._load_spot_instance_types()
 
 
 # `SPOT_INSTANCE_TYPES` is the module-level frozen copy other code
@@ -77,8 +80,8 @@ def get_agent_ami() -> str:
     `/blitzlog/<env>/agent-ami-id-docker-ubuntu`, published by
     infra/aws/packer/agent-docker-ubuntu.pkr.hcl.
 
-    Alicloud (issue #125): the image id lives in KMS Secrets Manager at
-    `/blitzlog/<env>/agent-ami-id-ecs-ubuntu`, published by
+    Alicloud (issue #125): the image id lives in the OOS Parameter
+    Store at `blitzlog/<env>/agent-ami-id-ecs-ubuntu`, published by
     infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl.
 
     If the parameter is missing or the image is retired, fall back to

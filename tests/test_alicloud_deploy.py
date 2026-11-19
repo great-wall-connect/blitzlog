@@ -465,8 +465,9 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
             "vpc:CreateVpc",
             "vpc:CreateVSwitch",
             "ecs:CreateSecurityGroup",
-            "kms:CreateSecret",
-            "kms:PutSecretValue",
+            "oos:CreateSecretParameter",
+            "oos:UpdateSecretParameter",
+            "oos:GetSecretParameter",
             "oss:PutObject",
             "ram:CreateRole",
             "ram:AttachPolicy",
@@ -486,29 +487,30 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
         )
 
 
-class TestAlicloudKmsSecretFetchReplacesTfvars(unittest.TestCase):
-    """CI must not need a gitignored `alicloud.tfvars`.
+class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
+    """CI must not need a gitignored tfvars file.
 
-    `<provider>.tfvars` is gitignored, so it can never exist in a
-    fresh CI checkout. The AWS path solved this by rendering TF_VAR_*
-    from SSM; the Alicloud path needs the same from KMS.
+    `*.tfvars` is gitignored, so it can never exist in a fresh CI
+    checkout. The AWS path solved this by rendering TF_VAR_* from
+    SSM; the Alicloud path needs the same from the OOS Parameter
+    Store (the Alicloud secret store).
     """
 
     @classmethod
     def setUpClass(cls):
         cls.text = _read(RELEASE_YML)
 
-    def test_kms_render_step_exists(self):
+    def test_oos_render_step_exists(self):
         self.assertIn(
-            "Render TF_VAR_* env from KMS",
+            "Render TF_VAR_* env from OOS",
             self.text,
-            "the Alicloud path needs a KMS-backed TF_VAR render — the "
+            "the Alicloud path needs an OOS-backed TF_VAR render — the "
             "analogue of the AWS SSM fetch",
         )
 
-    def test_kms_step_reads_the_secret_paths(self):
-        """The KMS secret paths mirror the SSM paths byte-for-byte, so
-        the mapping from leaf name to TF variable is the same."""
+    def test_oos_step_reads_the_parameter_paths(self):
+        """The OOS parameter paths mirror the SSM paths, so the
+        mapping from leaf name to TF variable is the same."""
         for secret in (
             "github-app/id",
             "github-app/private-key",
@@ -523,10 +525,10 @@ class TestAlicloudKmsSecretFetchReplacesTfvars(unittest.TestCase):
             self.assertIn(
                 f'"{secret}"',
                 self.text,
-                f"the KMS render step must read /blitzlog/<env>/{secret}",
+                f"the OOS render step must read blitzlog/<env>/{secret}",
             )
 
-    def test_kms_step_covers_every_required_secret_variable(self):
+    def test_oos_step_covers_every_required_secret_variable(self):
         """Each secret maps to a TF variable the stack declares. A
         missing mapping means the plan prompts for a value that CI
         cannot supply."""
@@ -544,19 +546,19 @@ class TestAlicloudKmsSecretFetchReplacesTfvars(unittest.TestCase):
             self.assertIn(
                 f"var={var}",
                 self.text,
-                f"the KMS render step must map a secret to {var}",
+                f"the OOS render step must map a parameter to {var}",
             )
 
     def test_plan_does_not_hard_fail_on_a_missing_tfvars_file(self):
-        """The pre-#125 Alicloud plan FATAL'd when `alicloud.tfvars`
+        """The pre-#125 Alicloud plan FATAL'd when the tfvars file
         was absent — which is ALWAYS the case in CI. It must now fall
-        through to the KMS-supplied values."""
+        through to the store-supplied values."""
         self.assertNotIn(
             "FATAL: ${TFVARS_FILE} not found",
             self.text,
             "the plan must not hard-fail on a missing tfvars file — in CI "
             "the file is always missing (it is gitignored) and the values "
-            "come from KMS",
+            "come from the OOS Parameter Store",
         )
 
     def test_aws_plan_behaviour_is_unchanged(self):
@@ -986,6 +988,352 @@ class TestAlicloudBucketOneWayAttributesAreIgnored(unittest.TestCase):
                 "alicloud_oss_bucket — ignoring a non-existent attribute "
                 "would be a config error",
             )
+
+
+class TestAlicloudServiceActivations(unittest.TestCase):
+    """Two account-level products must be open before the per-env
+    stacks can create anything in them:
+
+      * API Gateway — `CreateApiGroup` fails with `ServiceUnOpen`
+        ("Your Gateway service has not been opened."),
+      * MNS — `CreateQueue` fails with `ServiceNotEnable` ("Service
+        not open").
+
+    Both activations live in the bootstrap stack: they are
+    account-level, one-way (a service cannot be closed once opened)
+    and accept the product's Terms of Service — so they belong to the
+    operator's one-time setup, not to the CI deploy path.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.services = _read(os.path.join(ALICLOUD_BOOTSTRAP, "services.tf"))
+
+    def test_the_api_gateway_service_is_opened(self):
+        self.assertIn(
+            'data "alicloud_api_gateway_service" "open"',
+            self.services,
+            "the bootstrap must open the API Gateway service — the "
+            "per-env stack's CreateApiGroup fails with ServiceUnOpen "
+            "otherwise",
+        )
+        self.assertIn(
+            'enable = "On"',
+            self.services,
+            "the API Gateway service data source must be read with "
+            "enable = On — that is what opens the service",
+        )
+
+    def test_the_mns_service_is_subscribed(self):
+        self.assertIn(
+            'resource "alicloud_message_service_service" "open"',
+            self.services,
+            "the bootstrap must subscribe the account to the MNS "
+            "(Simple Message Queue) service — the per-env stack's "
+            "CreateQueue fails with ServiceNotEnable otherwise",
+        )
+
+    def test_the_mns_console_step_is_documented(self):
+        """The subscription order alone does not open the service on
+        the international site — Alicloud's own error DB says the
+        service is opened from the MNS console ("激活" / 开通). The
+        runbook must say so, or the operator hits an unexplained
+        `ServiceNotEnable`."""
+        runbook = _read(os.path.join(REPO_ROOT, "docs/ALICLOUD_DEPLOY.md"))
+        self.assertIn(
+            "mns.console.aliyun.com",
+            runbook,
+            "the runbook must point the operator at the MNS console — the "
+            "service activation is a console step, not a Terraform one",
+        )
+
+    def test_the_api_gateway_resource_names_have_no_hyphens(self):
+        """API Gateway names accept letters, digits and underscores
+        only — a hyphen is rejected with `InvalidAppName` /
+        `InvalidGroupName`."""
+        apigateway = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/apigateway.tf")
+        )
+        for match in re.finditer(
+            r'resource "alicloud_api?gateway_\w+" "\w+" \{.*?\n\}',
+            apigateway,
+            re.DOTALL,
+        ):
+            name_match = re.search(r'name\s*=\s*"([^"]+)"', match.group(0))
+            self.assertIsNotNone(name_match, "the resource must set a name")
+            self.assertNotIn(
+                "-",
+                name_match.group(1),
+                f"the API Gateway name {name_match.group(1)!r} contains a "
+                "hyphen — API Gateway names accept letters, digits and "
+                "underscores only",
+            )
+
+
+class TestAlicloudWebhookFrontDoor(unittest.TestCase):
+    """The webhook has to be reachable from the internet and it has
+    to carry the GitHub signature.
+
+    Three things the Alicloud side needs that the AWS side gets for
+    free:
+
+      * `auth_type = "ANONYMOUS"` — GitHub cannot present API
+        Gateway app credentials, and the `APP` default answers every
+        request with "Header `X-Ca-Key` is Required";
+      * `stage_names = ["RELEASE"]` — an API that is not deployed to
+        a stage has no route;
+      * an HTTP trigger on the function — the `FCEvent` backend
+        hands the function the bare body and drops the headers, so
+        the `X-Hub-Signature-256` would never arrive.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.apigateway = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/apigateway.tf")
+        )
+        cls.outputs = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/outputs.tf")
+        )
+
+    def test_the_api_is_anonymous(self):
+        self.assertIn(
+            'auth_type = "ANONYMOUS"',
+            self.apigateway,
+            "the API must be anonymous — GitHub cannot present API "
+            "Gateway app credentials",
+        )
+
+    def test_the_api_is_deployed_to_a_stage(self):
+        self.assertIn(
+            'stage_names = ["RELEASE"]',
+            self.apigateway,
+            "the API must be deployed to a stage — an undeployed API "
+            "has no route and the group's domain answers 404",
+        )
+
+    def test_the_function_has_an_http_trigger(self):
+        self.assertIn(
+            'resource "alicloud_fcv3_trigger" "webhook"',
+            self.apigateway,
+            "the function needs an HTTP trigger — the FCEvent backend "
+            "drops the headers the signature check needs",
+        )
+        self.assertIn(
+            'function_type     = "HttpTrigger"',
+            self.apigateway,
+            "the API's FC backend must be the HttpTrigger kind",
+        )
+
+    def test_the_webhook_url_is_the_group_domain(self):
+        """The URL the GitHub App POSTs to is the API Gateway
+        group's domain plus the API's path — not the API id."""
+        self.assertIn(
+            '"https://${alicloud_api_gateway_group.webhook.sub_domain}',
+            self.outputs,
+            "the webhook_url output must be the invocable URL, not the " "API id",
+        )
+
+    def test_the_role_may_be_assumed_by_the_api_gateway(self):
+        """The API Gateway assumes the function role to invoke the
+        function; without it in the trust policy the gateway's
+        AssumeRole is rejected and every invocation 403s."""
+        ram = _read(os.path.join(REPO_ROOT, "infra/alicloud/modules/core/ram.tf"))
+        self.assertIn(
+            "apigateway.aliyuncs.com",
+            ram,
+            "the function role's trust policy must allow the API "
+            "Gateway to assume it",
+        )
+        trust_policy = ram[ram.index("assume_role_policy_document") : ram.index("})")]
+        self.assertNotIn(
+            "AWS",
+            trust_policy,
+            'Alicloud RAM only accepts the "Service" principal type — an '
+            'account-root principal is rejected with "MalformedPolicyDocument '
+            '— Unsupported principal type"',
+        )
+
+    def test_the_role_may_invoke_the_function(self):
+        ram = _read(os.path.join(REPO_ROOT, "infra/alicloud/modules/core/ram.tf"))
+        self.assertIn(
+            '"fc:InvokeFunction"',
+            ram,
+            "the function role needs the invoke verb — the gateway "
+            "calls the function with this role's credentials",
+        )
+
+
+class TestAlicloudOosParameterStore(unittest.TestCase):
+    """The Alicloud secret store is the OOS Parameter Store.
+
+    KMS Secrets Manager was the original choice, but on KMS 3.0 a
+    secret can only be created inside a dedicated KMS instance —
+    `CreateSecret` without a `DKMSInstanceId` is rejected with
+    `UnsupportedOperation` — and a KMS instance is a billable
+    resource (USD 500/month subscription, USD 4.50/day pay-as-you-go).
+    The OOS Parameter Store is free and its API maps 1:1 onto the
+    `SecretStore` interface.
+
+    These tests pin the invariants that made the old shape fail:
+    every parameter is an encrypted one, it is encrypted with the
+    per-env CMK, and its name carries no leading slash (the RAM ARN
+    is `acs:oos:<region>:<account>:secretparameter/<name>`, so a
+    leading slash would render a double slash and the grants would
+    stop matching).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.secrets = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/secrets.tf")
+        )
+        cls.locals = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/locals.tf")
+        )
+        cls.ram = _read(os.path.join(REPO_ROOT, "infra/alicloud/modules/core/ram.tf"))
+
+    def test_every_parameter_is_an_encrypted_oos_parameter(self):
+        """No `alicloud_kms_secret` may survive — the resource is the
+        KMS 3.0 shape that the apply rejects."""
+        self.assertNotIn(
+            "alicloud_kms_secret",
+            self.secrets,
+            "the Alicloud secrets must be OOS parameters — "
+            "alicloud_kms_secret is rejected by KMS 3.0 with "
+            "UnsupportedOperation",
+        )
+        parameters = re.findall(
+            r'resource "alicloud_oos_secret_parameter" "(\w+)" \{(.*?)\n\}',
+            self.secrets,
+            re.DOTALL,
+        )
+        self.assertEqual(
+            len(parameters),
+            10,
+            "every secret the core module used to create must have an "
+            "OOS parameter counterpart",
+        )
+        for name, body in parameters:
+            self.assertIn(
+                'type                  = "Secret"',
+                body,
+                f"the {name} parameter must be an encrypted one — a plain "
+                "parameter would store the GitHub App private key in the "
+                "clear",
+            )
+            self.assertIn(
+                "key_id                = alicloud_kms_key.secrets.id",
+                body,
+                f"the {name} parameter must be encrypted with the per-env " "CMK",
+            )
+
+    def test_the_value_is_ignored_after_creation(self):
+        """The provider's read does not decrypt, so the value reads
+        back empty. Without `ignore_changes`, every plan would
+        diff and every apply would rewrite the value from the
+        tfvars — clobbering the real value the operator sets
+        out-of-band with `aliyun oos UpdateSecretParameter`."""
+        for name, body in re.findall(
+            r'resource "alicloud_oos_secret_parameter" "(\w+)" \{(.*?)\n\}',
+            self.secrets,
+            re.DOTALL,
+        ):
+            self.assertIn(
+                "ignore_changes = [value]",
+                body,
+                f"the {name} parameter must ignore changes to its value — "
+                "the provider cannot read it back, so Terraform would "
+                "otherwise rewrite it on every apply",
+            )
+
+    def test_parameter_names_carry_no_leading_slash(self):
+        """OOS names its parameters `blitzlog/<env>/...`. A leading
+        slash would render the RAM ARN with two slashes after
+        `secretparameter` and the grants would stop matching."""
+        self.assertIn(
+            'oos_root = "blitzlog/${var.environment}"',
+            self.locals,
+            "the OOS parameter root must not start with a slash",
+        )
+        self.assertNotIn(
+            'oos_root = "/blitzlog',
+            self.locals,
+            "the OOS parameter root must not start with a slash",
+        )
+        for match in re.finditer(
+            r"secret_parameter_name = local\.(oos_\w+)", self.secrets
+        ):
+            local_name = match.group(1)
+            definition = re.search(
+                rf"^\s*{local_name}\s*=\s*(.*)$", self.locals, re.MULTILINE
+            )
+            self.assertIsNotNone(
+                definition, f"{local_name} must be declared in locals.tf"
+            )
+            self.assertIn(
+                "${local.oos_root}",
+                definition.group(1),
+                f"{local_name} must be built from the slash-free OOS root",
+            )
+
+    def test_the_reader_roles_are_granted_the_oos_verbs(self):
+        """The FC + ECS roles read parameters; the FC also lists them
+        by path for the per-user bot pool."""
+        for action in (
+            "oos:GetSecretParameter",
+            "oos:GetSecretParametersByPath",
+            "oos:CreateSecretParameter",
+            "oos:UpdateSecretParameter",
+            "oos:DeleteSecretParameter",
+        ):
+            self.assertIn(
+                action,
+                self.ram,
+                f"the RAM policies must grant {action} — the Alicloud "
+                "secret store reads and writes OOS parameters",
+            )
+        self.assertNotIn(
+            "kms:GetSecretValue",
+            self.ram,
+            "the KMS secret verbs are dead on the Alicloud path — the " "store is OOS",
+        )
+
+    def test_the_fc_role_can_read_the_published_agent_image_id(self):
+        """The FC function reads the Packer-published agent image id
+        at launch time (lambda/ec2.py::get_agent_ami). Without the
+        grant the read is AccessDenied, and the launch fails — the
+        AWS side grants the same parameter
+        (iam.tf: `blitzlog/<env>/agent-ami-id-docker-ubuntu`)."""
+        self.assertIn(
+            "agent-ami-id-ecs-ubuntu",
+            self.ram,
+            "the FC role must be granted oos:GetSecretParameter on the "
+            "Packer-published agent image id — the AWS side grants the "
+            "equivalent SSM parameter",
+        )
+
+    def test_the_deploy_role_can_manage_the_parameters(self):
+        """CI applies the per-env stack, so the deploy role needs the
+        write verbs on the parameters the stack creates."""
+        deploy_role = _read(os.path.join(ALICLOUD_BOOTSTRAP, "deploy-role.tf"))
+        for action in (
+            "oos:CreateSecretParameter",
+            "oos:UpdateSecretParameter",
+            "oos:GetSecretParameter",
+            "oos:DeleteSecretParameter",
+        ):
+            self.assertIn(
+                action,
+                deploy_role,
+                f"the deploy role must grant {action} — the apply creates "
+                "the parameters",
+            )
+        self.assertNotIn(
+            "kms:CreateSecret",
+            deploy_role,
+            "the KMS secret verbs are dead on the Alicloud path",
+        )
 
 
 if __name__ == "__main__":

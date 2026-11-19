@@ -4,7 +4,7 @@
 # this file via `-r requirements.in` and add the cloud-specific SDKs.
 #
 # This split exists because PR #84 added the alibaba SDKs
-# (oss2 / alibabacloud_kms20160120 / alibabacloud_ecs20140526) for the
+# (oss2 / alibabacloud_oos20190601 / alibabacloud_ecs20140526) for the
 # BLITZLOG_PROVIDER=alicloud path. The factory in lambda/provider/
 # __init__.py lazy-imports the alicloud provider, so an AWS cold start
 # never loads the alibaba wheels — but `terraform apply` of

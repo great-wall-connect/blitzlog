@@ -39,6 +39,7 @@ terraform {
   backend "oss" {
     bucket = ""
     key    = ""
+    prefix = ""
     region = "cn-hongkong"
     # The profile name in ~/.aliyun/config.json (written by
     # `aliyun configure --profile <name>`). Empty by default so the
@@ -80,8 +81,9 @@ resource "alicloud_oss_bucket_acl" "agent_logs" {
 }
 
 # AES256 (Aliyun-managed key) for the shared bootstrap buckets, to
-# match the AWS-side default. Per-env buckets use KMS via the per-env
-# CMK in infra/alicloud/modules/core/kms.tf.
+# match the AWS-side default. The per-env CMK
+# (infra/alicloud/modules/core/kms.tf) encrypts the OOS Parameter
+# Store parameters, not these buckets.
 resource "alicloud_oss_bucket_server_side_encryption" "agent_logs" {
   bucket        = alicloud_oss_bucket.agent_logs.bucket
   sse_algorithm = "AES256"

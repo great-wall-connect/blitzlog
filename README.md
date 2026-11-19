@@ -244,20 +244,20 @@ infra/
 │   │       ├── oss.tf                # data sources — buckets owned by alicloud/bootstrap
 │   │       ├── mns.tf                # alicloud_mns_queue (SQS analogue)
 │   │       ├── kms.tf                # CMK
-│   │       ├── secrets.tf            # alicloud_kms_secret (SSM analogue)
+│   │       ├── secrets.tf            # alicloud_oos_secret_parameter (SSM analogue)
 │   │       └── locals.tf
 │   ├── prod/                   # prod wrapper, alicloud-shaped
 │   │   ├── main.tf
 │   │   ├── variables.tf
 │   │   ├── outputs.tf
 │   │   ├── prod-backend.hcl.example  # `oss` backend
-│   │   └── alicloud.tfvars.example
+│   │   └── terraform.tfvars.example
 │   └── dev/                    # dev wrapper, alicloud-shaped
 │       ├── main.tf
 │       ├── variables.tf
 │       ├── outputs.tf
 │       ├── dev-backend.hcl.example
-│       └── alicloud.tfvars.example
+│       └── terraform.tfvars.example
 └── user-pool/                  # per-user Telegram bot pool + per-user local LLM config.
                                # Each user runs this LOCALLY (no shared S3 backend).
                                # Params land under /blitzlog/users/<login>/... — shared
@@ -342,10 +342,9 @@ picks the tree based on the `BLITZLOG_PROVIDER` repo variable
 | `vars.BLITZLOG_PROVIDER` | Per-env stack | Backend | Per-provider tfvars |
 |---|---|---|---|
 | `aws` (default) | `infra/aws/{dev,prod}/` | `s3` (ap-east-1) | `aws.tfvars` |
-| `alicloud` | `infra/alicloud/{dev,prod}/` | `oss` (cn-hangzhou) | `alicloud.tfvars` |
+| `alicloud` | `infra/alicloud/{dev,prod}/` | `oss` (cn-hongkong) | `terraform.tfvars` |
 
-The `terraform init` step switches backends, the `terraform plan`
-step passes the per-provider tfvars file, and the Lambda's
+The `terraform init` step switches backends, and the Lambda's
 `BLITZLOG_PROVIDER` env var is set by Terraform from the chosen
 module. The `BLITZLOG_PROVIDER=alicloud` path is a **runtime path
 only** for now: the Packer AMI build is AWS-only (Phase 5 adds
@@ -361,7 +360,7 @@ The Alicloud user-data installs `ossutil` + `aliyun` CLI on first
 boot (the Packer image is still AWS-only) and inlines a
 `blitzlog_oss_*` bash library (parallel to the AWS-side
 `blitzlog_s3_*`). The Aliyun IMDS at 100.100.100.200 replaces
-AWS IMDSv2; `aliyun kms GetSecretValue` replaces
+AWS IMDSv2; `aliyun oos GetSecretParameter` replaces
 `aws ssm get-parameter`. The bucket env-var names are
 `OSS_LOGS_BUCKET` / `OSS_LOG_PREFIX` (vs the AWS-side
 `S3_*` prefix). The runtime half of the dispatch is the
@@ -375,10 +374,17 @@ terraform init -backend-config=bootstrap-backend.hcl
 terraform apply
 
 cd ../dev
-cp alicloud.tfvars.example alicloud.tfvars  # fill in your values
+cp terraform.tfvars.example terraform.tfvars  # fill in your values
 terraform init -backend-config=dev-backend.hcl
-terraform plan -var-file=alicloud.tfvars
+terraform plan   # Terraform auto-loads terraform.tfvars
 terraform apply
+```
+
+The webhook URL is an output — point the GitHub App at it:
+
+```bash
+cd infra/alicloud/dev && terraform output webhook_url
+# https://<api-gateway-group>.cn-hongkong.alicloudapi.com/
 ```
 
 The Lambda-side provider factory (`lambda/provider/__init__.py`)

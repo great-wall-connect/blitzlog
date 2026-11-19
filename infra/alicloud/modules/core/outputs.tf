@@ -6,8 +6,8 @@
 # produced the value — they read by output name).
 
 output "webhook_url" {
-  description = "Webhook URL for GitHub configuration. The Aliyun-side URL is published via API Gateway; for now this returns the API id, since the actual invocation URL is provisioned by the operator (see apigateway.tf)."
-  value       = alicloud_api_gateway_api.webhook.id
+  description = "Webhook URL for GitHub configuration. On Alicloud the API Gateway serves the webhook from the group's domain: the URL is the group's `sub_domain` (assigned by API Gateway) plus the API's request path. The stage is selected by the `X-Ca-Stage` header, which GitHub cannot send — the default stage (RELEASE, the one `stage_names` deploys to) is used."
+  value       = "https://${alicloud_api_gateway_group.webhook.sub_domain}${local.webhook_api_path}"
 }
 
 output "lambda_function_name" {
@@ -55,7 +55,7 @@ output "environment" {
   value       = var.environment
 }
 
-output "ssm_root" {
-  description = "Root KMS namespace for this environment (everything per-env lives under this path). AWS analogue: ssm_root."
-  value       = local.ssm_root
+output "oos_root" {
+  description = "Root namespace for this environment's OOS parameters (everything per-env lives under this path). AWS analogue: ssm_root."
+  value       = local.oos_root
 }

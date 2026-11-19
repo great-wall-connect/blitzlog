@@ -13,7 +13,7 @@ locals {
 
 variable "environment" {
   type        = string
-  description = "Environment name (prod / dev). Tags the image and writes to KMS."
+  description = "Environment name (prod / dev). Tags the image and writes to the OOS Parameter Store."
 }
 
 variable "agent_image_tag" {
@@ -35,7 +35,7 @@ variable "stt_models_bucket" {
 
 variable "alicloud_region" {
   type        = string
-  description = "Aliyun region to build in. The image is published to this region's KMS Secrets Manager. Defaults to cn-hongkong — the region the blitzlog Alicloud account's OSS buckets live in."
+  description = "Aliyun region to build in. The image is published to this region's OOS Parameter Store. Defaults to cn-hongkong — the region the blitzlog Alicloud account's OSS buckets live in."
   default     = "cn-hongkong"
 }
 
@@ -157,11 +157,12 @@ build {
     script = "${path.root}/scripts-ecs-ubuntu/02-systemd.sh"
   }
 
-  # 4. Publish the image id to KMS. Two-step post-processor:
+  # 4. Publish the image id to the OOS Parameter Store. Two-step
+  #    post-processor:
   #    a. The `manifest` post-processor writes the build manifest to
   #       manifest.json (in the working dir) AFTER the image is created.
   #    b. The `shell-local` post-processor reads manifest.json and
-  #       publishes the actual new image id to KMS.
+  #       publishes the actual new image id to OOS.
   # Replaces the old 04-publish.sh provisioner (which ran on the
   # source ECS BEFORE the image existed and accidentally published the
   # source instance's base image id).

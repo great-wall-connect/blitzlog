@@ -35,9 +35,11 @@
 # exact key — see ram.tf.
 
 data "archive_file" "function_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/build"
-  output_path = "${path.module}/function.zip"
+  type       = "zip"
+  source_dir = "${path.module}/build"
+  # Named like the AWS side's archive (`lambda_function.zip`) so the
+  # one .gitignore rule covers both per-cloud build artifacts.
+  output_path = "${path.module}/lambda_function.zip"
 
   depends_on = [null_resource.lambda_build]
 }
@@ -80,12 +82,25 @@ resource "null_resource" "lambda_build" {
       # The function runtime is python3.12 (see `runtime = "python3.12"` below).
       # The build MUST use the same version — otherwise C extensions
       # (e.g., cryptography's `_cffi_backend.cpython-312-*.so`) link against
-      # the wrong Python ABI and fail to import at function runtime. Resolve
-      # Python 3.12 from the first source we find (mirrors the AWS-side
-      # local-exec in infra/aws/modules/core/lambda.tf).
-      PYTHON_BIN="$(command -v python3.12 || true)"
-      if [ -z "$PYTHON_BIN" ] && [ -d "$HOME/.local/share/mise/installs/python" ]; then
+      # the wrong Python ABI and fail to import at function runtime.
+      #
+      # Python-resolution ladder: the project pins python = "3.12" in
+      # mise.toml, so the canonical interpreter is whatever mise
+      # installed at ~/.local/share/mise/installs/python/3.12.*. Prefer
+      # it over `command -v python3.12` because PATH is fragile — a bare
+      # `uv python install 3.12` (which produces a python without
+      # `ensurepip._bundled` AND whose venvs resolve their stdlib to
+      # `/install`) will shadow the mise interpreter and break the
+      # build. Order:
+      #   1. mise-managed python 3.12 (project canonical pin).
+      #   2. system python3.12 (apt install python3.12 — last resort).
+      #   3. fail loudly.
+      PYTHON_BIN=""
+      if [ -d "$HOME/.local/share/mise/installs/python" ]; then
         PYTHON_BIN="$(ls -d "$HOME/.local/share/mise/installs/python"/3.12.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+      fi
+      if [ -z "$PYTHON_BIN" ]; then
+        PYTHON_BIN="$(command -v python3.12 || true)"
       fi
       if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
         echo "FATAL: Python 3.12 not found. Install via 'apt install python3.12' or 'mise install'." >&2
@@ -103,7 +118,13 @@ resource "null_resource" "lambda_build" {
       mkdir -p ${path.module}/build/lambda/packages/whisper-stt-shim
       cp ${path.module}/../../../../packages/whisper-stt-shim/server.py \
          ${path.module}/build/lambda/packages/whisper-stt-shim/
-      "$PYTHON_BIN" -m venv ${path.module}/.build-venv
+      # `--without-pip` skips ensurepip (which fails on bare pythons
+      # that don't ship the bundled wheel — the Debian/Ubuntu
+      # python3.12 packages do not), then get-pip.py bootstraps pip
+      # from PyPI regardless of the interpreter's ensurepip state.
+      # Mirrors the AWS-side local-exec in
+      # infra/aws/modules/core/lambda.tf.
+      "$PYTHON_BIN" -m venv --without-pip ${path.module}/.build-venv
       curl -sS https://bootstrap.pypa.io/get-pip.py | ${path.module}/.build-venv/bin/python3
       ${path.module}/.build-venv/bin/pip install --no-cache-dir -r ${path.module}/../../../../lambda/${var.lambda_requirements} -t ${path.module}/build/
       rm -rf ${path.module}/.build-venv
@@ -140,7 +161,7 @@ resource "alicloud_oss_bucket_object" "fc_code" {
 # OpenCode APIs). The ECS instance-side networking is owned by
 # ecs.tf.
 resource "alicloud_fcv3_function" "handler" {
-  function_name   = "blitzlog-${var.environment}-handler"
+  function_name   = local.fc_function_name
   description     = "Blitzlog webhook handler (env: ${var.environment})"
   runtime         = "python3.12"
   handler         = "lambda.handler.lambda_handler"
@@ -191,6 +212,20 @@ resource "alicloud_fcv3_function" "handler" {
     # documented; the Alicloud path has no token-refresh chain in
     # this PR.
     GITHUB_TOKEN_LIFETIME_HOURS = tostring(var.github_token_lifetime_hours)
+    # The region every Alicloud SDK client needs. `lambda/_env.py`'s
+    # `_aliyun_region()` reads ALIYUN_REGION (the provider's client
+    # shims derive their endpoints from it), and the Alibaba SDKs
+    # themselves read ALIBABA_CLOUD_REGION. Without it the first
+    # store read dies with "RegionId is empty, please set a valid
+    # RegionId" — the Function Compute runtime does not export a
+    # region the way the Lambda runtime exports AWS_REGION.
+    ALIYUN_REGION        = var.alicloud_region
+    ALIBABA_CLOUD_REGION = var.alicloud_region
+    # The CMK that encrypts the OOS parameters. The function creates
+    # one parameter itself — the per-issue ephemeral GitHub token —
+    # so it needs the key id at runtime (lambda/_env.py's
+    # `_aliyun_kms_key_id()`).
+    ALIYUN_KMS_KEY_ID = alicloud_kms_key.secrets.id
   }
 
   depends_on = [

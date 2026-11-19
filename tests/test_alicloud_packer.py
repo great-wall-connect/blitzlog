@@ -20,7 +20,7 @@ difference set so the two trees cannot drift apart silently:
   * the bucket env-var names (`S3_LOGS_BUCKET` vs `OSS_LOGS_BUCKET`),
   * the metadata endpoint (IMDSv2 at 169.254.169.254 vs the Aliyun
     metadata service at 100.100.100.200),
-  * the secret backend (`aws ssm` vs `aliyun kms`),
+  * the secret backend (`aws ssm` vs `aliyun oos`),
   * the instance teardown (`aws ec2 terminate-instances` vs
     `aliyun ecs DeleteInstances`),
   * the metadata egress block (the AWS watchdog blocks 169.254.169.254;
@@ -32,7 +32,7 @@ start. A boundary that was not in force looked exactly like one that
 was, and the gap went unnoticed for a release cycle.
 
 Finally they pin the agent-image-id contract: the Alicloud Packer
-publishes the image id to KMS Secrets Manager at
+publishes the image id to the OOS Parameter Store at
 /blitzlog/<env>/agent-ami-id-ecs-ubuntu (the Alicloud `SecretStore`
 implementation), and the compute provider reads it from there. If the
 two sides disagree on the suffix, the Alicloud path silently falls
@@ -295,11 +295,12 @@ class TestAlicloudWatchdogUsesOssNotS3(unittest.TestCase):
             "AWS's X-aws-ec2-metadata-token",
         )
 
-    def test_secret_read_uses_kms(self):
+    def test_secret_read_uses_oos(self):
         self.assertIn(
-            "aliyun kms GetSecretValue",
+            "aliyun oos GetSecretParameter",
             self.watchdog,
-            "the Alicloud watchdog reads secrets from KMS, not SSM",
+            "the Alicloud watchdog reads parameters from the OOS Parameter "
+            "Store, not SSM",
         )
 
     def test_terminate_uses_the_ecs_api(self):
@@ -523,7 +524,8 @@ class TestAlicloudSystemAndSystemdScripts(unittest.TestCase):
 
 class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
     """03-bake-images.sh bakes the agent image + whisper model;
-    05-publish-ami-id.sh publishes the image id to KMS."""
+    05-publish-ami-id.sh publishes the image id to the OOS
+    Parameter Store."""
 
     @classmethod
     def setUpClass(cls):
@@ -545,12 +547,12 @@ class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
         self.assertIn("blitzlog_oss_get", self.bake)
         self.assertIn("/opt/whisper-stt/models", self.bake)
 
-    def test_publish_writes_to_kms(self):
-        """The Alicloud `SecretStore` is KMS Secrets Manager, so the
-        image id must be published there — not to SSM (invisible to
-        the Alicloud path) and not to Parameter Store."""
-        self.assertIn("aliyun kms CreateSecret", self.publish)
-        self.assertIn("aliyun kms PutSecretValue", self.publish)
+    def test_publish_writes_to_oos(self):
+        """The Alicloud `SecretStore` is the OOS Parameter Store, so
+        the image id must be published there — not to SSM (invisible
+        to the Alicloud path)."""
+        self.assertIn("aliyun oos CreateSecretParameter", self.publish)
+        self.assertIn("aliyun oos UpdateSecretParameter", self.publish)
 
     def test_publish_uses_the_aliyun_parameter_path(self):
         self.assertIn(
@@ -559,7 +561,17 @@ class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
             "the published secret name must match the suffix the "
             "AlicloudCompute provider reads",
         )
-        self.assertIn("/blitzlog/${BLITZLOG_ENV}", self.publish)
+        # OOS parameter names carry NO leading slash — the RAM ARN
+        # (`acs:oos:<region>:<account>:secretparameter/<name>`)
+        # would otherwise double it and the grant would stop
+        # matching. The AWS-side SSM path does have the slash, so the
+        # two clouds differ here.
+        self.assertIn('PARAM="blitzlog/${BLITZLOG_ENV}', self.publish)
+        self.assertNotIn(
+            'PARAM="/blitzlog/${BLITZLOG_ENV}',
+            self.publish,
+            "the OOS parameter name must not carry a leading slash",
+        )
 
     def test_publish_does_not_write_to_ssm(self):
         self.assertNotIn(
@@ -589,7 +601,7 @@ class TestAlicloudImageIdContractIsConsistent(unittest.TestCase):
 
     def test_the_two_clouds_use_different_suffixes(self):
         """The AWS suffix would point at an SSM parameter the
-        KMS-backed Alicloud store cannot read, and vice versa."""
+        OOS-backed Alicloud store cannot read, and vice versa."""
         aws_provider = _read(os.path.join(REPO_ROOT, "lambda/provider/aws.py"))
         alicloud_provider = _read(
             os.path.join(REPO_ROOT, "lambda/provider/alicloud.py")

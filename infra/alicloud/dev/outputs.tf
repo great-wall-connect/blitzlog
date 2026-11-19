@@ -33,7 +33,7 @@ output "stt_models_bucket" {
   value       = module.core.stt_models_bucket
 }
 
-output "ssm_root" {
-  description = "dev KMS root (everything dev lives under this path)"
-  value       = module.core.ssm_root
+output "oos_root" {
+  description = "dev OOS parameter root (everything dev lives under this path)"
+  value       = module.core.oos_root
 }

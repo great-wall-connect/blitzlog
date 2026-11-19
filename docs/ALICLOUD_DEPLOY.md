@@ -6,8 +6,20 @@ the second cloud blitzlog supports.
 The Alicloud tree is `infra/alicloud/{bootstrap,dev,prod,modules/core}/`.
 It mirrors the AWS tree one-for-one, with the same resource names and
 the same `/blitzlog/<env>/...` secret paths (the Alicloud `SecretStore`
-implementation is KMS Secrets Manager, and the paths are byte-for-byte
-identical to the AWS SSM paths).
+implementation is the **Aliyun OOS Parameter Store**, and the paths
+mirror the AWS SSM paths minus the leading slash — OOS names its
+parameters `blitzlog/<env>/...`).
+
+> **Why OOS and not KMS Secrets Manager.** On KMS 3.0 a secret can
+> only be created inside a dedicated KMS instance: `CreateSecret`
+> without a `DKMSInstanceId` is rejected with `UnsupportedOperation`
+> ("This action is not supported"), and a KMS instance is a billable
+> resource (USD 500/month subscription, USD 4.50/day pay-as-you-go,
+> plus a secret-quota pack). The OOS Parameter Store is free, needs
+> no KMS instance, and its API maps 1:1 onto the `SecretStore`
+> interface. The per-env CMK (`modules/core/kms.tf`) is still
+> created — it encrypts the parameters, and a KMS *default master
+> key* is free of charge.
 
 **The Alicloud deploy is opt-in.** `vars.BLITZLOG_PROVIDER=alicloud`
 alone does not apply anything — `vars.ENABLE_ALICLOUD_DEPLOY=true` is
@@ -55,7 +67,24 @@ gh variable set ALICLOUD_ACCOUNT_ID --body <account-id>
 
 Every Alicloud role ARN in the workflows is built from it.
 
-### 1c. The agent network ids (after the first bootstrap apply)
+### 1c. The MNS / Simple Message Queue service
+
+The function's dead-letter queue lives in MNS (rebranded *Simple
+Message Queue* on the international site). The bootstrap stack creates
+the **subscription** for it (`services.tf`), but the service itself is
+opened from the console — the subscription order does not flip the
+service flag on the international site, so `CreateQueue` keeps
+failing with `ServiceNotEnable` ("Service not open") until you do:
+
+1. Open the MNS / SMQ console for the account
+   (<https://mns.console.aliyun.com/> on the China site,
+   <https://mns.console.alibabacloud.com/> on the international
+   site).
+2. Click **开通** (activate) for the region (`cn-hongkong`).
+
+Activating the service is free. It cannot be closed again.
+
+### 1d. The agent network ids (after the first bootstrap apply)
 
 The CI plan needs the shared VPC + VSwitches, and CI has no tfvars
 file — so they come from repo variables:
@@ -76,9 +105,23 @@ cd infra/alicloud/bootstrap && terraform output vswitch_ids
 
 ## 2. Bootstrap
 
-Creates the shared OSS buckets (agent-logs, STT models), the KMS CMK,
-the two CI roles (the Packer build role and the deploy role), and the
-**shared agent VPC + VSwitches** (`network.tf`).
+Creates the shared OSS buckets (agent-logs, STT models), the two CI
+roles (the Packer build role and the deploy role), and the **shared
+agent VPC + VSwitches** (`network.tf`). The per-env KMS CMK lives in
+the per-env stack (`modules/core/kms.tf`).
+
+It also **opens two account-level services** (`services.tf`), which
+the per-env stacks need before they can create anything:
+
+| Service | Why | Failure without it |
+|---|---|---|
+| API Gateway | the webhook group / API / app live in it | `ServiceUnOpen` — "Your Gateway service has not been opened." Run the bootstrap apply (`infra/alicloud/bootstrap`) — it opens it (`services.tf`). |
+| MNS | the function's dead-letter queue lives in it | `ServiceNotEnable` — "Service not open". The bootstrap apply creates the *subscription*, but the service is opened from the MNS console — see §1c. |
+
+Both are free and one-way (a service cannot be closed once opened),
+and opening them means agreeing to the product's Terms of Service —
+which is why it happens in this operator-run stack and not in the CI
+deploy path.
 
 ```bash
 cd infra/alicloud/bootstrap
@@ -125,7 +168,7 @@ The profile name must match the `profile` key in the backend config.
 
 ```bash
 cd infra/alicloud/dev
-cp alicloud.tfvars.example alicloud.tfvars   # gitignored
+cp terraform.tfvars.example terraform.tfvars   # gitignored
 # fill in the GitHub App credentials, the API key, the bucket names
 terraform init -backend-config=dev-backend.hcl
 terraform apply
@@ -138,16 +181,46 @@ terraform apply
 cp dev-backend.hcl.example dev-backend.hcl
 ```
 
-The apply creates the KMS secrets (GitHub App id / private key /
+The apply creates the OOS parameters (GitHub App id / private key /
 installation id, webhook secret, OpenCode key, STT config) with
 placeholder values. Set the real values afterwards:
 
 ```bash
-aliyun kms PutSecretValue \
-  --SecretName /blitzlog/dev/github-app/private-key \
-  --SecretData "$(cat private-key.pem)" \
+aliyun oos UpdateSecretParameter \
+  --Name blitzlog/dev/github-app/private-key \
+  --Value "$(cat private-key.pem)" \
   --region cn-hongkong
 ```
+
+The parameter names carry no leading slash — that is how OOS names
+them, and the RAM grants in `infra/alicloud/modules/core/ram.tf`
+spell the ARNs as `acs:oos:<region>:<account>:secretparameter/<name>`.
+
+### The webhook URL
+
+The stack publishes the URL the GitHub App POSTs to as the
+`webhook_url` output:
+
+```bash
+cd infra/alicloud/dev && terraform output webhook_url
+# https://<api-gateway-group>.cn-hongkong.alicloudapi.com/
+```
+
+Three details of the Alicloud webhook path, each of which cost a
+debugging round trip:
+
+- The API is **anonymous** (`auth_type = "ANONYMOUS"`). GitHub
+  cannot present API Gateway app credentials, and the `APP` default
+  answers every request with "Header `X-Ca-Key` is Required". The
+  authentication that matters is the GitHub signature the function
+  verifies itself.
+- The API is **deployed to the RELEASE stage** (`stage_names`). An
+  API that is not deployed to a stage has no route and the group's
+  domain answers 404.
+- The function has an **HTTP trigger**, and the API's FC backend is
+  the `HttpTrigger` kind. The `FCEvent` backend hands the function
+  the bare body and drops the headers — the `X-Hub-Signature-256`
+  would never arrive, so the signature check could not pass.
 
 ### The agent network
 
@@ -186,22 +259,23 @@ message rather than an ECS launch error at runtime.
 > Check yours with `aliyun vpc DescribeZones --RegionId <region>` and
 > override `vswitch_zone_ids` in the bootstrap if they differ.
 
-The secret names mirror the AWS SSM paths:
+The parameter names mirror the AWS SSM paths (without the leading
+slash):
 
-| KMS secret | TF variable |
+| OOS parameter | TF variable |
 |---|---|
-| `/blitzlog/<env>/github-app/id` | `github_app_id` |
-| `/blitzlog/<env>/github-app/private-key` | `github_app_private_key` |
-| `/blitzlog/<env>/github-app/installation-id` | `github_app_installation_id` |
-| `/blitzlog/<env>/github-webhook/secret` | `github_webhook_secret` |
-| `/blitzlog/<env>/opencode/api-key` | `opencode_api_key` |
-| `/blitzlog/<env>/stt/api-key` | `stt_api_key` |
-| `/blitzlog/<env>/stt/model` | `stt_model` |
-| `/blitzlog/<env>/stt/language` | `stt_language` |
-| `/blitzlog/<env>/stt/models-bucket` | `stt_models_bucket_name` |
+| `blitzlog/<env>/github-app/id` | `github_app_id` |
+| `blitzlog/<env>/github-app/private-key` | `github_app_private_key` |
+| `blitzlog/<env>/github-app/installation-id` | `github_app_installation_id` |
+| `blitzlog/<env>/github-webhook/secret` | `github_webhook_secret` |
+| `blitzlog/<env>/opencode/api-key` | `opencode_api_key` |
+| `blitzlog/<env>/stt/api-key` | `stt_api_key` |
+| `blitzlog/<env>/stt/model` | `stt_model` |
+| `blitzlog/<env>/stt/language` | `stt_language` |
+| `blitzlog/<env>/stt/models-bucket` | `stt_models_bucket_name` |
 
-CI reads these same secrets (the "Render TF_VAR_* env from KMS" step),
-so there is no second copy of a secret anywhere.
+CI reads these same parameters (the "Render TF_VAR_* env from OOS"
+step), so there is no second copy of a secret anywhere.
 
 ---
 
@@ -242,7 +316,7 @@ Then dispatch `release.yml` on the target ref. The deploy job:
    and `ALICLOUD_*` (backend) names — the backend resolves its
    credentials before the provider is configured, so it needs its own
    names,
-3. renders the `TF_VAR_*` values from KMS,
+3. renders the `TF_VAR_*` values from the OOS Parameter Store,
 4. builds the FC bundle into `infra/alicloud/modules/core/build` with
    `requirements-alicloud.txt` (the alibaba SDKs do **not** ship to
    AWS),

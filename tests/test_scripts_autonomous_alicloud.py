@@ -10,7 +10,7 @@ in five cloud-specific ways:
   2. **Inline `blitzlog_oss_*` library**: parallel to the AWS-side
      `blitzlog_s3_*` from
      `infra/aws/packer/scripts-docker-ubuntu/blitzlog_uploader.sh`.
-  3. **KMS read via `aliyun kms GetSecretValue`** instead of
+  3. **OOS read via `aliyun oos GetSecretParameter`** instead of
      `aws ssm get-parameter`. The secret paths are byte-for-byte
      identical.
   4. **Aliyun IMDS** at `100.100.100.200` (not AWS's `169.254.169.254`).
@@ -56,23 +56,76 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
             "Alibaba CDN URL for ossutil must be present in the user-data",
         )
         self.assertIn(
-            "chmod +x ossutil64",
+            "ossutil-linux-${OSSUTIL_ARCH}.zip",
             ud,
-            "ossutil64 must be made executable before being moved to PATH",
+            "the per-architecture ossutil archive must be downloaded",
         )
         self.assertIn(
-            "mv ossutil64 /usr/local/bin/ossutil",
+            "chmod +x /usr/local/bin/ossutil",
+            ud,
+            "ossutil must be made executable before being moved to PATH",
+        )
+        self.assertIn(
+            "/usr/local/bin/ossutil",
             ud,
             "ossutil must be moved onto PATH",
         )
 
-    def test_aliyun_cli_install_block_present(self):
-        """The CLI install block must curl the aliyun CLI for KMS read."""
+    def test_ossutil_install_block_is_arch_aware(self):
+        """The install must pick the ossutil build matching the
+        instance's architecture — the agent image is ARM64, and the
+        standalone ossutil binaries are per-arch.
+
+        The 2.x binaries are published as per-arch zips whose
+        version is read from the upstream version file, so the
+        install cannot hardcode either the version or the arch.
+        """
         ud = self._render()
         self.assertIn(
-            "https://aliyuncli.alicdn.com/aliyun-cli-linux",
+            'case "$(uname -m)" in',
             ud,
-            "Aliyun CLI must be downloaded from the Alibaba CDN for KMS read",
+            "the ossutil install must select the archive by architecture",
+        )
+        self.assertIn(
+            "ossutil-linux-${OSSUTIL_ARCH}.zip",
+            ud,
+            "the downloaded archive name must carry the resolved arch",
+        )
+        self.assertIn(
+            "ossutil/v2/version.txt",
+            ud,
+            "the ossutil version must be resolved from the upstream "
+            "version file rather than hardcoded",
+        )
+
+    def test_ossutil_auth_uses_ecs_ram_role_and_region(self):
+        """ossutil v2 signs with SigV4 and needs the region as its
+        own parameter, and it does not read the ALIBABA_CLOUD_*
+        variables the Alicloud SDKs use. On an ECS instance the
+        credentials come from the instance's RAM role, so the
+        invocations must pass OSS_REGION and --mode EcsRamRole.
+        """
+        ud = self._render()
+        self.assertIn(
+            "OSS_REGION=",
+            ud,
+            "ossutil must be given the region — SigV4 rejects the "
+            "request without it",
+        )
+        self.assertIn(
+            "--mode EcsRamRole",
+            ud,
+            "ossutil must read the instance RAM role from the metadata " "service",
+        )
+
+    def test_aliyun_cli_install_block_present(self):
+        """The CLI install block must curl the aliyun CLI for the OOS read."""
+        ud = self._render()
+        self.assertIn(
+            "https://aliyuncli.alicdn.com/${CLI_TGZ}",
+            ud,
+            "Aliyun CLI must be downloaded from the Alibaba CDN for the "
+            "OOS parameter read",
         )
         self.assertIn(
             "mv aliyun /usr/local/bin/aliyun",
@@ -104,13 +157,20 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
         (it's the OSS analogue of `aws s3`).
         """
         ud = self._render()
-        # The library uses `ossutil cp` / `ossutil ls` / `ossutil rm`.
-        for verb in ("ossutil cp", "ossutil ls", "ossutil rm"):
+        # The library routes every verb through `_bl_oss_run`, which
+        # is what adds the region + RAM-role arguments ossutil needs.
+        for verb in ("cp", "ls", "rm"):
             self.assertIn(
-                verb,
+                f"_bl_oss_run {verb} ",
                 ud,
-                f"Inline library must call `{verb}` (OSS analogue of `aws s3`)",
+                f"Inline library must call `ossutil {verb}` (OSS analogue "
+                "of `aws s3`)",
             )
+        self.assertIn(
+            "ossutil --mode EcsRamRole",
+            ud,
+            "the inline library must invoke ossutil in RAM-role mode",
+        )
 
     def test_aliyun_imds_endpoint(self):
         """The user-data must query the Aliyun metadata server at
@@ -134,16 +194,22 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
             "AWS IMDS endpoint must not appear on the Alicloud path",
         )
 
-    def test_kms_get_secret_value_present(self):
-        """The user-data must use `aliyun kms GetSecretValue` for
-        secret fetching (the KMS analogue of `aws ssm get-parameter`).
+    def test_oos_get_secret_parameter_present(self):
+        """The user-data must use `aliyun oos GetSecretParameter` for
+        parameter fetching (the OOS analogue of `aws ssm
+        get-parameter`).
         """
         ud = self._render()
         # The literal API call shape.
         self.assertIn(
-            "aliyun kms GetSecretValue",
+            "aliyun oos GetSecretParameter",
             ud,
-            "`aliyun kms GetSecretValue` must be used for secret fetching",
+            "`aliyun oos GetSecretParameter` must be used for parameter " "fetching",
+        )
+        self.assertIn(
+            "--WithDecryption true",
+            ud,
+            "the OOS read must ask for the decrypted value",
         )
         # And the AWS SSM API must NOT be present.
         self.assertNotIn(
@@ -196,10 +262,11 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
             "OSS_LOGS_BUCKET must be passed through to /etc/blitzlog.env",
         )
 
-    def test_secret_paths_byte_identical_to_aws(self):
-        """The KMS secret paths are byte-for-byte identical to the
-        AWS SSM paths (`/blitzlog/<env>/<service>/<name>`). This
-        guarantees the FC-side RAM grant in
+    def test_secret_paths_mirror_the_aws_paths(self):
+        """The OOS parameter paths mirror the AWS SSM paths
+        (`blitzlog/<env>/<service>/<name>` — the same paths without
+        the leading slash, which is how OOS names its parameters).
+        This guarantees the FC-side RAM grant in
         `infra/alicloud/modules/core/ram.tf` is the only ACL the
         host needs.
 
@@ -215,18 +282,18 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
         # We assert the structural shape with a flexible regex.
         self.assertRegex(
             ud,
-            r"/blitzlog/(prod|dev)/ephemeral/gh/[^/]+/126",
+            r"blitzlog/(prod|dev)/ephemeral/gh/[^/]+/126",
             "Per-issue GitHub token path must match the AWS-side SSM path",
         )
         # The OPENCODE_API_KEY.
         self.assertIn(
-            "/blitzlog/prod/opencode/api-key",
+            "blitzlog/prod/opencode/api-key",
             ud,
             "OPENCODE_API_KEY secret path must match the AWS-side SSM path",
         )
         # The STT_*
         self.assertIn(
-            "/blitzlog/prod/stt/api-url",
+            "blitzlog/prod/stt/api-url",
             ud,
             "STT_API_URL secret path must match the AWS-side SSM path",
         )
@@ -253,13 +320,13 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
             "STT_MODEL",
             env_export_line.group(0),
             "Env-export preamble must not reference $STT_MODEL (set "
-            "by _read_secrets_from_kms_script, AFTER $REGION)",
+            "by _read_secrets_from_oos_script, AFTER $REGION)",
         )
         self.assertNotIn(
             "STT_MODELS_BUCKET",
             env_export_line.group(0),
             "Env-export preamble must not reference $STT_MODELS_BUCKET "
-            "(set by _read_secrets_from_kms_script, AFTER $REGION)",
+            "(set by _read_secrets_from_oos_script, AFTER $REGION)",
         )
 
 

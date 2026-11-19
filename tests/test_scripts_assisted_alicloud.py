@@ -46,11 +46,44 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
             "Alibaba CDN URL for ossutil must be present",
         )
 
+    def test_ossutil_install_block_is_arch_aware(self):
+        """The install must pick the ossutil build matching the
+        instance's architecture — the agent image is ARM64, and the
+        standalone ossutil binaries are per-arch.
+        """
+        ud = self._render()
+        self.assertIn(
+            'case "$(uname -m)" in',
+            ud,
+            "the ossutil install must select the archive by architecture",
+        )
+        self.assertIn(
+            "ossutil-linux-${OSSUTIL_ARCH}.zip",
+            ud,
+            "the downloaded archive name must carry the resolved arch",
+        )
+
+    def test_aliyun_cli_install_block_is_arch_aware(self):
+        """The aliyun CLI is also per-arch, and Aliyun publishes no
+        versioned arm64 tarball — only the floating `latest-arm64`.
+        """
+        ud = self._render()
+        self.assertIn(
+            "aliyun-cli-linux-latest-arm64.tgz",
+            ud,
+            "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
+        )
+        self.assertIn(
+            "aliyun-cli-linux-3.0.6-amd64.tgz",
+            ud,
+            "the amd64 aliyun CLI tarball must be selected on x86 hosts",
+        )
+
     def test_aliyun_cli_install_block_present(self):
         """aliyun CLI install for KMS read."""
         ud = self._render()
         self.assertIn(
-            "https://aliyuncli.alicdn.com/aliyun-cli-linux",
+            "https://aliyuncli.alicdn.com/${CLI_TGZ}",
             ud,
             "Aliyun CLI must be installed for KMS secret fetch",
         )
@@ -75,12 +108,19 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
     def test_oss_helper_wraps_ossutil(self):
         """The library must call `ossutil` under the hood."""
         ud = self._render()
-        for verb in ("ossutil cp", "ossutil ls", "ossutil rm"):
+        # The library routes every verb through `_bl_oss_run`, which
+        # is what adds the region + RAM-role arguments ossutil needs.
+        for verb in ("cp", "ls", "rm"):
             self.assertIn(
-                verb,
+                f"_bl_oss_run {verb} ",
                 ud,
-                f"Inline library must call `{verb}`",
+                f"Inline library must call `ossutil {verb}`",
             )
+        self.assertIn(
+            "ossutil --mode EcsRamRole",
+            ud,
+            "the inline library must invoke ossutil in RAM-role mode",
+        )
 
     def test_aliyun_imds_endpoint(self):
         """Aliyun IMDS at 100.100.100.200, not AWS's 169.254.169.254."""
@@ -89,10 +129,11 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
         self.assertIn("X-aliyun-ecs-metadata-token", ud)
         self.assertNotIn("169.254.169.254", ud)
 
-    def test_kms_get_secret_value_present(self):
-        """KMS read via `aliyun kms GetSecretValue` (not SSM)."""
+    def test_oos_get_secret_parameter_present(self):
+        """OOS read via `aliyun oos GetSecretParameter` (not SSM)."""
         ud = self._render()
-        self.assertIn("aliyun kms GetSecretValue", ud)
+        self.assertIn("aliyun oos GetSecretParameter", ud)
+        self.assertIn("--WithDecryption true", ud)
         self.assertNotIn("aws ssm get-parameter", ud)
 
     def test_oss_log_prefix_env_var(self):
@@ -184,17 +225,17 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
         # The github-app token path (per-issue ephemeral).
         self.assertRegex(
             ud,
-            r"/blitzlog/(prod|dev)/ephemeral/gh/[^/]+/126",
+            r"blitzlog/(prod|dev)/ephemeral/gh/[^/]+/126",
             "Per-issue GitHub token path must match the AWS-side SSM path",
         )
         # The OPENCODE_API_KEY.
         self.assertIn(
-            "/blitzlog/prod/opencode/api-key",
+            "blitzlog/prod/opencode/api-key",
             ud,
         )
         # The STT_*
         self.assertIn(
-            "/blitzlog/prod/stt/api-url",
+            "blitzlog/prod/stt/api-url",
             ud,
         )
 

@@ -652,20 +652,19 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
     def test_alicloud_dev_prod_terraform_tfvars_example_exists(self):
         """The per-env tfvars.example must exist for the operator to copy from.
 
-        The release workflow's `terraform plan` step requires
-        `<provider>.tfvars` to exist (it fails fast if not). The
-        operator copies the `.tfvars.example` to the actual tfvars
-        file. Same convention as the AWS path.
+        The operator copies `terraform.tfvars.example` to
+        `terraform.tfvars` — the name Terraform auto-loads from the
+        stack directory. Same convention as the AWS path.
         """
         for layer_dir, env in (
             (self.ALICLOUD_DEV, "dev"),
             (self.ALICLOUD_PROD, "prod"),
         ):
-            example = layer_dir / "alicloud.tfvars.example"
+            example = layer_dir / "terraform.tfvars.example"
             self.assertTrue(
                 example.exists(),
-                f"infra/alicloud/{env}/alicloud.tfvars.example must exist "
-                f"as the template the operator copies to alicloud.tfvars",
+                f"infra/alicloud/{env}/terraform.tfvars.example must exist "
+                f"as the template the operator copies to terraform.tfvars",
             )
 
     def test_alicloud_bootstrap_exists(self):
@@ -833,58 +832,40 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "repo variable — it reaches a real account",
         )
 
-    def test_aws_plan_uses_ssm_env_not_a_tfvars_file(self):
-        """The AWS plan must NOT require a `-var-file`.
+    def test_plan_uses_store_env_not_a_tfvars_file(self):
+        """Neither plan branch may require a `-var-file`.
 
-        Every AWS variable arrives as `TF_VAR_*` from the "Render TF_VAR_*
-        env from SSM" step, so the plan needs no tfvars file. And
-        `<provider>.tfvars` is gitignored (see .gitignore's `*.tfvars`), so
-        it can never exist in a fresh CI checkout.
+        Every variable arrives as `TF_VAR_*` from the "Render TF_VAR_*
+        env from SSM" (AWS) / "from OOS" (Alicloud) step, so the plan
+        needs no tfvars file. And `*.tfvars` is gitignored (see
+        .gitignore's `*.tfvars`), so it can never exist in a fresh CI
+        checkout.
 
         #126 made `-var-file` unconditional with a FATAL when absent, which
         failed the AWS deploy with "FATAL: aws.tfvars not found" on the
         first release run — even though SSM had already supplied every
-        variable. The AWS branch must call `terraform plan` bare, exactly
-        as the pre-#126 workflow did.
+        variable. The Alicloud branch grew the same shape in #125 and had
+        the same flaw. The plan step must call `terraform plan` bare on
+        both paths; an operator's local `terraform.tfvars` is auto-loaded
+        by Terraform from the stack directory.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
         body = text[deploy_idx:]
-
-        # The AWS branch must plan without -var-file.
-        self.assertRegex(
-            body,
-            r'if\s+\[\s*"\$\{BLITZLOG_PROVIDER\}"\s*=\s*"aws"\s*\];\s*then\s*\n\s*'
-            r"terraform plan -no-color -input=false -out=tfplan",
-            "the AWS branch of the plan step must run `terraform plan` with "
-            "no -var-file — the SSM render already supplied every variable",
-        )
-
-    def test_alicloud_plan_requires_its_tfvars_file(self):
-        """The Alicloud branch must still require `-var-file`.
-
-        There is no SSM-backed `TF_VAR_*` render for Alicloud yet (Phase 5),
-        so the operator's `alicloud.tfvars` is the source of config. Keeping
-        the FATAL there preserves that path's ergonomics without touching
-        the AWS one.
-        """
-        text = self.RELEASE_YML.read_text()
-        deploy_idx = text.find("deploy:\n")
-        body = text[deploy_idx:]
-        self.assertIn(
-            "${BLITZLOG_PROVIDER}.tfvars",
-            body,
-            "the plan step must still reference the per-provider tfvars file",
+        plan_match = re.search(r"(?ms)- name: terraform plan\b.*?(?=\n\s*-\s|\Z)", body)
+        self.assertIsNotNone(plan_match, "the deploy job must have a plan step")
+        plan_block = plan_match.group(0)
+        self.assertNotIn(
+            "-var-file=",
+            plan_block,
+            "the plan step must not pass a -var-file — in CI the file is "
+            "always missing (it is gitignored) and the values come from "
+            "the render steps",
         )
         self.assertIn(
-            '-var-file="${TFVARS_FILE}"',
-            body,
-            "the non-AWS branch must pass -var-file",
-        )
-        self.assertRegex(
-            body,
-            r"elif\s+\[\s*-f\s+\"\$\{TFVARS_FILE\}\"\s*\]",
-            "the non-AWS branch must test for the tfvars file before using it",
+            "terraform plan -no-color -input=false -out=tfplan",
+            plan_block,
+            "the plan step must run bare on both paths",
         )
 
     def test_release_workflow_picks_oss_backend_for_alicloud(self):

@@ -22,7 +22,7 @@ data "alicloud_oss_buckets" "agent_logs" {
 }
 
 data "alicloud_oss_buckets" "stt_models" {
-  name_regex = local.stt_models_bucket
+  name_regex = var.stt_models_bucket_name
 }
 
 # Construct the OSS bucket ARNs from the data-source names.

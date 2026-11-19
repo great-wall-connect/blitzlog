@@ -7,7 +7,7 @@ module-level code in that file. If a future change re-introduces
 an eager `from provider.alicloud import ...` (or anything
 similar) the AWS cold start will once again pay the import cost
 of `oss2` / `alibabacloud_ecs20140526` /
-`alibabacloud_kms20160120` / `alibabacloud_tea_openapi` /
+`alibabacloud_oos20190601` / `alibabacloud_tea_openapi` /
 `provider.azure`, blowing the 128 MB memory budget that the
 follow-up `memory_size = 512` bump in
 `infra/aws/modules/core/lambda.tf` is meant to absorb.
@@ -76,14 +76,14 @@ _COLD_START_SCRIPT = textwrap.dedent("""
     forbidden = [
         "oss2",
         "alibabacloud_ecs20140526",
-        "alibabacloud_kms20160120",
+        "alibabacloud_oos20190601",
         "alibabacloud_tea_openapi",
         "alibabacloud_tea",
         "provider.alicloud",
         "provider.azure",
     ]
     loaded = {m: (m in sys.modules) for m in forbidden}
-    loaded["provider._PROVIDERS.aws_only"] = list(provider._PROVIDERS.keys()) == ["aws"]
+    loaded["provider._PROVIDERS.empty"] = list(provider._PROVIDERS.keys()) == []
     print(json.dumps({"loaded": loaded, "provider": provider._PROVIDER_MODULES}))
     """)
 
@@ -126,14 +126,18 @@ class TestAwsColdStartImports(unittest.TestCase):
     def test_cold_start_does_not_import_alicloud_or_azure_modules(self):
         payload = _run_cold_start_subprocess()
         for module, loaded in payload["loaded"].items():
-            if module == "provider._PROVIDERS.aws_only":
-                # The AWS-only invariant: the eager `_PROVIDERS`
-                # dict is pre-populated with the `aws` entry
-                # only; alicloud / azure entries are added on
-                # first `get_*()` call.
+            if module == "provider._PROVIDERS.empty":
+                # No provider module is imported at import time —
+                # not even the AWS one. The factory used to import
+                # `provider.aws` eagerly (which imports boto3) and
+                # that made the Alicloud bundle unimportable: the
+                # handler died with `ModuleNotFoundError: No module
+                # named 'boto3'` and every invocation answered 502.
+                # The first `get_*()` call imports the configured
+                # provider and nothing else.
                 self.assertTrue(
                     loaded,
-                    f"_PROVIDERS should only have 'aws' after import; "
+                    f"_PROVIDERS should be empty after import; "
                     f"got {payload['loaded']}",
                 )
             else:
@@ -299,9 +303,10 @@ class TestAlicloudLazyImport(unittest.TestCase):
         """`reset_provider_singletons()` must drop the
         `alicloud` entry from `_PROVIDERS` so a test that
         flips `BLITZLOG_PROVIDER` between calls exercises a
-        clean re-import path. The `aws` entry stays — it is
-        the eagerly-loaded default and re-importing it
-        would be a no-op anyway.
+        clean re-import path. Every provider is dropped — the
+        `aws` entry is no longer pre-populated (the eager
+        `from provider.aws import ...` made the Alicloud bundle
+        unimportable), so the reset clears the whole cache.
         """
         os.environ["BLITZLOG_PROVIDER"] = "alicloud"
         provider.reset_provider_singletons()
@@ -320,7 +325,7 @@ class TestAlicloudLazyImport(unittest.TestCase):
         self.assertIn("alicloud", provider._PROVIDERS)
         provider.reset_provider_singletons()
         self.assertNotIn("alicloud", provider._PROVIDERS)
-        self.assertIn("aws", provider._PROVIDERS)
+        self.assertEqual(provider._PROVIDERS, {})
 
 
 if __name__ == "__main__":

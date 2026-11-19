@@ -10,10 +10,11 @@
 # WHERE IT IS PUBLISHED. On AWS this lands in SSM Parameter Store
 # (/blitzlog/<env>/agent-ami-id-docker-ubuntu) because SSM is the
 # AWS-side `SecretStore` implementation. On Alicloud the
-# `SecretStore` implementation is Aliyun KMS Secrets Manager
-# (lambda/provider/alicloud.py::AlicloudSecretStore), so the image id
-# is published as a KMS secret at the parallel path
-# /blitzlog/<env>/agent-ami-id-ecs-ubuntu.
+# `SecretStore` implementation is the Aliyun OOS Parameter Store
+# (lambda/provider/alicloud.py::AlicloudSecretStore), so the image
+# id is published as an OOS parameter at the parallel path
+# blitzlog/<env>/agent-ami-id-ecs-ubuntu (no leading slash — that
+# is how OOS names its parameters).
 #
 # That matters for the consumer: `lambda/ec2.py::get_agent_ami` reads
 # the id through `get_secrets()`, which dispatches on
@@ -21,11 +22,13 @@
 # Alicloud path — it would always fall back to the public Ubuntu
 # image, and the baked agent image would never be used.
 #
-# The secret is NOT encrypted-at-rest with a customer CMK (no
-# `encryption_key_id`): the image id is not a secret — it is an
-# identifier that the FC function reads on every launch. It is
-# published through the SecretStore purely because that is the
-# cross-cloud read/write abstraction the Lambda already has.
+# The parameter is NOT encrypted with our customer CMK (no
+# `--KeyId`): the image id is not a secret — it is an identifier
+# that the FC function reads on every launch. It is published
+# through the SecretStore purely because that is the cross-cloud
+# read/write abstraction the Lambda already has. OOS encrypts
+# every parameter it holds regardless; omitting `--KeyId` leaves
+# the choice to OOS's own key.
 #
 # Runs as a Packer shell-local post-processor on the LOCAL packer
 # runner (NOT on the source ECS instance). Packer does NOT set
@@ -60,24 +63,25 @@ if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ] || [ "$IMAGE_ID" = "" ]; then
     exit 1
 fi
 
-PARAM="/blitzlog/${BLITZLOG_ENV}/agent-ami-id-ecs-ubuntu"
+# No leading slash: OOS parameter names are `blitzlog/<env>/...`
+# (see infra/alicloud/modules/core/locals.tf).
+PARAM="blitzlog/${BLITZLOG_ENV}/agent-ami-id-ecs-ubuntu"
 
-# `aliyun kms CreateSecret` fails when the name is taken, so try
-# CreateSecret first and fall through to PutSecretValue (which adds a
-# new version) — the same shape as
-# lambda/provider/alicloud.py::AlicloudSecretStore.put.
-if aliyun kms CreateSecret \
-    --SecretName "$PARAM" \
-    --SecretData "$IMAGE_ID" \
-    --SecretDataType "text" \
+# `aliyun oos CreateSecretParameter` fails when the name is taken,
+# so try CreateSecretParameter first and fall through to
+# UpdateSecretParameter (which adds a new version) — the same shape
+# as lambda/provider/alicloud.py::AlicloudSecretStore.put.
+if aliyun oos CreateSecretParameter \
+    --Name "$PARAM" \
+    --Value "$IMAGE_ID" \
+    --Type "Secret" \
     --region "$ALICLOUD_REGION" \
     --output json >/dev/null 2>&1; then
     echo "Created $PARAM"
 else
-    aliyun kms PutSecretValue \
-        --SecretName "$PARAM" \
-        --SecretData "$IMAGE_ID" \
-        --SecretDataType "text" \
+    aliyun oos UpdateSecretParameter \
+        --Name "$PARAM" \
+        --Value "$IMAGE_ID" \
         --region "$ALICLOUD_REGION" \
         --output json >/dev/null
     echo "Updated $PARAM"

@@ -41,26 +41,40 @@ curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
 # Ubuntu 26.04 (resolute) — the same base the AWS AMI bakes on, so the
-# two trees stay comparable.
-echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu resolute stable" \
+# two trees stay comparable. The arch is taken from the running
+# machine rather than hardcoded: the build instance's type is chosen
+# by the caller (ARM64 for the arm64 agent image), and a mismatched
+# arch here makes `apt-get install docker-ce` pull the wrong package
+# set.
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu resolute stable" \
     | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io
 
 # The `aliyun` CLI — the Alicloud analogue of awscli. Used for:
-#   * `aliyun kms GetSecretValue` (host-side secret reads in the
+#   * `aliyun oos GetSecretParameter` (host-side secret reads in the
 #     user-data prologue)
 #   * `aliyun ecs DeleteInstances` (the watchdog's instance teardown)
 #   * `aliyun configure` (RAM role → credential chain)
 #
-# The version is pinned the same way the AWS side pins nothing (awscli
-# comes from apt). The tarball is the official one from Aliyun's CDN.
+# The build instance's arch follows the instance type the caller
+# chose, so the tarball is selected from `uname -m` rather than
+# assumed. Aliyun publishes no versioned arm64 tarball (only
+# `aliyun-cli-linux-latest-arm64.tgz`), so the arm64 branch uses the
+# floating "latest" name.
 if ! command -v aliyun >/dev/null 2>&1; then
     echo "Installing aliyun CLI..."
     cd /tmp
-    curl -fsSL -o aliyun-cli.tgz \
-        https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.6-amd64.tgz
+    case "$(uname -m)" in
+        x86_64) CLI_TGZ="aliyun-cli-linux-3.0.6-amd64.tgz" ;;
+        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-latest-arm64.tgz" ;;
+        *)
+            echo "ERROR: unsupported architecture $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+    curl -fsSL -o aliyun-cli.tgz "https://aliyuncli.alicdn.com/${CLI_TGZ}"
     tar -xzf aliyun-cli.tgz
     sudo mv aliyun /usr/local/bin/aliyun
     sudo chmod +x /usr/local/bin/aliyun

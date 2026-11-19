@@ -165,12 +165,12 @@ class ComputeProvider(ABC):
     #
     #   AWS      -> SSM Parameter Store
     #              /blitzlog/<env>/agent-ami-id-docker-ubuntu
-    #   Alicloud -> KMS Secrets Manager
-    #              /blitzlog/<env>/agent-ami-id-ecs-ubuntu
+    #   Alicloud -> OOS Parameter Store
+    #              blitzlog/<env>/agent-ami-id-ecs-ubuntu
     #
     # The two paths differ in the suffix AND in the error taxonomy
     # ("this parameter does not exist" is `ParameterNotFound` on SSM
-    # and `Forbidden.ResourceNotExists` on KMS; "this image is
+    # and `EntityNotExists.Parameter` on OOS; "this image is
     # retired" is `InvalidAMIID.NotFound` on EC2 and
     # `InvalidImageId.NotFound` on ECS). The shared algorithm lives
     # here so the per-provider differences are two class attributes
@@ -298,7 +298,8 @@ class SecretStore(ABC):
     @abstractmethod
     def put(self, name: str, value: str, type: str, overwrite: bool = True) -> None:
         """Write a parameter. `type` is the provider's parameter
-        type (e.g. `"SecureString"` on AWS, `"Secure"` on Aliyun).
+        type (e.g. `"SecureString"` on AWS, `"Secret"` on Aliyun —
+        the OOS Parameter Store's encrypted kind).
         """
 
     @abstractmethod

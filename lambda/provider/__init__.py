@@ -22,7 +22,7 @@ Why lazy-imported provider modules:
 
     PR #84 made the Alicloud implementations real (KMS + OSS +
     ECS via `oss2` / `alibabacloud_ecs20140526` /
-    `alibabacloud_kms20160120` / `alibabacloud_tea_openapi`).
+    `alibabacloud_oos20190601` / `alibabacloud_tea_openapi`).
     PR #85 will do the same for Azure. An AWS cold start used
     to eagerly `from provider.alicloud import ...` (and, post-#85,
     `provider.azure`) to surface a typo in `BLITZLOG_PROVIDER` at
@@ -36,7 +36,7 @@ Why lazy-imported provider modules:
     not import the body) and lazy-imports the actual module on
     the first `get_*()` call. An AWS cold start no longer pulls
     `oss2` / `alibabacloud_ecs20140526` /
-    `alibabacloud_kms20160120` / `alibabacloud_tea_openapi` /
+    `alibabacloud_oos20190601` / `alibabacloud_tea_openapi` /
     `provider.azure` into memory.
 """
 
@@ -46,7 +46,6 @@ import importlib
 import importlib.util
 
 from _env import _blitzlog_provider, logger
-from provider.aws import AwsCompute, AwsObjectStore, AwsSecretStore
 from provider.base import (
     ComputeProvider,
     LaunchSpec,
@@ -66,15 +65,16 @@ _PROVIDER_MODULES: dict[str, str] = {
 }
 
 # Mapping of provider name → (compute class, secrets class, object-store
-# class). The `aws` entry is pre-populated because the AWS classes
-# are tiny (boto3-only, already paid at import time) and we want
-# the AWS dispatch path to stay branch-free. The `alicloud` and
-# `azure` entries are populated on first `get_*()` call.
+# class). Every entry is populated on the first `get_*()` call for
+# that provider — including `aws`, which used to be pre-populated
+# with an eager `from provider.aws import ...`. That eager import
+# made the Alicloud bundle unimportable: `provider.aws` imports
+# boto3, which the Alicloud bundle does not ship, so the handler
+# died at import time with `ModuleNotFoundError: No module named
+# 'boto3'` and every invocation answered `502 Bad Gateway`.
 _PROVIDERS: dict[
     str, tuple[type[ComputeProvider], type[SecretStore], type[ObjectStore]]
-] = {
-    "aws": (AwsCompute, AwsSecretStore, AwsObjectStore),
-}
+] = {}
 
 # Class names inside each provider module. The convention is
 # `<Cloud>Compute` / `<Cloud>SecretStore` / `<Cloud>ObjectStore`
@@ -217,8 +217,8 @@ def reset_provider_singletons() -> None:
     _compute = None
     _secrets = None
     _object_store = None
-    _PROVIDERS.pop("alicloud", None)
-    _PROVIDERS.pop("azure", None)
+    for name in list(_PROVIDERS):
+        _PROVIDERS.pop(name, None)
 
 
 __all__ = [

@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from _env import BOT_POOL_SSM_PATH, _logs_bucket, logger
-from botocore.exceptions import ClientError
+from _errors import ClientError
 from llm_guard import (
     _ip_always_blocked,
     _ip_is_opt_in_only,

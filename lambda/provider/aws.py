@@ -152,9 +152,9 @@ class AwsCompute(ComputeProvider):
     # Issue #125: the SSM parameter that holds the id of the
     # Packer-baked agent AMI, published by
     # infra/aws/packer/agent-docker-ubuntu.pkr.hcl. The Alicloud
-    # analogue is `agent-ami-id-ecs-ubuntu` in KMS Secrets Manager
-    # — the two must differ, because the Alicloud `SecretStore` is
-    # KMS-backed and cannot read an SSM parameter.
+    # analogue is `agent-ami-id-ecs-ubuntu` in the OOS Parameter
+    # Store — the two must differ, because the Alicloud
+    # `SecretStore` is OOS-backed and cannot read an SSM parameter.
     agent_image_param_suffix = "agent-ami-id-docker-ubuntu"
 
     def __init__(self, s3: ObjectStore | None = None) -> None:

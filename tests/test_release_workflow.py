@@ -1328,8 +1328,9 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
     - the `Render TF_VAR_* env from SSM` step is gated on
       `BLITZLOG_PROVIDER == 'aws'` so it doesn't run on the
       Alicloud path.
-    - the `terraform plan` step uses `${BLITZLOG_PROVIDER}.tfvars`
-      so the per-provider tfvars file is passed.
+    - the `terraform plan` step runs bare — the values arrive as
+      TF_VAR_* from the render steps, and an operator's local
+      `terraform.tfvars` is auto-loaded by Terraform.
     """
 
     @classmethod
@@ -1477,15 +1478,15 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "BLITZLOG_PROVIDER == 'aws' so the step doesn't run for Alicloud",
         )
 
-    def test_terraform_plan_uses_per_provider_tfvars(self):
-        """The `terraform plan` step must pass
-        `-var-file=${BLITZLOG_PROVIDER}.tfvars` so the per-provider
-        tfvars file is used.
+    def test_terraform_plan_runs_without_a_var_file(self):
+        """The `terraform plan` step must NOT pass a `-var-file`.
+
+        Issue #126 made it unconditional and FATAL'd when the file was
+        absent — which is ALWAYS the case in CI (`*.tfvars` is
+        gitignored). The values arrive as TF_VAR_* from the render
+        steps instead, and an operator's local `terraform.tfvars` is
+        auto-loaded by Terraform from the stack directory.
         """
-        # The plan step body contains the `TFVARS_FILE=...` line
-        # and the `-var-file=...` reference. We just check both
-        # are present; a finer-grained regex was brittle against
-        # the YAML whitespace/indentation.
         plan_block_match = re.search(
             r"(?ms)- name: terraform plan\b.*?(?=\n\s*-\s|\Z)", self.text
         )
@@ -1494,16 +1495,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "release.yml must have a 'terraform plan' step",
         )
         plan_block = plan_block_match.group(0)
-        self.assertIn(
-            "TFVARS_FILE=",
+        self.assertNotIn(
+            "-var-file=",
             plan_block,
-            "terraform plan step must derive TFVARS_FILE from BLITZLOG_PROVIDER",
+            "terraform plan step must not pass a -var-file — in CI the "
+            "file is always missing (it is gitignored) and the values "
+            "come from the render steps",
         )
         self.assertIn(
-            "${BLITZLOG_PROVIDER}.tfvars",
+            "terraform plan -no-color -input=false -out=tfplan",
             plan_block,
-            "terraform plan step must use ${BLITZLOG_PROVIDER}.tfvars "
-            "as the -var-file argument",
+            "terraform plan step must run bare",
         )
 
     def test_terraform_init_switches_backend_by_provider(self):
@@ -1595,7 +1597,8 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
 
 class TestAlicloudPackerJob(unittest.TestCase):
     """Issue #125: release.yml grows an `alicloud-packer` job that
-    bakes the Alicloud ECS image and publishes its id to KMS.
+    bakes the Alicloud ECS image and publishes its id to the OOS
+    Parameter Store.
 
     The job is gated off by default (the `ENABLE_ALICLOUD_BAKE` repo
     variable) so it cannot fire before the Alicloud Packer role is
@@ -1670,7 +1673,7 @@ class TestAlicloudPackerJob(unittest.TestCase):
         steps = self.job["steps"]
         names = [s.get("name", "") for s in steps]
         self.assertIn("Packer init", names)
-        self.assertIn("Packer build (bake ECS image, publish id to KMS)", names)
+        self.assertIn("Packer build (bake ECS image, publish id to OOS)", names)
 
         init_step = next(s for s in steps if s.get("name") == "Packer init")
         self.assertEqual(
@@ -1684,18 +1687,19 @@ class TestAlicloudPackerJob(unittest.TestCase):
             "the Alicloud bake must build agent-ecs-ubuntu.pkr.hcl",
         )
 
-    def test_job_publishes_to_the_kms_secret_path(self):
+    def test_job_publishes_to_the_oos_parameter_path(self):
         """The image id must land where the Alicloud compute provider
-        reads it: /blitzlog/<env>/agent-ami-id-ecs-ubuntu in KMS."""
+        reads it: blitzlog/<env>/agent-ami-id-ecs-ubuntu in the OOS
+        Parameter Store."""
         build_step = next(
             s
             for s in self.job["steps"]
-            if s.get("name") == "Packer build (bake ECS image, publish id to KMS)"
+            if s.get("name") == "Packer build (bake ECS image, publish id to OOS)"
         )
         self.assertIn(
             "agent-ami-id-ecs-ubuntu",
             build_step.get("run", ""),
-            "the bake must publish to the Alicloud KMS secret path",
+            "the bake must publish to the Alicloud OOS parameter path",
         )
 
     def test_job_uses_the_shared_agent_image_tag_formula(self):

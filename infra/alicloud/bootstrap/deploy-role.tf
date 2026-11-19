@@ -46,6 +46,11 @@ resource "alicloud_ram_role" "deploy" {
 
 resource "alicloud_ram_policy" "deploy" {
   policy_name = "blitzlog-deploy-policy"
+  # Alicloud caps a custom policy at 5 versions, and the provider
+  # creates a new version on every change — without this the fifth
+  # apply fails with "LimitExceeded.Policy.Version: The count of
+  # policy version is limited to 5".
+  rotate_strategy = "DeleteOldestNonDefaultVersionWhenLimitExceeded"
   policy_document = jsonencode({
     Version = "1"
     Statement = [
@@ -103,19 +108,32 @@ resource "alicloud_ram_policy" "deploy" {
         Resource = ["*"]
       },
       {
-        # The KMS secrets + CMK the core module creates. The grant
-        # needs the write verbs, not just GetSecretValue — the apply
-        # creates the secrets that carry the GitHub App private key
-        # and the webhook secret.
-        Sid    = "AllowKMSManagement"
+        # The OOS parameters + the KMS CMK the core module creates.
+        # The grant needs the write verbs, not just the read one —
+        # the apply creates the parameters that carry the GitHub App
+        # private key and the webhook secret.
+        Sid    = "AllowOOSParameterManagement"
         Effect = "Allow"
         Action = [
-          "kms:CreateSecret",
-          "kms:PutSecretValue",
-          "kms:GetSecretValue",
-          "kms:DeleteSecret",
-          "kms:ListSecrets",
-          "kms:DescribeSecret",
+          "oos:CreateSecretParameter",
+          "oos:UpdateSecretParameter",
+          "oos:DeleteSecretParameter",
+          "oos:GetSecretParameter",
+          "oos:GetSecretParametersByPath",
+          "oos:ListSecretParameters",
+          "oos:ListSecretParameterVersions",
+        ]
+        Resource = [
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/*",
+        ]
+      },
+      {
+        # The CMK that encrypts the OOS parameters. Default master
+        # keys are free of charge — KMS bills for *instances*, and
+        # this deployment does not buy one.
+        Sid    = "AllowKMSKeyManagement"
+        Effect = "Allow"
+        Action = [
           "kms:CreateKey",
           "kms:DeleteKey",
           "kms:DescribeKey",
@@ -123,7 +141,6 @@ resource "alicloud_ram_policy" "deploy" {
           "kms:ListGrants",
         ]
         Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/*",
           "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/*",
         ]
       },

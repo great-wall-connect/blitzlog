@@ -750,14 +750,15 @@ jobs:
   #
   # It is NOT in the `deploy` job's `needs`: a failure here must not
   # fail the AWS deploy. The Alicloud deploy path reads the image id
-  # from KMS at launch time and falls back to the public Ubuntu image
+  # from the OOS Parameter Store at launch time and falls back to the
+  # public Ubuntu image
   # when the parameter is missing, so an un-baked Alicloud image
   # degrades to "no baked agent image" rather than "no deploy".
   # ----------------------------------------------------------------
   alicloud-packer:
     # The name can't interpolate a step output (job `name:` is evaluated
     # before steps run), so it just says what it does; the env lands in
-    # the logs and in the KMS secret path.
+    # the logs and in the OOS parameter path.
     name: Bake Alicloud ECS image (after the agent image is pushed)
 
     # GATED OFF until the Alicloud Packer role is provisioned and the
@@ -903,17 +904,90 @@ jobs:
           echo "stt_bucket=$STT_BUCKET"          >> "$GITHUB_OUTPUT"
           echo "agent_image_tag=$AGENT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
+      # The bake instance's network placement and its source image.
+      #
+      # The Packer alicloud builder needs a VPC, a VSwitch (and the
+      # zone that VSwitch sits in) plus an explicit source image id —
+      # it has no "pick the newest image for me" filter the way the
+      # AWS builder's source_ami_filter does.
+      #
+      # The ARM64 source image is required because the ghcr agent
+      # container image is arm64-only; an x86 source image would
+      # refuse to boot it. The instance type follows the image.
+      #
+      # The VPC / VSwitch come from the bootstrap stack's outputs
+      # (infra/alicloud/bootstrap/network.tf). They are repo
+      # variables so the bake lands in the same network the agent
+      # instances run in — the Packer builder would otherwise create
+      # a throwaway VPC it cannot create without vpc:CreateVpc.
+      - name: Resolve Alicloud bake network + source image
+        id: bake-network
+        env:
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ALICLOUD_VPC_ID:-}" ]; then
+            echo "FATAL: vars.ALICLOUD_VPC_ID is not set." >&2
+            echo "  Set it to the VPC the agent instances run in:" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output vpc_id" >&2
+            exit 1
+          fi
+          if [ -z "${ALICLOUD_VSWITCH_ID:-}" ]; then
+            echo "FATAL: vars.ALICLOUD_VSWITCH_ID is not set." >&2
+            echo "  It must be a VSwitch in a zone where the ARM64" >&2
+            echo "  instance type is offered (cn-hongkong-b / -d)." >&2
+            exit 1
+          fi
+          VSWITCH_ID="$ALICLOUD_VSWITCH_ID"
+
+          # The zone the VSwitch sits in — the builder needs both.
+          ZONE_ID=$(aliyun ecs DescribeVSwitches \
+            --RegionId "$ALICLOUD_REGION" \
+            --VSwitchId "$VSWITCH_ID" \
+            --output json \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["VSwitches"]["VSwitch"][0]["ZoneId"])')
+          if [ -z "$ZONE_ID" ]; then
+            echo "FATAL: could not resolve the zone of VSwitch $VSWITCH_ID" >&2
+            exit 1
+          fi
+
+          # The newest ARM64 Ubuntu image. The names carry the date
+          # (`ubuntu_26_04_arm64_20G_alibase_20261016.vhd`), so the
+          # newest one is the lexicographic maximum of the matches.
+          SOURCE_IMAGE=$(aliyun ecs DescribeImages \
+            --RegionId "$ALICLOUD_REGION" \
+            --ImageOwnerAlias system \
+            --Architecture arm64 \
+            --ImageName 'ubuntu_26_04_arm64*' \
+            --Status Available \
+            --output json \
+            | python3 -c 'import sys,json; imgs=json.load(sys.stdin)["Images"]["Image"]; print(max((i["ImageId"] for i in imgs), default=""))')
+          if [ -z "$SOURCE_IMAGE" ]; then
+            echo "FATAL: no ARM64 Ubuntu 26.04 image found in $ALICLOUD_REGION." >&2
+            exit 1
+          fi
+
+          echo "vpc_id=$ALICLOUD_VPC_ID"   >> "$GITHUB_OUTPUT"
+          echo "vswitch_id=$VSWITCH_ID"     >> "$GITHUB_OUTPUT"
+          echo "zone_id=$ZONE_ID"           >> "$GITHUB_OUTPUT"
+          echo "source_image_id=$SOURCE_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Bake placement: vpc=$ALICLOUD_VPC_ID vswitch=$VSWITCH_ID zone=$ZONE_ID image=$SOURCE_IMAGE"
+
       - name: Packer init
         working-directory: infra/alicloud/packer
         run: packer init agent-ecs-ubuntu.pkr.hcl
 
-      - name: Packer build (bake ECS image, publish id to KMS)
+      - name: Packer build (bake ECS image, publish id to OOS)
         id: packer
         env:
           BLITZLOG_ENV: ${{ steps.packer-vars.outputs.blitzlog_env }}
           STT_BUCKET: ${{ steps.packer-vars.outputs.stt_bucket }}
           AGENT_IMAGE_TAG: ${{ steps.packer-vars.outputs.agent_image_tag }}
           ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          VPC_ID: ${{ steps.bake-network.outputs.vpc_id }}
+          VSWITCH_ID: ${{ steps.bake-network.outputs.vswitch_id }}
+          ZONE_ID: ${{ steps.bake-network.outputs.zone_id }}
+          SOURCE_IMAGE_ID: ${{ steps.bake-network.outputs.source_image_id }}
           # GITHUB_TOKEN is consumed by 03-bake-images.sh to `docker login
           # ghcr.io` before pulling the blitzlog-agent image. Empty when
           # the secret isn't set; the script warns and the pull fails.
@@ -1132,7 +1206,7 @@ jobs:
           "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
           curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3"
           # ${LAMBDA_REQUIREMENTS_FILE} is set per provider above: the
-          # alibaba SDKs (oss2, alibabacloud_kms20160120,
+          # alibaba SDKs (oss2, alibabacloud_oos20190601,
           # alibabacloud_ecs20140526) belong to requirements-alicloud.txt
           # and are NOT shipped to the AWS deploy.
           "$VENV_DIR/bin/pip" install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE}" -t "$BUILD_DIR"
@@ -1291,25 +1365,21 @@ jobs:
 
       # Issue #125: the Alicloud analogue of the SSM fetch above.
       #
-      # The Alicloud `SecretStore` implementation is KMS Secrets
-      # Manager (lambda/provider/alicloud.py::AlicloudSecretStore),
-      # and the secret paths are byte-for-byte identical to the SSM
-      # paths (/blitzlog/<env>/<service>/<name>), so the same
-      # leaf-name → TF_VAR_<name> mapping applies unchanged.
+      # The Alicloud `SecretStore` implementation is the Aliyun OOS
+      # Parameter Store (lambda/provider/alicloud.py::
+      # AlicloudSecretStore), and the parameter paths mirror the
+      # SSM paths (/blitzlog/<env>/<service>/<name>) minus the
+      # leading slash — OOS names its parameters
+      # `blitzlog/<env>/<service>/<name>` — so the same leaf-name →
+      # TF_VAR_<name> mapping applies unchanged.
       #
-      # This is what replaces the gitignored `alicloud.tfvars` for
-      # the CI path: the secrets live in KMS (managed by the
-      # bootstrap stack), so the runner never needs a secrets file
-      # on disk. The values are written to GITHUB_ENV in heredoc
-      # form so multi-line PEM private keys survive intact, and
-      # they never touch the runner's filesystem.
-      #
-      # The KMS list is NOT path-prefixed the way SSM's
-      # get-parameters-by-path is — KMS has no "list by path"
-      # semantics (see AlicloudSecretStore.get_by_path, which
-      # lists and filters client-side). So this shells out to
-      # `aliyun kms ListSecrets` and reads the ones it needs.
-      - name: Render TF_VAR_* env from KMS
+      # This is what replaces the gitignored tfvars file for the CI
+      # path: the secrets live in the OOS Parameter Store (managed
+      # by the per-env stack), so the runner never needs a secrets
+      # file on disk. The values are written to GITHUB_ENV in
+      # heredoc form so multi-line PEM private keys survive intact,
+      # and they never touch the runner's filesystem.
+      - name: Render TF_VAR_* env from OOS
         if: env.BLITZLOG_PROVIDER == 'alicloud'
         env:
           BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
@@ -1320,7 +1390,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          KMS_ROOT="/blitzlog/${BLITZLOG_ENV}"
+          # No leading slash: OOS parameter names are
+          # `blitzlog/<env>/...` (see
+          # infra/alicloud/modules/core/locals.tf).
+          OOS_ROOT="blitzlog/${BLITZLOG_ENV}"
 
           # The `aliyun` CLI is not installed on the runner by
           # default. Install the same pinned build the baked host
@@ -1348,7 +1421,7 @@ jobs:
           #   stt/model                   -> stt_model
           #   stt/language                -> stt_language
           #   stt/models-bucket           -> stt_models_bucket_name
-          declare -a KMS_SECRETS=(
+          declare -a OOS_PARAMS=(
             "github-app/id"
             "github-app/private-key"
             "github-app/installation-id"
@@ -1360,18 +1433,19 @@ jobs:
             "stt/models-bucket"
           )
 
-          for secret in "${KMS_SECRETS[@]}"; do
-            name="${KMS_ROOT}/${secret}"
-            value=$(aliyun kms GetSecretValue \
-              --SecretName "$name" \
+          for secret in "${OOS_PARAMS[@]}"; do
+            name="${OOS_ROOT}/${secret}"
+            value=$(aliyun oos GetSecretParameter \
+              --Name "$name" \
+              --WithDecryption true \
               --region "$ALICLOUD_REGION" \
               --output json 2>/dev/null \
-              | python3 -c 'import sys,json; print(json.load(sys.stdin)["SecretData"], end="")' 2>/dev/null || true)
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["Parameter"]["Value"], end="")' 2>/dev/null || true)
             if [ -z "$value" ]; then
-              echo "FATAL: the KMS secret ${name} is missing or empty." >&2
+              echo "FATAL: the OOS parameter ${name} is missing or empty." >&2
               echo "  Run 'cd infra/alicloud/dev && terraform apply' first to" >&2
-              echo "  create the secret, then set its real value with:" >&2
-              echo "    aliyun kms PutSecretValue --SecretName ${name} --SecretData <real> --region $ALICLOUD_REGION" >&2
+              echo "  create the parameter, then set its real value with:" >&2
+              echo "    aliyun oos UpdateSecretParameter --Name ${name} --Value <real> --region $ALICLOUD_REGION" >&2
               exit 1
             fi
             # The leaf name maps to the TF variable: the last
@@ -1394,7 +1468,7 @@ jobs:
               stt/model)                  var=stt_model ;;
               stt/language)               var=stt_language ;;
               stt/models-bucket)          var=stt_models_bucket_name ;;
-              *) echo "FATAL: unhandled KMS secret ${secret}" >&2; exit 1 ;;
+              *) echo "FATAL: unhandled OOS parameter ${secret}" >&2; exit 1 ;;
             esac
             # Heredoc form so multi-line PEM private keys survive.
             {
@@ -1486,19 +1560,14 @@ jobs:
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         run: terraform validate -no-color
 
-      # Issue #126: pass the per-provider tfvars file. The naming
-      # convention is `<provider>.tfvars` (e.g. `aws.tfvars` for the
-      # AWS path, `alicloud.tfvars` for the Alicloud path). The
-      # files are gitignored operator-side; the example file in the
-      # same directory is the template.
-      #
-      # Issue #125: the Alicloud path no longer NEEDS the tfvars
-      # file in CI. The secrets now come from KMS (the "Render
-      # TF_VAR_* env from KMS" step) and the non-secret variables
+      # Issue #126/#125: the per-env tfvars file is optional. The
+      # secrets now come from the store (the "Render TF_VAR_* env
+      # from SSM" / "from OOS" steps) and the non-secret variables
       # come from repo variables, so the plan runs from a fresh
-      # checkout with no operator file on disk. The tfvars file is
-      # still used when it exists (it lets an operator override the
-      # non-secret values locally), but it is no longer required.
+      # checkout with no operator file on disk. An operator's local
+      # `terraform.tfvars` (gitignored, and auto-loaded by Terraform
+      # from the stack directory) still wins for the values it sets —
+      # no `-var-file` flag needed.
       - name: terraform plan
         id: plan
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
@@ -1515,25 +1584,21 @@ jobs:
           # TF_VAR_* env from SSM" step above, so NO -var-file is needed
           # or wanted — matching the pre-#126 behaviour byte for byte.
           #
-          # Alicloud: same shape after issue #125 — the KMS render
+          # Alicloud: same shape after issue #125 — the OOS render
           # step supplies the secrets as TF_VAR_*, and the
           # non-secret variables come from repo variables. An
-          # `alicloud.tfvars` file, if the operator has left one in
-          # place, still wins for the values it sets.
+          # operator's local `terraform.tfvars`, if present in the
+          # stack directory, still wins for the values it sets
+          # (Terraform auto-loads it).
           #
           # Regression: #126 made -var-file unconditional and FATAL'd when
-          # absent. `<provider>.tfvars` is gitignored, so it can never
-          # exist in a fresh CI checkout — that failed the AWS deploy with
+          # absent. `*.tfvars` is gitignored, so it can never exist in
+          # a fresh CI checkout — that failed the AWS deploy with
           # "FATAL: aws.tfvars not found" even though SSM had already
-          # supplied every variable.
-          TFVARS_FILE="${BLITZLOG_PROVIDER}.tfvars"
-          if [ "${BLITZLOG_PROVIDER}" = "aws" ]; then
-            terraform plan -no-color -input=false -out=tfplan
-          elif [ -f "${TFVARS_FILE}" ]; then
-            terraform plan -no-color -input=false -var-file="${TFVARS_FILE}" -out=tfplan
-          else
-            terraform plan -no-color -input=false -out=tfplan
-          fi
+          # supplied every variable. (A local `terraform.tfvars` is
+          # auto-loaded by Terraform from the stack directory, so no
+          # -var-file flag is needed on either path.)
+          terraform plan -no-color -input=false -out=tfplan
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v7

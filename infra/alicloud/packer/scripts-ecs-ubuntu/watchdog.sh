@@ -24,7 +24,7 @@
 #   * `S3_LOGS_BUCKET`   → `OSS_LOGS_BUCKET`
 #   * `S3_LOG_PREFIX`    → `OSS_LOG_PREFIX`
 #   * IMDSv2 @ 169.254.169.254 → Aliyun metadata @ 100.100.100.200
-#   * `aws ssm get-parameter` → `aliyun kms GetSecretValue`
+#   * `aws ssm get-parameter` → `aliyun oos GetSecretParameter`
 #   * `aws ec2 terminate-instances` → `aliyun ecs DeleteInstances`
 #   * IMDS egress block  → 100.100.100.200 instead of 169.254.169.254
 #
@@ -150,7 +150,8 @@ STT_LANGUAGE="${STT_LANGUAGE:-en}"
 ALIBABA_CLOUD_REGION="${REGION}"
 ENVEOF
 
-# Pull the GitHub token from KMS (autonomous mode needs it for git push).
+# Pull the GitHub token from the OOS Parameter Store (autonomous mode
+# needs it for git push).
 #
 # The Alicloud path has NO token-refresh chain: the AWS side schedules
 # an EventBridge Scheduler chain that re-mints the installation token
@@ -160,12 +161,18 @@ ENVEOF
 # visible. The refresh branch below is written so that it stays inert
 # until the Aliyun scheduler equivalent lands: it is guarded on
 # GITHUB_TOKEN_SSM_PARAM, which the Alicloud bootstrap does not set.
+#
+# The parameter name carries no leading slash — the Lambda hands us
+# the SSM-style path (/blitzlog/<env>/ephemeral/...) and OOS names its
+# parameters blitzlog/<env>/...
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
-    GITHUB_TOKEN=$(aliyun kms GetSecretValue \
-        --SecretName "${GITHUB_TOKEN_SSM_PARAM}" \
+    OOS_TOKEN_PARAM="${GITHUB_TOKEN_SSM_PARAM#/}"
+    GITHUB_TOKEN=$(aliyun oos GetSecretParameter \
+        --Name "${OOS_TOKEN_PARAM}" \
+        --WithDecryption true \
         --region "$REGION" \
         --output json 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['SecretData'])" 2>/dev/null || echo "")
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null || echo "")
     if [ -n "$GITHUB_TOKEN" ]; then
         mkdir -p "/root/gh-config/${INSTANCE_ID}"
         mkdir -p /root/.git-credentials.d
@@ -329,7 +336,7 @@ CONTAINER_EXIT=0
 #
 # The container runs as root on the docker bridge, so it can reach
 # 100.100.100.200 and assume the ECS instance RAM role. That role can
-# read KMS secrets the container must never see — the GitHub App's
+# read OOS parameters the container must never see — the GitHub App's
 # private key and the webhook secret among them (issue #175) — so
 # "the container has no Alicloud credentials" is only true while it
 # cannot reach the metadata service.
@@ -376,7 +383,7 @@ run_agent_container() {
 if block_metadata_from_container; then
     run_agent_container || CONTAINER_EXIT=$?
 else
-    log "ERROR: refusing to start the agent container — without the metadata block it could assume the ECS instance role and read KMS secrets it must not see (issue #175)"
+    log "ERROR: refusing to start the agent container — without the metadata block it could assume the ECS instance role and read OOS parameters it must not see (issue #175)"
     CONTAINER_EXIT=1
 fi
 # The watcher auto-exits once it sends SIGTERM (the while loop ends
@@ -396,7 +403,7 @@ if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "insufficient_balance|insuf
 fi
 if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "Unauthorized|invalid_api_key|\(401\)" /var/log/blitzlog/opencode.log; then
     log "ACTIONABLE: LLM provider rejected the API key (HTTP 401)."
-    log "ACTIONABLE: Rotate /blitzlog/$BLITZLOG_ENV/opencode/api-key in KMS and re-run terraform apply."
+    log "ACTIONABLE: Rotate blitzlog/$BLITZLOG_ENV/opencode/api-key in the OOS Parameter Store and re-run terraform apply."
 fi
 if [ -f /var/log/blitzlog/opencode.log ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?requests|\(429\)" /var/log/blitzlog/opencode.log; then
     log "ACTIONABLE: LLM provider returned a rate-limit error (HTTP 429)."
@@ -452,17 +459,16 @@ sudo docker rm -f blitzlog-agent || true
 # subsequent API calls from this script may fail. Both cleanups are
 # idempotent.
 #
-# ORDER MATTERS: the token secret is deleted first so a (future)
+# ORDER MATTERS: the token parameter is deleted first so a (future)
 # refresh chain cannot re-create it — the chain writes the token into
-# KMS, so deleting the KMS secret first would leave a window in which
-# a firing iteration re-creates it — a zombie token that outlives the
-# run.
+# the OOS Parameter Store, so deleting the parameter first would leave
+# a window in which a firing iteration re-creates it — a zombie token
+# that outlives the run.
 log "Tearing down instance-owned Alicloud state"
 if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
-    log "Deleting KMS token at ${GITHUB_TOKEN_SSM_PARAM}"
-    aliyun kms DeleteSecret \
-        --SecretName "${GITHUB_TOKEN_SSM_PARAM}" \
-        --ForceDeleteWithoutRecovery "true" \
+    log "Deleting OOS token parameter at ${GITHUB_TOKEN_SSM_PARAM#/}"
+    aliyun oos DeleteSecretParameter \
+        --Name "${GITHUB_TOKEN_SSM_PARAM#/}" \
         --region "$REGION" 2>/dev/null || true
 fi
 

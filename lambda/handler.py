@@ -36,8 +36,19 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 
-import boto3
+try:
+    # The AWS-only SDK. The Alicloud bundle does not ship boto3, so
+    # the import is optional: a hard `import boto3` made the whole
+    # handler unimportable there (`ModuleNotFoundError: No module
+    # named 'boto3'`) and every invocation answered 502. Only the
+    # AWS-only paths below (EventBridge Scheduler token refresh)
+    # touch it.
+    import boto3
+except ImportError:  # pragma: no cover - the Alicloud bundle
+    boto3 = None
+
 from _env import ephemeral_token_ssm_param, logger
+from _errors import BotoCoreError, ClientError
 from _version import get_version
 from auth import (
     get_github_app_token,
@@ -50,7 +61,6 @@ from bot_pool import (
     get_local_llm_config,
     get_telegram_user_id,
 )
-from botocore.exceptions import BotoCoreError, ClientError
 from ec2 import launch_ec2_spot_instance
 from provider import get_secrets
 
@@ -158,6 +168,46 @@ def extract_event_data(payload: dict) -> dict | None:
     }
 
 
+def _normalize_event(event):
+    """Return the event in the shape the rest of the handler expects.
+
+    AWS hands the handler the API Gateway proxy event: a dict with
+    `body` / `headers` / `isBase64Encoded`.
+
+    Function Compute delivers the request as BYTES, and in two
+    different shapes:
+
+      * an HTTP trigger wraps it in FC's own event envelope —
+        `{"version": "v1", "rawPath": "/", "headers": {...},
+        "body": "<the raw body>", "isBase64Encoded": false}`;
+      * an event invocation (what the API Gateway's `FCEvent`
+        backend does) delivers the bare body and NO headers at all.
+
+    Normalising here keeps the GitHub signature check working on
+    both clouds. The bare-body case has no `X-Hub-Signature-256`,
+    so the signature check fails closed — which is the only safe
+    reading of a request that arrives without its headers.
+    """
+    if isinstance(event, dict):
+        return event
+    if not isinstance(event, (bytes, bytearray, str)):
+        return event
+    raw = event if isinstance(event, str) else event.decode("utf-8", "replace")
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"body": raw, "headers": {}, "isBase64Encoded": False}
+    if isinstance(parsed, dict) and "headers" in parsed and "rawPath" in parsed:
+        return {
+            "body": parsed.get("body", ""),
+            "headers": parsed.get("headers", {}),
+            "isBase64Encoded": parsed.get("isBase64Encoded", False),
+            "httpMethod": parsed.get("method"),
+            "path": parsed.get("rawPath"),
+        }
+    return {"body": raw, "headers": {}, "isBase64Encoded": False}
+
+
 def lambda_handler(event, context):
     logger.info("Lambda invoked")
 
@@ -171,6 +221,8 @@ def lambda_handler(event, context):
     # header.
     if isinstance(event, dict) and event.get("action") == "refresh":
         return _handle_refresh(event)
+
+    event = _normalize_event(event)
 
     raw_body = event.get("body", "")
     logger.info("isBase64Encoded: %s", event.get("isBase64Encoded", False))

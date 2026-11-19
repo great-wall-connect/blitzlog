@@ -68,21 +68,45 @@ def _aliyun_access_key_id() -> str:
     the ECS instance RAM role (no static key on the box); the
     Lambda-side ALI access keys are a stop-gap until Terraform
     ships the InstanceRole assumption path (Phase 4+).
+
+    The Function Compute runtime injects the function role's
+    temporary credentials under the SDK-standard
+    `ALIBABA_CLOUD_ACCESS_KEY_ID` name, so that is the fallback:
+    the FC path has no static key to configure.
     """
-    return os.environ.get("ALIYUN_ACCESS_KEY_ID", "").strip()
+    return (
+        os.environ.get("ALIYUN_ACCESS_KEY_ID", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", "").strip()
+    )
 
 
 def _aliyun_access_key_secret() -> str:
     """Aliyun AccessKey secret. Pair to `_aliyun_access_key_id`."""
-    return os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "").strip()
+    return (
+        os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "").strip()
+    )
+
+
+def _aliyun_security_token() -> str:
+    """The STS token that pairs with the access key, if any.
+
+    Function Compute hands the function role's credentials over as an
+    STS session, so the token is required there — the SDKs reject a
+    key without it.
+    """
+    return (
+        os.environ.get("ALIYUN_SECURITY_TOKEN", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN", "").strip()
+    )
 
 
 def _aliyun_kms_key_id() -> str:
-    """Customer-managed CMK id used to encrypt secrets at rest in
-    KMS. Optional: when unset the secrets are encrypted with the
-    service default key. `AwsSecretStore` reads the equivalent
-    from the SSM parameter's encryption flag, so this is the
-    Alicloud-side knob to keep parity with the AWS SSM
+    """Customer-managed CMK id used to encrypt the OOS Parameter Store
+    parameters at rest. Optional: when unset the parameter is
+    encrypted with OOS's own key. `AwsSecretStore` reads the
+    equivalent from the SSM parameter's encryption flag, so this is
+    the Alicloud-side knob to keep parity with the AWS SSM
     `KMSKeyID` parameter.
     """
     return os.environ.get("ALIYUN_KMS_KEY_ID", "").strip()

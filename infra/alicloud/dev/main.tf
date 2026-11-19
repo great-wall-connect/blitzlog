@@ -28,6 +28,7 @@ terraform {
   backend "oss" {
     bucket = ""
     key    = ""
+    prefix = ""
     region = "cn-hongkong"
     # The profile name in ~/.aliyun/config.json (written by
     # `aliyun configure --profile <name>`). Empty by default so the

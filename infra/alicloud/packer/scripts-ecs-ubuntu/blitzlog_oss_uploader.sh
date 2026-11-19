@@ -94,9 +94,9 @@ blitzlog_oss_put() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        ossutil cp -e "$endpoint" "$local_path" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil cp -e "$endpoint" "$local_path" "oss://${bucket}/${key}" || rc=$?
     else
-        ossutil cp "$local_path" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil cp "$local_path" "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS put failed: bucket=${bucket} key=${key} local=${local_path} exit=${rc}"
@@ -115,9 +115,9 @@ blitzlog_oss_get() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        ossutil cp -e "$endpoint" "oss://${bucket}/${key}" "$local_path" || rc=$?
+        _bl_oss_uploader_ossutil cp -e "$endpoint" "oss://${bucket}/${key}" "$local_path" || rc=$?
     else
-        ossutil cp "oss://${bucket}/${key}" "$local_path" || rc=$?
+        _bl_oss_uploader_ossutil cp "oss://${bucket}/${key}" "$local_path" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS get failed: bucket=${bucket} key=${key} exit=${rc}"
@@ -137,9 +137,9 @@ blitzlog_oss_rm() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        ossutil rm -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil rm -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
     else
-        ossutil rm "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil rm "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS rm failed: bucket=${bucket} key=${key} exit=${rc}"
@@ -160,9 +160,9 @@ blitzlog_oss_ls() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        ossutil ls -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil ls -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
     else
-        ossutil ls "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil ls "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS ls failed: bucket=${bucket} key=${key} exit=${rc}"
