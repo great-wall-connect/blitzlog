@@ -585,7 +585,6 @@ cryptography==43.0.3 \
     --hash=sha256:f46304d6f0c6ab8e52770addfa2fc41e6629495548862279641972b6215451cd \
     --hash=sha256:f7b178f11ed3664fd0e995a47ed2b5ff0a12d893e41dd0494f406d1cf555cab7
     # via
-    #   -r lambda/requirements-alicloud.in
     #   -r lambda/requirements.in
     #   alibabacloud-darabonba-signature-util
     #   alibabacloud-openapi-util

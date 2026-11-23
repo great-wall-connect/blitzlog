@@ -22,12 +22,9 @@ oss2
 alibabacloud_oos20190601
 alibabacloud_ecs20140526
 
-# The Function Compute runtime's glibc is older than the one on the
-# build machine: cryptography's manylinux_2_34 wheels (v44 and up)
-# need GLIBC_2.33 and the FC runtime does not have it — the import
-# dies with "version `GLIBC_2.33' not found (required by
-# /code/cryptography/hazmat/bindings/_rust.abi3.so)". 43.0.3 is the
-# newest release whose x86_64 wheels top out at manylinux_2_28.
-# The AWS bundle keeps the shared pin (the Lambda runtime is
-# AL2023, whose glibc is new enough).
-cryptography<44
+# `cryptography` is capped at <44 by the SHARED requirements.in — the
+# Function Compute runtime's glibc is older than the build machine's,
+# so cryptography's manylinux_2_34 wheels (v44 and up) do not load
+# there. The cap is shared rather than per-cloud because the
+# development environment installs both bundles and pip cannot
+# satisfy two exact pins of the same package in one environment.
