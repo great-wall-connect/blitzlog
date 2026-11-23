@@ -1073,6 +1073,59 @@ class TestAlicloudBucketOneWayAttributesAreIgnored(unittest.TestCase):
             )
 
 
+class TestAlicloudOssArnsUseTheBucketLocation(unittest.TestCase):
+    """OSS matches a RAM grant against the bucket's OSS LOCATION
+    ("oss-cn-hongkong"), NOT the region id ("cn-hongkong").
+
+    A grant written with the region id silently never matches: the
+    policy document looks right, the role is attached, the instance
+    has valid credentials — and every object request still comes back
+    403 AccessDenied ("The bucket you access does not belong to you").
+    Verified against this account: the region-id form is denied and
+    the location form is honoured (and `acs:oss:*:<account>:...`
+    works too, but the location is the precise one).
+
+    The ARNs are therefore built from the bucket's `location`
+    attribute, not from `var.alicloud_region`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.core_oss = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/modules/core/oss.tf")
+        )
+        cls.packer_role = _read(os.path.join(ALICLOUD_BOOTSTRAP, "packer-role.tf"))
+
+    def test_core_arns_come_from_the_bucket_location(self):
+        for bucket in ("agent_logs", "stt_models"):
+            self.assertIn(
+                f"{bucket}_bucket_location_resolved",
+                self.core_oss,
+                f"the {bucket} ARN must be built from the bucket's OSS " "location",
+            )
+
+    def test_no_oss_arn_is_built_from_the_region_id(self):
+        """The region id in an OSS ARN is the failure this class
+        exists for — it must not creep back in."""
+        for text, what in (
+            (self.core_oss, "core module"),
+            (self.packer_role, "packer role"),
+        ):
+            self.assertNotRegex(
+                text,
+                r"acs:oss:\$\{var\.alicloud_region\}",
+                f"the {what} must not build an OSS ARN from the region "
+                "id — OSS matches grants against the bucket's location",
+            )
+
+    def test_the_packer_role_uses_the_bucket_location(self):
+        self.assertIn(
+            "alicloud_oss_bucket.stt_models.location",
+            self.packer_role,
+            "the packer role's STT-model grant must name the bucket's " "OSS location",
+        )
+
+
 class TestAlicloudServiceActivations(unittest.TestCase):
     """Two account-level products must be open before the per-env
     stacks can create anything in them:

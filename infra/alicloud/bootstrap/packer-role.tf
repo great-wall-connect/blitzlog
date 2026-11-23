@@ -32,8 +32,15 @@ locals {
   # The `alicloud_oss_bucket` resource has no `arn` attribute (the
   # data source in the core module does, but the bootstrap stack owns
   # the buckets directly), so the ARN is constructed the same way
-  # infra/alicloud/modules/core/oss.tf:36-37 does.
-  stt_models_bucket_arn = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.stt_models.bucket}"
+  # infra/alicloud/modules/core/oss.tf does.
+  #
+  # The region segment is the bucket's OSS LOCATION ("oss-cn-hongkong"),
+  # NOT the region id ("cn-hongkong"): OSS matches a RAM grant against
+  # the bucket's location string, so a grant written with the region id
+  # silently never matches and the bake's model download comes back 403
+  # AccessDenied ("The bucket you access does not belong to you") even
+  # though the policy document looks right.
+  stt_models_bucket_arn = "acs:oss:${alicloud_oss_bucket.stt_models.location}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.stt_models.bucket}"
 }
 
 resource "alicloud_ram_role" "packer_build" {

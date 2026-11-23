@@ -1,6 +1,6 @@
 output "agent_logs_bucket_arn" {
-  description = "ARN of the shared agent-logs bucket. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as agent_logs_bucket_name. The Alicloud OSS bucket ARN format is acs:oss:<region>:<account>:<bucket-name>."
-  value       = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.agent_logs.bucket}"
+  description = "ARN of the shared agent-logs bucket. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as agent_logs_bucket_name. The Alicloud OSS bucket ARN format is acs:oss:<location>:<account>:<bucket-name> — the location is the bucket's OSS location (oss-cn-hongkong), not the region id."
+  value       = "acs:oss:${alicloud_oss_bucket.agent_logs.location}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.agent_logs.bucket}"
 }
 
 output "agent_logs_bucket_name" {
@@ -9,8 +9,8 @@ output "agent_logs_bucket_name" {
 }
 
 output "stt_models_bucket_arn" {
-  description = "ARN of the shared STT models bucket. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as stt_models_bucket_name (or override the default)."
-  value       = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.stt_models.bucket}"
+  description = "ARN of the shared STT models bucket. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as stt_models_bucket_name (or override the default). The Alicloud OSS bucket ARN format is acs:oss:<location>:<account>:<bucket-name> — the location is the bucket's OSS location (oss-cn-hongkong), not the region id."
+  value       = "acs:oss:${alicloud_oss_bucket.stt_models.location}:${data.alicloud_account.current.id}:${alicloud_oss_bucket.stt_models.bucket}"
 }
 
 output "stt_models_bucket_name" {

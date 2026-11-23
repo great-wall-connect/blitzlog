@@ -369,6 +369,15 @@ Two things the bake needs that the AWS leg does not:
   (`ecs_ram_role_name`), which carries `oss:GetObject` on the STT
   bucket and `ram:PassRole` on itself. Without it the download has
   no credentials.
+- **OSS grants name the bucket's location, not the region.** An OSS
+  resource ARN is `acs:oss:<location>:<account>:<bucket>/<key>`, and
+  the location is `oss-cn-hongkong` — the bucket's OSS location, not
+  the region id `cn-hongkong`. OSS matches grants against the
+  location string: a grant written with the region id never matches,
+  and every object request comes back `403 AccessDenied` ("The bucket
+  you access does not belong to you") with the policy document
+  looking perfectly correct. The ARNs are therefore built from the
+  bucket's `location` attribute.
 
 `packer init` needs the plugin from the GitHub releases API. When
 that API is rate-limited, install the release asset by hand into
@@ -427,6 +436,7 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
 | `EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP` on the bake's "Error associating EIP" | The build instance already had an ECS-managed public IP ("natpublicip") — the template asks ECS for one, and Alicloud will not replace it with an EIP. The instance must get its public address from the EIP alone: leave `internet_charge_type` / `internet_max_bandwidth_out` unset and pass `-var eip_id=...`. |
 | `IllegalParam.Bandwidth` on the bake's "Error allocating EIP" | The builder allocates the EIP with the same bandwidth the instance uses, and the EIP call rejects a bandwidth below 1. Same fix as above: pass the EIP in with `eip_id` instead of letting the builder allocate one. |
 | `region must be set in sign version 4` on the bake's model download | ossutil signs with SigV4 and needs the region as its own parameter — the `-e` endpoint is not enough. The region must reach ossutil explicitly (`--region`), and the instance needs a RAM role for the `EcsRamRole` credentials. |
+| `AccessDenied` / "The bucket you access does not belong to you" on any OSS call | The RAM grant's OSS ARN is written with the region id (`acs:oss:cn-hongkong:…`). OSS matches grants against the bucket's OSS **location** (`oss-cn-hongkong`) — with the region id the grant silently never matches, even though the policy document and the role attachment both look right. The ARNs are built from the bucket's `location` attribute. |
 
 ## Known limitations
 
