@@ -76,6 +76,11 @@ variable "zone_id" {
   default     = ""
 }
 
+variable "eip_id" {
+  type        = string
+  description = "ID of the elastic IP the build instance gets its public address from (e.g. `eip-j6c...`). Required: the builder only reaches a VPC instance over an EIP, and it cannot allocate one itself — see the `eip_id` note on the source block. The bootstrap stack owns it: `cd infra/alicloud/bootstrap && terraform output packer_eip_id`."
+}
+
 source "alicloud-ecs" "ubuntu" {
   region            = var.alicloud_region
   source_image      = var.source_image_id
@@ -88,19 +93,42 @@ source "alicloud-ecs" "ubuntu" {
   vswitch_id = var.vswitch_id
   zone_id   = var.zone_id
 
-  # cn-hongkong is outside mainland China, so only PayByTraffic is
-  # accepted — PayByBandwidth is rejected by the API. The plugin
-  # defaults to PayByBandwidth when `internet_charge_type` is unset,
-  # which fails the RunInstances call.
-  internet_charge_type      = "PayByTraffic"
-  internet_max_bandwidth_out = 5
+  # The build instance lives in a VPC, and the builder's SSH
+  # communicator reaches it over its public address — so it needs an
+  # EIP. The builder can only get one two ways: it allocates one
+  # itself, or it is handed an existing one through `eip_id`. It
+  # cannot do the first here: it sends the same
+  # `internet_charge_type` / `internet_max_bandwidth_out` to both the
+  # RunInstances call and the AllocateEipAddress call, and the EIP
+  # call rejects a bandwidth below 1 (`IllegalParam.Bandwidth`)
+  # while any non-zero bandwidth makes ECS hand the instance an
+  # ECS-managed public IP ("natpublicip") — which Alicloud refuses to
+  # replace with an EIP
+  # ("EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP: instance already bind
+  # natpublicip, cannot bind eip").
+  #
+  # So the EIP is created by the bootstrap stack and passed in here.
+  # The builder associates it with the build instance and drops the
+  # association when the build ends; the EIP itself survives for the
+  # next bake.
+  eip_id = var.eip_id
 
-  # The build instance has to be reachable over SSH (the plugin's
-  # communicator connects to its public IP) and has to pull the agent
-  # image from ghcr.io and the whisper model from OSS, so it needs a
-  # public address. In VPC mode the plugin reaches that through an
-  # EIP, which this flag triggers.
+  # `associate_public_ip_address` is what makes the builder associate
+  # the EIP with the instance. It does NOT ask ECS for a public IP of
+  # its own — the instance's public network is configured by the two
+  # `internet_*` parameters below, which must stay unset.
   associate_public_ip_address = true
+
+  # The instance must NOT get an ECS-managed public IP: that public IP
+  # and the EIP are mutually exclusive (see the `eip_id` note above).
+  # Leaving `internet_charge_type` and `internet_max_bandwidth_out`
+  # unset is what keeps ECS from assigning one — the EIP is the
+  # instance's only public address.
+  #
+  # cn-hongkong is outside mainland China, so `PayByTraffic` is the
+  # only billing method the API accepts there — but that only applies
+  # to the instance's own public bandwidth, which we deliberately do
+  # not ask for.
 
   image_name        = "blitzlog-${var.environment}-agent-image-ecs-ubuntu-${local.timestamp}"
   image_description = "Blitzlog agent ECS image (Ubuntu) with dockerd + baked blitzlog-agent:${var.agent_image_tag}"

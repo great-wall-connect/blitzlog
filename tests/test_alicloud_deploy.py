@@ -813,6 +813,89 @@ class TestAlicloudNetworkIsOwnedByTheBootstrap(unittest.TestCase):
         )
 
 
+class TestAlicloudPackerEipIsOwnedByTheBootstrap(unittest.TestCase):
+    """The `alicloud-ecs` builder reaches a VPC instance over an
+    elastic IP, and it cannot allocate one itself.
+
+    Its EIP allocation and its RunInstances call share one bandwidth
+    setting (`internet_max_bandwidth_out`), and the two API
+    constraints contradict each other: AllocateEipAddress rejects a
+    bandwidth below 1 (`IllegalParam.Bandwidth`), while any non-zero
+    bandwidth makes ECS hand the instance an ECS-managed public IP
+    ("natpublicip"), which Alicloud refuses to replace with an EIP
+    (`EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP`).
+
+    So the bootstrap stack owns the EIP and the bake takes it in as
+    `eip_id`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.eip = _read(os.path.join(ALICLOUD_BOOTSTRAP, "eip.tf"))
+        cls.outputs = _read(os.path.join(ALICLOUD_BOOTSTRAP, "outputs.tf"))
+        cls.template = _read(
+            os.path.join(REPO_ROOT, "infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl")
+        )
+        cls.workflow = _read(RELEASE_YML)
+
+    def test_bootstrap_creates_the_eip(self):
+        self.assertIn(
+            'resource "alicloud_eip_address" "packer"',
+            self.eip,
+            "the bootstrap stack must own the EIP — the builder cannot "
+            "allocate one itself",
+        )
+
+    def test_eip_is_pay_as_you_go_by_traffic(self):
+        """An international account can only buy a pay-as-you-go EIP
+        billed by traffic — the `PayByBandwidth` combination fails with
+        `COMMODITY.INVALID_COMPONENT`. Billed by traffic, an idle EIP
+        costs nothing."""
+        self.assertRegex(
+            self.eip,
+            r'payment_type\s*=\s*"PayAsYouGo"',
+            "the EIP must be pay-as-you-go — a subscription EIP cannot be "
+            "created by the provider",
+        )
+        self.assertRegex(
+            self.eip,
+            r'internet_charge_type\s*=\s*"PayByTraffic"',
+            "an international account can only buy an EIP billed by " "traffic",
+        )
+
+    def test_the_eip_id_is_published(self):
+        self.assertIn(
+            "packer_eip_id",
+            self.outputs,
+            "the operator (and the CI job) needs the EIP id to hand it " "to the bake",
+        )
+        self.assertRegex(
+            self.outputs,
+            r"alicloud_eip_address\.packer\.id",
+            "the output must be the EIP's id",
+        )
+
+    def test_the_bake_takes_the_eip(self):
+        self.assertIn(
+            "eip_id",
+            self.template,
+            "the bake must pass the EIP to the builder — it is the "
+            "instance's only public address",
+        )
+
+    def test_the_ci_job_passes_the_eip(self):
+        self.assertIn(
+            "ALICLOUD_EIP_ID",
+            self.workflow,
+            "the CI bake job must read the EIP id from a repo variable",
+        )
+        self.assertIn(
+            '-var "eip_id=${EIP_ID}"',
+            self.workflow,
+            "the CI bake job must pass the EIP id to Packer",
+        )
+
+
 def _strip_hcl_comments(text):
     """Return `text` with the `#` comments removed.
 

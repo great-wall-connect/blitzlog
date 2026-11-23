@@ -28,5 +28,10 @@ output "vswitch_ids" {
   value       = alicloud_vswitch.agent[*].id
 }
 
+output "packer_eip_id" {
+  description = "ID of the elastic IP the Packer build instance uses. Pass it to the bake as `-var eip_id=...` (the CI bake job reads it from vars.ALICLOUD_EIP_ID)."
+  value       = alicloud_eip_address.packer.id
+}
+
 # Add the data source the outputs reference.
 data "alicloud_account" "current" {}

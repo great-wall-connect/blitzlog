@@ -974,6 +974,13 @@ jobs:
             echo "  instance type is offered (cn-hongkong-b / -d)." >&2
             exit 1
           fi
+          if [ -z "${ALICLOUD_EIP_ID:-}" ]; then
+            echo "FATAL: vars.ALICLOUD_EIP_ID is not set." >&2
+            echo "  The build instance is in a VPC, and the Packer" >&2
+            echo "  builder only reaches it over an elastic IP:" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output packer_eip_id" >&2
+            exit 1
+          fi
           VSWITCH_ID="$ALICLOUD_VSWITCH_ID"
 
           # The zone the VSwitch sits in — the builder needs both.
@@ -1007,7 +1014,7 @@ jobs:
           echo "vswitch_id=$VSWITCH_ID"     >> "$GITHUB_OUTPUT"
           echo "zone_id=$ZONE_ID"           >> "$GITHUB_OUTPUT"
           echo "source_image_id=$SOURCE_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Bake placement: vpc=$ALICLOUD_VPC_ID vswitch=$VSWITCH_ID zone=$ZONE_ID image=$SOURCE_IMAGE"
+          echo "Bake placement: vpc=$ALICLOUD_VPC_ID vswitch=$VSWITCH_ID zone=$ZONE_ID image=$SOURCE_IMAGE eip=$ALICLOUD_EIP_ID"
 
       - name: Packer init
         working-directory: infra/alicloud/packer
@@ -1024,6 +1031,7 @@ jobs:
           VSWITCH_ID: ${{ steps.bake-network.outputs.vswitch_id }}
           ZONE_ID: ${{ steps.bake-network.outputs.zone_id }}
           SOURCE_IMAGE_ID: ${{ steps.bake-network.outputs.source_image_id }}
+          EIP_ID: ${{ vars.ALICLOUD_EIP_ID }}
           # GITHUB_TOKEN is consumed by 03-bake-images.sh to `docker login
           # ghcr.io` before pulling the blitzlog-agent image. Empty when
           # the secret isn't set; the script warns and the pull fails.
@@ -1042,6 +1050,7 @@ jobs:
               -var "vswitch_id=${VSWITCH_ID}" \
               -var "zone_id=${ZONE_ID}" \
               -var "source_image_id=${SOURCE_IMAGE_ID}" \
+              -var "eip_id=${EIP_ID}" \
               agent-ecs-ubuntu.pkr.hcl
           # Packer writes manifest.json (via the `manifest` post-processor
           # in agent-ecs-ubuntu.pkr.hcl) with the build's artifact_id

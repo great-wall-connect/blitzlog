@@ -302,17 +302,30 @@ than failing the launch.
 
 ### Running the bake locally
 
-The CI job needs two repo variables — the VPC and the VSwitch the
-bake instance is launched into:
+The CI job needs three repo variables — the VPC and the VSwitch the
+bake instance is launched into, and the elastic IP it gets its
+public address from:
 
 ```bash
 gh variable set ALICLOUD_VPC_ID --body "$(cd infra/alicloud/bootstrap && terraform output -raw vpc_id)"
 gh variable set ALICLOUD_VSWITCH_ID --body vsw-j6cnyi1xrg6gbi3zc5ddg
+gh variable set ALICLOUD_EIP_ID --body "$(cd infra/alicloud/bootstrap && terraform output -raw packer_eip_id)"
 ```
 
 The VSwitch must be in a zone where the ARM64 instance type is
 offered (`cn-hongkong-b` and `cn-hongkong-d` today; `cn-hongkong-c`
 has no ARM64 spot inventory).
+
+The EIP is not optional. The build instance lives in a VPC, and the
+`alicloud-ecs` builder only reaches a VPC instance over an elastic
+IP — it cannot use the instance's own public IP, and it cannot
+allocate the EIP itself either: it sends the same
+`internet_max_bandwidth_out` to both the RunInstances call and the
+AllocateEipAddress call, and the two constraints collide (the EIP
+call rejects a bandwidth below 1, while any non-zero bandwidth makes
+ECS hand the instance an ECS-managed public IP that cannot be
+replaced by an EIP). The bootstrap stack therefore owns the EIP and
+the bake takes it as `-var eip_id=...`.
 
 Locally, the same bake runs with:
 
@@ -333,6 +346,7 @@ packer build -force \
   -var vpc_id=vpc-j6csy1qafim6vio53korm \
   -var vswitch_id=vsw-j6cnyi1xrg6gbi3zc5ddg \
   -var zone_id=cn-hongkong-b \
+  -var eip_id=eip-j6cba1fvruw554vebdt43 \
   -var github_token="$(grep -oP 'GITHUB_TOKEN=\K\S+' ../../aws/packer/.env)" \
   agent-ecs-ubuntu.pkr.hcl
 ```
@@ -403,6 +417,8 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
 | `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0 (see Known limitations). |
 | `MissingSecurityToken` from the `aliyun` CLI | The CLI does not read the `ALIBABA_CLOUD_*` environment variables for authentication. It needs a profile file in `StsToken` mode (the CI job writes one; locally `aliyun configure --profile default` does). |
 | `InvalidInstanceType.NotSupported` / "not supported by the image architecture" | An x86 instance type with an ARM64 source image (or the reverse). The agent image is ARM64-only, so both the bake instance type and the runtime spot types must be ARM64 (`ecs.g8y.*`). |
+| `EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP` on the bake's "Error associating EIP" | The build instance already had an ECS-managed public IP ("natpublicip") — the template asks ECS for one, and Alicloud will not replace it with an EIP. The instance must get its public address from the EIP alone: leave `internet_charge_type` / `internet_max_bandwidth_out` unset and pass `-var eip_id=...`. |
+| `IllegalParam.Bandwidth` on the bake's "Error allocating EIP" | The builder allocates the EIP with the same bandwidth the instance uses, and the EIP call rejects a bandwidth below 1. Same fix as above: pass the EIP in with `eip_id` instead of letting the builder allocate one. |
 
 ## Known limitations
 
@@ -415,11 +431,16 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
   token-refresh schedule group before it terminates the instance;
   there is nothing equivalent to delete here.
 - **The Packer build instance's network** is resolved from the
-  bootstrap stack's VPC: the bake passes `vpc_id`, `vswitch_id` and
-  `zone_id` explicitly, so the plugin does not create a throwaway
-  VPC of its own. In CI those come from the repo variables
-  `ALICLOUD_VPC_ID` / `ALICLOUD_VSWITCH_ID`; locally they are
-  `-var` flags. The source image is the newest ARM64 Ubuntu 26.04 in
+  bootstrap stack's VPC: the bake passes `vpc_id`, `vswitch_id`,
+  `zone_id` and `eip_id` explicitly, so the plugin does not create a
+  throwaway VPC of its own. In CI those come from the repo variables
+  `ALICLOUD_VPC_ID` / `ALICLOUD_VSWITCH_ID` / `ALICLOUD_EIP_ID`;
+  locally they are `-var` flags. The EIP is not optional: the
+  `alicloud-ecs` builder only reaches a VPC instance over an elastic
+  IP, and it cannot allocate one itself (its own EIP allocation and
+  the RunInstances call share one bandwidth setting, and the two
+  constraints contradict each other — see the troubleshooting rows
+  above). The source image is the newest ARM64 Ubuntu 26.04 in
   the region (the agent container image is ARM64-only, so an x86
   source image would refuse to boot it).
 - **ECS instance creation is blocked on this account.**

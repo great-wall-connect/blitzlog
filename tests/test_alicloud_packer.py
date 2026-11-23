@@ -639,15 +639,47 @@ class TestAlicloudTemplateMatchesTheBuilderSchema(unittest.TestCase):
                 "when it is not told which one to use",
             )
 
-    def test_uses_pay_by_traffic(self):
-        """cn-hongkong is outside mainland China, where only
-        PayByTraffic is accepted — PayByBandwidth is rejected."""
+    def test_takes_the_elastic_ip_from_outside(self):
+        """The builder only reaches a VPC instance over an EIP, and it
+        cannot allocate one itself: its EIP allocation and the
+        RunInstances call share one bandwidth setting, and the two
+        constraints contradict each other — the EIP call rejects a
+        bandwidth below 1 (`IllegalParam.Bandwidth`), while a
+        non-zero bandwidth makes ECS hand the instance an ECS-managed
+        public IP that cannot be replaced by an EIP. So the EIP comes
+        in from outside."""
         self.assertIn(
-            'internet_charge_type      = "PayByTraffic"',
+            "eip_id",
             self.template,
-            "the build instance's charge type must be PayByTraffic in "
-            "the international regions",
+            "the build instance's public address must come from an EIP "
+            "the caller supplies",
         )
+        m = re.search(
+            r'variable "eip_id" \{(.*?)\n\}',
+            self.template,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(m, "eip_id must be declared as a variable")
+        self.assertNotIn(
+            "default",
+            m.group(1),
+            "eip_id must be required — the builder cannot allocate one "
+            "itself, so a default would fail later and less clearly",
+        )
+
+    def test_the_instance_gets_no_public_ip_of_its_own(self):
+        """An ECS-managed public IP ("natpublicip") and an EIP are
+        mutually exclusive: Alicloud refuses to associate the EIP with
+        an instance that already has one
+        (`EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP`). The instance's only
+        public address is the EIP."""
+        for key in ("internet_charge_type", "internet_max_bandwidth_out"):
+            self.assertNotRegex(
+                self.template,
+                rf"(?m)^\s*{key}\s*=",
+                f"{key} asks ECS for a public IP on the build instance, "
+                "which then blocks the EIP association",
+            )
 
     def test_requests_a_public_address(self):
         """The plugin's SSH communicator connects to the instance's
@@ -822,6 +854,7 @@ class TestAlicloudOssAuthUsesRamRoleAndRegion(unittest.TestCase):
                 ),
                 f"every `ossutil {verb}` must go through " "_bl_oss_uploader_ossutil",
             )
+
 
 class TestAlicloudImageIdContractIsConsistent(unittest.TestCase):
     """The publish path and the read path must agree on the secret
