@@ -185,29 +185,60 @@ alibabacloud-credentials==1.0.12 \
     --hash=sha256:87da41ea3ffb146b44d999c62c160c2b96b0c30275ae35205bcdfe79ba0c4119 \
     --hash=sha256:c09afcf579663374df056c20482fc1397240d20b4ccb143d23c287f3f8a91109
     # via
+    #   alibabacloud-gateway-pop
     #   alibabacloud-gateway-spi
     #   alibabacloud-tea-openapi
 alibabacloud-credentials-api==1.0.1 \
     --hash=sha256:5f27889113214fc53493b3e918eb26d73dfab2022e22bdaac262849b8e58cbc0 \
     --hash=sha256:8ea0668a6558f6956b8d20b2e561d19a80ea29c22cf56a3004d434b24a981b36
     # via alibabacloud-credentials
-alibabacloud-ecs20140526==7.11.6 \
-    --hash=sha256:90ea02717b7d54089174eca9b8c4b7ad5424732fec06373b54388d5e13c1642a \
-    --hash=sha256:c4efe08b3ea18fdade8ba63f4f3ca634d22c6d2775da6d0722998d237e7c36a9
+alibabacloud-darabonba-array==0.1.0 \
+    --hash=sha256:7f9a7c632518ff4f0cebb0d4e825a48c12e7cf0b9016ea25054dd73732e155aa
+    # via alibabacloud-gateway-pop
+alibabacloud-darabonba-encode-util==0.0.3 \
+    --hash=sha256:6a91c82f6cc4227091be39b65d1f6921d7330119bac7b911e5a26daf895cc9dc \
+    --hash=sha256:f293ed5f5933e97061a51d80aeb4bdc4d38bc67f6e0aca6eda7c5d7814b21c46
+    # via alibabacloud-gateway-pop
+alibabacloud-darabonba-map==0.0.1 \
+    --hash=sha256:adb17384658a1a8f72418f1838d4b6a5fd2566bfd392a3ef06d9dbb0a595a23f
+    # via alibabacloud-gateway-pop
+alibabacloud-darabonba-signature-util==0.0.4 \
+    --hash=sha256:71d79b2ae65957bcfbf699ced894fda782b32f9635f1616635533e5a90d5feb0
+    # via alibabacloud-gateway-pop
+alibabacloud-darabonba-string==0.0.4 \
+    --hash=sha256:ec6614c0448dadcbc5e466485838a1f8cfdd911135bea739e20b14511270c6f7
+    # via alibabacloud-gateway-pop
+alibabacloud-ecs20140526==7.11.10 \
+    --hash=sha256:429977fd98a512349fa5c4fdef513c840ede911e4987f18d3c95b1925965c009 \
+    --hash=sha256:556d83950499591e3c7cad5a98d3fc49050365998f02a070a03eb3b193c24e3d
     # via -r lambda/requirements-alicloud.in
+alibabacloud-endpoint-util==0.0.4 \
+    --hash=sha256:a593eb8ddd8168d5dc2216cd33111b144f9189fcd6e9ca20e48f358a739bbf90
+    # via alibabacloud-gateway-pop
+alibabacloud-gateway-pop==0.1.3 \
+    --hash=sha256:6314f92885d5ddc449716952beabbe9704e3469655a270703397955283676769 \
+    --hash=sha256:ae4998fb374f015c93a5728568fa19b53729d0b19a1675e2c6eaae390e5f721a
+    # via alibabacloud-ecs20140526
 alibabacloud-gateway-spi==0.0.4 \
     --hash=sha256:0d5256e95d8719da8ec9611b7ffbb12c2d26fdf7ce52c8f64e4e06350731e893 \
     --hash=sha256:73d6e20d65b54eed26d89c19640d3a7572e18c45ecada627f806f5dbe8ed2130
-    # via alibabacloud-tea-openapi
+    # via
+    #   alibabacloud-gateway-pop
+    #   alibabacloud-tea-openapi
 alibabacloud-oos20190601==3.7.0 \
     --hash=sha256:3ab99311b5402bd5f5433e0388d9ae6f0fff834aa3e8a99c7cea02310261f000 \
     --hash=sha256:fa11209f8373b7fea3b5f1e6947c7f7069554d7aa43f1381dc97df2021483d63
     # via -r lambda/requirements-alicloud.in
+alibabacloud-openapi-util==0.2.4 \
+    --hash=sha256:87022b9dcb7593a601f7a40ca698227ac3ccb776b58cb7b06b8dc7f510995c34 \
+    --hash=sha256:a2474f230b5965ae9a8c286e0dc86132a887928d02d20b8182656cf6b1b6c5bd
+    # via alibabacloud-gateway-pop
 alibabacloud-tea==0.4.3 \
     --hash=sha256:ec8053d0aa8d43ebe1deb632d5c5404339b39ec9a18a0707d57765838418504a
     # via
     #   alibabacloud-credentials
     #   alibabacloud-tea-util
+    #   alibabacloud-tea-xml
     #   darabonba-core
 alibabacloud-tea-openapi==0.4.6 \
     --hash=sha256:c9e1727b9fb2936f487d050fc3590c99f9f2065256dc3a927e5b61f414674ed6 \
@@ -218,7 +249,13 @@ alibabacloud-tea-openapi==0.4.6 \
 alibabacloud-tea-util==0.3.15 \
     --hash=sha256:79f78e596f6be03fb9565e34ac45420f3730e52888376cc9713bd07432a4c6cc \
     --hash=sha256:afb3dd8ad5cd2f93804258fbbac4360c050462100499269795ea055c1644e193
-    # via alibabacloud-tea-openapi
+    # via
+    #   alibabacloud-gateway-pop
+    #   alibabacloud-openapi-util
+    #   alibabacloud-tea-openapi
+alibabacloud-tea-xml==0.0.3 \
+    --hash=sha256:979cb51fadf43de77f41c69fc69c12529728919f849723eb0cd24eb7b048a90c
+    # via alibabacloud-gateway-pop
 aliyun-python-sdk-core==2.16.1 \
     --hash=sha256:0f25a6e8ec1ea29c76610278cff81cbff85149a6e692bf2398a6f9b77e5e7424
     # via
@@ -550,6 +587,8 @@ cryptography==43.0.3 \
     # via
     #   -r lambda/requirements-alicloud.in
     #   -r lambda/requirements.in
+    #   alibabacloud-darabonba-signature-util
+    #   alibabacloud-openapi-util
     #   alibabacloud-tea-openapi
     #   aliyun-python-sdk-core
 darabonba-core==1.0.9 \
