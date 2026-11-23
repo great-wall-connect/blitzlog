@@ -658,8 +658,13 @@ class TestAlicloudComputeRegion(unittest.TestCase):
 class TestAlicloudComputeBuildUserDataDownloaderScript(unittest.TestCase):
     """The downloader script rendered by `AlicloudCompute` must
     use the Aliyun metadata endpoint (`100.100.100.200`) and
-    `aliyun oss cp`, not the AWS IMDSv2 + `aws s3 cp` pair.
+    `ossutil cp`, not the AWS IMDSv2 + `aws s3 cp` pair.
     Mirrors the regression test in `test_provider_aws.py`.
+
+    The credentials come from the instance's RAM role (ossutil's
+    `EcsRamRole` mode reads them from IMDS) and the OSS endpoint is
+    the intranet one — reachable from inside the region without
+    leaving the VPC, and not billed as internet egress.
     """
 
     def test_downloader_references_aliyun_metadata_endpoint(self):
@@ -667,9 +672,21 @@ class TestAlicloudComputeBuildUserDataDownloaderScript(unittest.TestCase):
             "my-bucket", "user-data/issue-42.sh"
         )
         self.assertIn("100.100.100.200/latest/meta-data/region-id", script)
-        self.assertIn("aliyun oss cp", script)
+        self.assertIn("ossutil cp", script)
         self.assertIn("oss://my-bucket/user-data/issue-42.sh", script)
         self.assertIn("bash /tmp/bootstrap.sh", script)
+
+    def test_downloader_authenticates_with_the_instance_ram_role(self):
+        """Without the role's credentials the OSS read fails: the
+        `aliyun` CLI ignores the ALIBABA_CLOUD_* environment
+        variables, and ossutil needs the role explicitly."""
+        script = AlicloudCompute().build_user_data_downloader_script("my-bucket", "k")
+        self.assertIn("--mode EcsRamRole", script)
+        self.assertIn("--region", script)
+
+    def test_downloader_uses_the_intranet_oss_endpoint(self):
+        script = AlicloudCompute().build_user_data_downloader_script("my-bucket", "k")
+        self.assertIn("oss-$REGION-internal.aliyuncs.com", script)
 
     def test_downloader_does_not_reference_aws_imds(self):
         """Sanity: the EC2 heredoc leaks (169.254.169.254,
@@ -680,6 +697,17 @@ class TestAlicloudComputeBuildUserDataDownloaderScript(unittest.TestCase):
         self.assertNotIn("169.254.169.254", script)
         self.assertNotIn("aws s3 cp", script)
         self.assertNotIn("api/token", script)
+
+    def test_downloader_fits_in_the_user_data_cap(self):
+        """ECS caps `UserData` at 16 KB, and the downloader IS the
+        user-data — the bootstrap it fetches has no such limit (it
+        comes from OSS)."""
+        script = AlicloudCompute().build_user_data_downloader_script("my-bucket", "k")
+        self.assertLess(
+            len(script),
+            16384,
+            "the downloader is the user-data, and ECS caps it at 16 KB",
+        )
 
 
 class TestAlicloudComputeDescribeImage(unittest.TestCase):
@@ -853,6 +881,51 @@ class TestAlicloudComputeLaunchSpot(unittest.TestCase):
         self.assertEqual(request.v_switch_id, "vsw-aaa")
         self.assertEqual(request.instance_type, "ecs.t6-c1m2.large")
         self.assertEqual(request.zone_id, "cn-hangzhou-h")
+
+    def test_launch_gives_the_agent_instance_a_public_address(self):
+        """The agent instance needs outbound internet — it reaches the
+        GitHub API, the model provider and Tailscale.
+
+        The AWS side gets it from the default VPC's subnets, which
+        auto-assign a public IP and route 0.0.0.0/0 to the internet
+        gateway: no NAT gateway, no NAT fee. The Alicloud analogue is
+        an ECS-managed public IP, which is what a non-zero bandwidth
+        asks for. A zero bandwidth means an instance that cannot reach
+        anything, and the agent silently never starts.
+        """
+        with patch("provider.alicloud._ecs_client") as mock_factory:
+            mock_ecs = mock_factory.return_value
+            mock_ecs.spot_prices = MagicMock()
+            compute = AlicloudCompute()
+            compute.spot_prices = MagicMock(
+                return_value=[
+                    SpotQuote(
+                        availability_zone="cn-hongkong-b",
+                        instance_type="ecs.g8y.large",
+                        price_usd_hour=0.01,
+                    )
+                ]
+            )
+            compute.az_subnet_map = MagicMock(return_value={"cn-hongkong-b": "vsw-aaa"})
+            ids = MagicMock()
+            ids.instance_id_set = ["i-bp1abc"]
+            response = MagicMock()
+            response.body.instance_id_sets = ids
+            mock_ecs.run_instances_with_options.return_value = response
+            compute.launch_spot(self._spec())
+        request = mock_ecs.run_instances_with_options.call_args.args[0]
+        self.assertGreater(
+            request.internet_max_bandwidth_out,
+            0,
+            "the agent instance needs a public address — without one it "
+            "has no route out of the VPC",
+        )
+        self.assertEqual(
+            request.internet_charge_type,
+            "PayByTraffic",
+            "the international regions only accept PayByTraffic, and it "
+            "means the public address costs nothing unless it is used",
+        )
 
     def test_launch_spot_falls_back_to_on_demand_when_all_spot_fail(self):
         from Tea.exceptions import TeaException

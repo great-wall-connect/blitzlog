@@ -118,6 +118,31 @@ class TestAlicloudAutonomousUserData(unittest.TestCase):
             "ossutil must read the instance RAM role from the metadata " "service",
         )
 
+    def test_the_aliyun_cli_gets_a_profile_before_it_is_called(self):
+        """The aliyun CLI authenticates from a PROFILE, not from the
+        ALIBABA_CLOUD_* environment variables — without one every call
+        fails with "profile configuration failed" and the agent never
+        gets its secrets.
+
+        The profile is written in EcsRamRole mode: the instance's RAM
+        role is the credential source, and the CLI resolves the role
+        name from IMDS itself.
+        """
+        ud = self._render()
+        self.assertIn(
+            "aliyun configure set --profile default --mode EcsRamRole",
+            ud,
+            "the CLI needs a profile in EcsRamRole mode — it ignores the "
+            "ALIBABA_CLOUD_* environment variables",
+        )
+        profile_at = ud.index("aliyun configure set --profile default")
+        first_call_at = ud.index("aliyun oos GetSecretParameter")
+        self.assertLess(
+            profile_at,
+            first_call_at,
+            "the profile must be written before the first aliyun call",
+        )
+
     def test_aliyun_cli_install_block_present(self):
         """The CLI install block must curl the aliyun CLI for the OOS read."""
         ud = self._render()

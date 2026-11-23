@@ -206,6 +206,11 @@ cd infra/alicloud/dev && terraform output webhook_url
 # https://<api-gateway-group>.cn-hongkong.alicloudapi.com/
 ```
 
+**Point the dev GitHub App's webhook URL at it** (the app's settings
+page — Developer settings → GitHub Apps → your app → Webhook URL).
+The app has ONE webhook URL, so it can only serve one deployment at a
+time; the dev app is the one that moves to Alicloud.
+
 Three details of the Alicloud webhook path, each of which cost a
 debugging round trip:
 
@@ -414,6 +419,51 @@ To go back to AWS:
 gh variable delete BLITZLOG_PROVIDER     # it defaults to 'aws'
 gh variable delete ENABLE_ALICLOUD_DEPLOY
 ```
+
+---
+
+## 6. Running the agent
+
+The webhook is the only thing that starts an agent: the GitHub App
+POSTs the event to the API Gateway, the function verifies the
+signature, reads the app's credentials from OOS and launches an ECS
+instance with the baked image.
+
+### Before the first run
+
+1. **The app's webhook URL** must be the `webhook_url` output above
+   (§3, "The webhook URL"). The app has one URL, so it can only serve
+   one deployment at a time.
+2. **The agent instance needs a public address.** It reaches the
+   GitHub API, the model provider and Tailscale, and the VPC has no
+   NAT gateway. The launch asks for an ECS-managed public IP
+   (`internet_max_bandwidth_out = 100`, `PayByTraffic`) — the exact
+   analogue of the AWS side, where the default VPC's subnets
+   auto-assign a public IP and route `0.0.0.0/0` to the internet
+   gateway. Neither side pays a NAT fee.
+3. **SSH for debugging** is off by default (the security group's
+   ingress rules come from `ssh_allowed_cidrs`). Put your own CIDR in
+   `infra/alicloud/dev/terraform.tfvars` and apply if you want to
+   look at the host while the agent runs:
+   ```hcl
+   ssh_allowed_cidrs = ["<your-ip>/32"]
+   ```
+
+### Watching a run
+
+```bash
+# The function's log
+aliyun fc GetLog --region cn-hongkong --functionName blitzlog-dev-handler --log-type FC
+
+# The instance the function launched
+aliyun ecs DescribeInstances --RegionId cn-hongkong --PageSize 5
+
+# The agent's own log uploads (the agent writes here from the host)
+aliyun oss ls oss://gwc-blitzlog-agent-logs/dev/ --region cn-hongkong
+```
+
+The agent's host-side bootstrap log is `/var/log/backend-bootstrap.log`
+on the instance (SSH in, or read it after the run).
 
 ---
 

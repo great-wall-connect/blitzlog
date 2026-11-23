@@ -33,11 +33,14 @@ image.
     swallow for the unconfigured user-pool case.
 
 The `aliyun` CLI is installed in the user-data prologue (one-time,
-~10s on a fresh ECS instance) and the `aliyun configure` step
-reaches out to the instance RAM role to get credentials — the
-`alicloud_ram_role.ecs_agent_role` policy in
-`infra/alicloud/modules/core/ram.tf` grants `oos:GetSecretParameter`
-on the `blitzlog/<env>/<service>/<name>` parameters.
+~10s on a fresh ECS instance) and the `aliyun configure set --mode
+EcsRamRole` step that follows reaches out to the instance RAM role to
+get credentials — the CLI ignores the ALIBABA_CLOUD_* environment
+variables, so without that profile every call fails with "profile
+configuration failed". The `alicloud_ram_role.ecs_agent_role` policy
+in `infra/alicloud/modules/core/ram.tf` grants
+`oos:GetSecretParameter` on the `blitzlog/<env>/<service>/<name>`
+parameters.
 
 This file is the parallel of `scripts/aws/_common.py`. The
 per-cloud `autonomous.py` / `assisted.py` import from this file
@@ -482,6 +485,14 @@ INSTANCE_ID=$(curl -s -H "X-aliyun-ecs-metadata-token: $TOKEN" http://100.100.10
 REGION=$(curl -s -H "X-aliyun-ecs-metadata-token: $TOKEN" http://100.100.100.200/latest/meta-data/region-id)
 export ALIBABA_CLOUD_REGION=$REGION
 export BLITZLOG_ENV={_blitzlog_env()}
+
+# The aliyun CLI authenticates from a PROFILE, not from the
+# ALIBABA_CLOUD_* environment variables — without one every call
+# fails with "profile configuration failed". The credential source is
+# the RAM role the FC attached to this instance, so the profile is
+# written in EcsRamRole mode and the CLI resolves the role name from
+# IMDS itself. This must come before the first `aliyun` call below.
+aliyun configure set --profile default --mode EcsRamRole --region "$REGION" >/dev/null
 
 _CCSECRET=/tmp/cc_secret.json
 get_oos_param() {{

@@ -734,24 +734,35 @@ class AlicloudCompute(ComputeProvider):
              — Aliyun metadata endpoint.
           2. `curl http://100.100.100.200/latest/meta-data/instance-id`
              — used for the CloudWatch session log.
-          3. `aliyun oss cp oss://<bucket>/<key> /tmp/bootstrap.sh --endpoint
-             https://oss-$region.aliyuncs.com` — downloads the bootstrap.
+          3. `ossutil cp oss://<bucket>/<key> /tmp/bootstrap.sh` —
+             downloads the bootstrap.
 
-        The `aliyun` CLI is pre-installed by the Packer pipeline
-        (`infra/aws/packer/agent-docker-ubuntu.pkr.hcl` Phase 5+
-        will switch the bootstrap heredoc to render `aliyun oss
-        cp` natively; today the EC2-side heredoc still uses
-        `aws s3 cp` because Phase 5 has not shipped yet).
+        The credentials come from the instance's RAM role: ossutil's
+        `EcsRamRole` mode fetches the role's temporary credentials
+        from the metadata service, and that role is what grants the
+        read on the bootstrap object. (The `aliyun` CLI does NOT read
+        the ALIBABA_CLOUD_* environment variables for authentication
+        — it needs a profile — so the bootstrap script writes one for
+        its own OOS reads.)
 
-        The size budget — `metadata + curl + aliyun oss cp + bash`
-        — fits well under 16 KB.
+        The OSS endpoint is the INTRANET one
+        (`oss-$region-internal.aliyuncs.com`): it is reachable from
+        an ECS instance in the region without leaving the VPC, and
+        OSS traffic over it is not billed as internet egress.
+
+        The size budget — `metadata + curl + ossutil cp + bash` —
+        fits well under 16 KB.
         """
         return f"""#!/bin/bash
 set -e
 REGION=$(curl -s http://100.100.100.200/latest/meta-data/region-id)
 INSTANCE_ID=$(curl -s http://100.100.100.200/latest/meta-data/instance-id)
-ENDPOINT="https://oss-$REGION.aliyuncs.com"
-aliyun oss cp "oss://{bucket}/{key}" /tmp/bootstrap.sh --endpoint "$ENDPOINT"
+ENDPOINT="oss-$REGION-internal.aliyuncs.com"
+if ! command -v ossutil >/dev/null 2>&1; then
+    echo "ERROR: ossutil is not installed — the agent image must bake it" >&2
+    exit 1
+fi
+ossutil cp "oss://{bucket}/{key}" /tmp/bootstrap.sh --mode EcsRamRole --region "$REGION" -e "$ENDPOINT"
 bash /tmp/bootstrap.sh
 """
 
@@ -798,7 +809,21 @@ bash /tmp/bootstrap.sh
             "user_data": spec.user_data_b64,
             "instance_name": "blitzlog-agent",
             "io_optimized": "optimized",
-            "internet_max_bandwidth_out": 0,
+            # The agent instance needs outbound internet: it reaches
+            # the GitHub API, the model provider and Tailscale. The
+            # AWS side gets that from the default VPC's subnets,
+            # which auto-assign a public IP and route 0.0.0.0/0 to
+            # the internet gateway — no NAT gateway, no NAT fee. The
+            # Alicloud analogue is an ECS-managed public IP, which is
+            # what a non-zero bandwidth asks for. The security group
+            # still admits nothing inbound except SSH from the
+            # operator's CIDRs.
+            #
+            # PayByTraffic is the only billing method the
+            # international regions accept, and it means the public
+            # address costs nothing unless it is used.
+            "internet_charge_type": "PayByTraffic",
+            "internet_max_bandwidth_out": 100,
             "ram_role_name": spec.instance_profile_name,
             "instance_charge_type": "PostPaid",
             "spot_strategy": "SpotWithPriceLimit",
