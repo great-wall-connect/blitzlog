@@ -31,5 +31,10 @@ resource "alicloud_eip_address" "packer" {
   # `COMMODITY.INVALID_COMPONENT`. Billed by traffic, an idle EIP
   # costs nothing.
   internet_charge_type = "PayByTraffic"
-  bandwidth            = "5"
+
+  # The bake pulls the agent image (~450 MiB) and the whisper model
+  # (~150 MiB) through this address, so the cap is what the pull
+  # speed is. At 5 Mbps that is ~12 minutes of transfer; billed by
+  # traffic, a wider cap costs nothing unless it is used.
+  bandwidth = "100"
 }

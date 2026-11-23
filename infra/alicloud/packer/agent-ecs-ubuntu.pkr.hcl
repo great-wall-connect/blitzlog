@@ -81,6 +81,12 @@ variable "eip_id" {
   description = "ID of the elastic IP the build instance gets its public address from (e.g. `eip-j6c...`). Required: the builder only reaches a VPC instance over an EIP, and it cannot allocate one itself — see the `eip_id` note on the source block. The bootstrap stack owns it: `cd infra/alicloud/bootstrap && terraform output packer_eip_id`."
 }
 
+variable "ecs_ram_role_name" {
+  type        = string
+  description = "RAM role attached to the build instance. ossutil fetches the whisper model from OSS in `EcsRamRole` mode, which reads the instance's role credentials from the metadata service — without a role there are no credentials. The packer build role carries `oss:GetObject` on the STT bucket and `ram:PassRole` on itself."
+  default     = "blitzlog-packer-build-role"
+}
+
 source "alicloud-ecs" "ubuntu" {
   region            = var.alicloud_region
   source_image      = var.source_image_id
@@ -112,6 +118,14 @@ source "alicloud-ecs" "ubuntu" {
   # association when the build ends; the EIP itself survives for the
   # next bake.
   eip_id = var.eip_id
+
+  # The build instance downloads the whisper model from OSS with
+  # ossutil in `EcsRamRole` mode, which takes the credentials from
+  # the RAM role attached to the INSTANCE (not from the Packer
+  # process) — so the instance needs one. The packer build role has
+  # `oss:GetObject` on the STT bucket and `ram:PassRole` on itself,
+  # which is what lets the caller attach it.
+  ecs_ram_role_name = var.ecs_ram_role_name
 
   # `associate_public_ip_address` is what makes the builder associate
   # the EIP with the instance. It does NOT ask ECS for a public IP of

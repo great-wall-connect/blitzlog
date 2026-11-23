@@ -112,7 +112,7 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
         # is what adds the region + RAM-role arguments ossutil needs.
         for verb in ("cp", "ls", "rm"):
             self.assertIn(
-                f"_bl_oss_run {verb} ",
+                f'_bl_oss_run "$region" {verb} ',
                 ud,
                 f"Inline library must call `ossutil {verb}`",
             )
@@ -120,6 +120,14 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
             "ossutil --mode EcsRamRole",
             ud,
             "the inline library must invoke ossutil in RAM-role mode",
+        )
+        self.assertIn(
+            'ossutil --region "$region" --mode EcsRamRole',
+            ud,
+            "the wrapper must hand ossutil the region the caller "
+            "resolved — re-deriving it from the environment drops it "
+            "whenever the caller knows the region and the environment "
+            "does not",
         )
 
     def test_aliyun_imds_endpoint(self):

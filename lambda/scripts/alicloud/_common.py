@@ -80,8 +80,8 @@ _bl_oss_log() {
 
 # Resolve the region for ossutil --endpoint. Priority: explicit
 # $1 > $REGION (set in the secrets block from IMDS) > $ALIBABA_CLOUD_REGION
-# (set by `aliyun configure`) > "" (let ossutil fall back to its
-# own configured default).
+# (set by `aliyun configure`) > $ALICLOUD_REGION > "" (let ossutil
+# fall back to its own configured default).
 _bl_oss_region() {
     if [ -n "${1:-}" ]; then
         printf '%s' "$1"
@@ -89,6 +89,8 @@ _bl_oss_region() {
         printf '%s' "$REGION"
     elif [ -n "${ALIBABA_CLOUD_REGION:-}" ]; then
         printf '%s' "$ALIBABA_CLOUD_REGION"
+    elif [ -n "${ALICLOUD_REGION:-}" ]; then
+        printf '%s' "$ALICLOUD_REGION"
     fi
 }
 
@@ -100,11 +102,15 @@ _bl_oss_region() {
 # metadata server at 100.100.100.200 — the same one the bootstrap
 # hits in the secrets block. The EcsRamRole mode is what selects that
 # source.
+# The region arrives as an argument: the caller has already
+# resolved it, and re-deriving it from the environment here would
+# drop it whenever the caller knew the region but the environment
+# did not.
 _bl_oss_run() {
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        OSS_REGION="$ep" ossutil --mode EcsRamRole "$@"
+    local region="$1"
+    shift
+    if [ -n "$region" ]; then
+        OSS_REGION="$region" ossutil --region "$region" --mode EcsRamRole "$@"
     else
         ossutil --mode EcsRamRole "$@"
     fi
@@ -116,12 +122,12 @@ blitzlog_oss_get() {
         _bl_oss_log "ERROR: blitzlog_oss_get: missing arg (bucket='$bucket' key='$key' dest='$dest')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        _bl_oss_run cp -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}" "$dest"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" cp -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}" "$dest"
     else
-        _bl_oss_run cp "oss://${bucket}/${key}" "$dest"
+        _bl_oss_run "" cp "oss://${bucket}/${key}" "$dest"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -136,12 +142,12 @@ blitzlog_oss_put() {
         _bl_oss_log "ERROR: blitzlog_oss_put: missing arg (bucket='$bucket' key='$key' src='$src')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        _bl_oss_run cp -e "oss-${ep}.aliyuncs.com" "$src" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" cp -e "oss-${region}.aliyuncs.com" "$src" "oss://${bucket}/${key}"
     else
-        _bl_oss_run cp "$src" "oss://${bucket}/${key}"
+        _bl_oss_run "" cp "$src" "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -156,12 +162,12 @@ blitzlog_oss_ls() {
         _bl_oss_log "ERROR: blitzlog_oss_ls: missing arg (bucket='$bucket' key='$key')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        _bl_oss_run ls -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" ls -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}"
     else
-        _bl_oss_run ls "oss://${bucket}/${key}"
+        _bl_oss_run "" ls "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -176,12 +182,12 @@ blitzlog_oss_rm() {
         _bl_oss_log "ERROR: blitzlog_oss_rm: missing arg (bucket='$bucket' key='$key')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        _bl_oss_run rm -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" rm -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}"
     else
-        _bl_oss_run rm "oss://${bucket}/${key}"
+        _bl_oss_run "" rm "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then

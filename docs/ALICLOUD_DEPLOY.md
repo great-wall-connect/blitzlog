@@ -362,6 +362,13 @@ Two things the bake needs that the AWS leg does not:
   exist before the bake — the AWS side uploads it from
   `terraform apply`; the Alicloud side has no equivalent
   provisioner, so upload it once with `aliyun ossutil cp`.
+- **A RAM role on the build instance.** The model download runs
+  `ossutil` in `EcsRamRole` mode, which reads the instance's role
+  credentials from the metadata service — the AWS analogue of the
+  AMI's instance profile. The bake attaches the packer build role
+  (`ecs_ram_role_name`), which carries `oss:GetObject` on the STT
+  bucket and `ram:PassRole` on itself. Without it the download has
+  no credentials.
 
 `packer init` needs the plugin from the GitHub releases API. When
 that API is rate-limited, install the release asset by hand into
@@ -419,6 +426,7 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
 | `InvalidInstanceType.NotSupported` / "not supported by the image architecture" | An x86 instance type with an ARM64 source image (or the reverse). The agent image is ARM64-only, so both the bake instance type and the runtime spot types must be ARM64 (`ecs.g8y.*`). |
 | `EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP` on the bake's "Error associating EIP" | The build instance already had an ECS-managed public IP ("natpublicip") — the template asks ECS for one, and Alicloud will not replace it with an EIP. The instance must get its public address from the EIP alone: leave `internet_charge_type` / `internet_max_bandwidth_out` unset and pass `-var eip_id=...`. |
 | `IllegalParam.Bandwidth` on the bake's "Error allocating EIP" | The builder allocates the EIP with the same bandwidth the instance uses, and the EIP call rejects a bandwidth below 1. Same fix as above: pass the EIP in with `eip_id` instead of letting the builder allocate one. |
+| `region must be set in sign version 4` on the bake's model download | ossutil signs with SigV4 and needs the region as its own parameter — the `-e` endpoint is not enough. The region must reach ossutil explicitly (`--region`), and the instance needs a RAM role for the `EcsRamRole` credentials. |
 
 ## Known limitations
 

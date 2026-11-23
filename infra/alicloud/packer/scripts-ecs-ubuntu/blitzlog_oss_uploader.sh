@@ -38,20 +38,24 @@ _bl_oss_uploader_log() {
 }
 
 # --- internal region resolver ------------------------------------------
-# Resolution order: explicit $1 > $REGION > $ALIBABA_CLOUD_REGION > ""
-# (let `ossutil` fall back to its own configured default).
+# Resolution order: explicit $1 > $REGION > $ALIBABA_CLOUD_REGION >
+# $ALICLOUD_REGION > "" (let `ossutil` fall back to its own
+# configured default).
 #
 # $REGION is set on the ECS host by watchdog.sh from the Aliyun
 # metadata service. $ALIBABA_CLOUD_REGION is set by `aliyun configure`
-# and by the Lambda-rendered user-data bootstrap env. Centralising the
-# fallback here means callers don't have to know which one applies.
+# and by the Lambda-rendered user-data bootstrap env. $ALICLOUD_REGION
+# is the name the Packer bake passes — at bake time neither of the
+# other two exists, and the region has to come from somewhere.
 _bl_oss_uploader_region() {
     if [ -n "${1:-}" ]; then
         printf '%s' "$1"
     elif [ -n "${REGION:-}" ]; then
         printf '%s' "$REGION"
-    else
-        printf '%s' "${ALIBABA_CLOUD_REGION:-}"
+    elif [ -n "${ALIBABA_CLOUD_REGION:-}" ]; then
+        printf '%s' "$ALIBABA_CLOUD_REGION"
+    elif [ -n "${ALICLOUD_REGION:-}" ]; then
+        printf '%s' "$ALICLOUD_REGION"
     fi
 }
 
@@ -59,19 +63,26 @@ _bl_oss_uploader_region() {
 # ossutil v2 signs with SigV4, which needs the region as its own
 # parameter — the `-e` endpoint alone is not enough ("region must be
 # set in sign version 4"). It also does NOT read the ALIBABA_CLOUD_*
-# environment variables the Alicloud SDKs use; it wants OSS_REGION
+# environment variables the Alicloud SDKs use; it wants the region
 # plus, on an ECS instance with a RAM role attached, the EcsRamRole
 # mode so it fetches the role's temporary credentials from the
 # metadata service at 100.100.100.200.
+#
+# The region is an ARGUMENT, not something re-derived from the
+# environment: the caller has already resolved it (possibly from its
+# own argument), and re-deriving it here silently dropped it whenever
+# the caller knew the region but the environment did not — which is
+# exactly the bake, where the region travels as a Packer
+# environment variable and $REGION / $ALIBABA_CLOUD_REGION are unset.
 #
 # Every caller of this library runs on an ECS instance that has the
 # blitzlog RAM role attached (the agent role at runtime, the packer
 # build role at bake time), so the role mode is always the right one.
 _bl_oss_uploader_ossutil() {
-    local region
-    region="$(_bl_oss_uploader_region "${OSS_REGION:-}")"
+    local region="$1"
+    shift
     if [ -n "$region" ]; then
-        OSS_REGION="$region" ossutil --mode EcsRamRole "$@"
+        OSS_REGION="$region" ossutil --region "$region" --mode EcsRamRole "$@"
     else
         ossutil --mode EcsRamRole "$@"
     fi
@@ -116,9 +127,9 @@ blitzlog_oss_put() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        _bl_oss_uploader_ossutil cp -e "$endpoint" "$local_path" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" cp -e "$endpoint" "$local_path" "oss://${bucket}/${key}" || rc=$?
     else
-        _bl_oss_uploader_ossutil cp "$local_path" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" cp "$local_path" "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS put failed: bucket=${bucket} key=${key} local=${local_path} exit=${rc}"
@@ -137,9 +148,9 @@ blitzlog_oss_get() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        _bl_oss_uploader_ossutil cp -e "$endpoint" "oss://${bucket}/${key}" "$local_path" || rc=$?
+        _bl_oss_uploader_ossutil "$region" cp -e "$endpoint" "oss://${bucket}/${key}" "$local_path" || rc=$?
     else
-        _bl_oss_uploader_ossutil cp "oss://${bucket}/${key}" "$local_path" || rc=$?
+        _bl_oss_uploader_ossutil "$region" cp "oss://${bucket}/${key}" "$local_path" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS get failed: bucket=${bucket} key=${key} exit=${rc}"
@@ -159,9 +170,9 @@ blitzlog_oss_rm() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        _bl_oss_uploader_ossutil rm -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" rm -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
     else
-        _bl_oss_uploader_ossutil rm "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" rm "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS rm failed: bucket=${bucket} key=${key} exit=${rc}"
@@ -182,9 +193,9 @@ blitzlog_oss_ls() {
     endpoint="$(_bl_oss_uploader_endpoint "$region")"
     local rc=0
     if [ -n "$endpoint" ]; then
-        _bl_oss_uploader_ossutil ls -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" ls -e "$endpoint" "oss://${bucket}/${key}" || rc=$?
     else
-        _bl_oss_uploader_ossutil ls "oss://${bucket}/${key}" || rc=$?
+        _bl_oss_uploader_ossutil "$region" ls "oss://${bucket}/${key}" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         _bl_oss_uploader_log "ERROR: OSS ls failed: bucket=${bucket} key=${key} exit=${rc}"

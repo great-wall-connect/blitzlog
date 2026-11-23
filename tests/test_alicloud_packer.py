@@ -692,6 +692,18 @@ class TestAlicloudTemplateMatchesTheBuilderSchema(unittest.TestCase):
             "communicator to reach it",
         )
 
+    def test_the_build_instance_has_a_ram_role(self):
+        """ossutil fetches the whisper model from OSS in
+        `EcsRamRole` mode, which takes the credentials from the RAM
+        role attached to the INSTANCE. Without a role there are no
+        credentials, and the model download fails."""
+        self.assertIn(
+            "ecs_ram_role_name",
+            self.template,
+            "the build instance needs a RAM role — ossutil reads the "
+            "instance's role credentials from the metadata service",
+        )
+
     def test_source_image_default_is_arm64(self):
         """The ghcr agent container image is ARM64-only, so an x86
         source image would refuse to boot it."""
@@ -823,7 +835,7 @@ class TestAlicloudOssAuthUsesRamRoleAndRegion(unittest.TestCase):
     def test_invocations_go_through_the_auth_wrapper(self):
         for verb in ("cp", "ls", "rm"):
             self.assertIn(
-                f"_bl_oss_uploader_ossutil {verb} ",
+                f'_bl_oss_uploader_ossutil "$region" {verb} ',
                 self.uploader_code,
                 f"every ossutil {verb} must go through the wrapper that "
                 "adds the region + RAM-role arguments",
@@ -835,6 +847,33 @@ class TestAlicloudOssAuthUsesRamRoleAndRegion(unittest.TestCase):
             self.uploader_code,
             "ossutil must be given the region — SigV4 rejects the "
             "request without it",
+        )
+
+    def test_wrapper_forwards_the_resolved_region(self):
+        """The region the CALLER resolved must reach ossutil.
+
+        The wrapper used to re-derive the region from the
+        environment, which silently dropped it at bake time: there the
+        region travels as `ALICLOUD_REGION` and neither `$REGION` nor
+        `$ALIBABA_CLOUD_REGION` exists, so ossutil was called without
+        a signing region and refused the request with "region must be
+        set in sign version 4"."""
+        self.assertIn(
+            'ossutil --region "$region" --mode EcsRamRole',
+            self.uploader_code,
+            "the wrapper must hand ossutil the region the caller "
+            "resolved — re-deriving it from the environment drops it "
+            "whenever the caller knows the region and the environment "
+            "does not",
+        )
+
+    def test_the_resolver_knows_the_bake_region_variable(self):
+        """The bake's region travels as `ALICLOUD_REGION` — the
+        resolver has to look at it."""
+        self.assertIn(
+            "ALICLOUD_REGION",
+            self.uploader_code,
+            "the region resolver must know the bake's env-var name",
         )
 
     def test_wrapper_uses_the_ecs_ram_role_mode(self):
