@@ -170,8 +170,7 @@ if [ -n "${GITHUB_TOKEN_SSM_PARAM:-}" ]; then
     GITHUB_TOKEN=$(aliyun oos GetSecretParameter \
         --Name "${OOS_TOKEN_PARAM}" \
         --WithDecryption true \
-        --region "$REGION" \
-        --output json 2>/dev/null \
+        --region "$REGION" 2>/dev/null \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null || echo "")
     if [ -n "$GITHUB_TOKEN" ]; then
         mkdir -p "/root/gh-config/${INSTANCE_ID}"

@@ -447,9 +447,13 @@ def _read_secrets_from_oos_script(issue_number: int, local_llm: bool = False) ->
     the FC-side RAM grant in `infra/alicloud/modules/core/ram.tf` is
     the only ACL the host needs.
 
-    `aliyun oos GetSecretParameter` returns the parameter in JSON; the
-    `--output json` flag + `python3 -c '... json.load(sys.stdin)
-    ["Parameter"]["Value"]'` is the canonical way to extract the value.
+    `aliyun oos GetSecretParameter` returns the parameter in JSON —
+    the CLI's default output — so
+    `python3 -c '... json.load(sys.stdin) ["Parameter"]["Value"]'` is
+    the canonical way to extract the value. (The CLI's `--output`
+    flag is the TABLE formatter — `--output cols=Field1,Field2` — and
+    rejects `json` with "bad flag format --output with field cols=
+    required".)
     We do the same dance the AWS-side does (IMDS token → region →
     store read), so the byte layout of the pre-#126 prologue stays the
     same except for the API name.
@@ -464,7 +468,7 @@ def _read_secrets_from_oos_script(issue_number: int, local_llm: bool = False) ->
             f'--Name "{oos_root}/opencode/api-key" '
             f"--WithDecryption true "
             f'--region "$REGION" '
-            f"--output json 2>/dev/null | python3 -c "
+            f"2>/dev/null | python3 -c "
             f'\'import sys, json; print(json.load(sys.stdin)["Parameter"]["Value"])\')\n'
             "export OPENCODE_API_KEY\n"
         )
@@ -489,7 +493,7 @@ get_oos_param() {{
         --Name "$name" \\
         --WithDecryption true \\
         --region "$REGION" \\
-        --output json 2>/dev/null > "$out"
+        2>/dev/null > "$out"
     python3 -c "import json,sys; print(json.load(open('$out'))['Parameter']['Value'])" 2>/dev/null
 }}
 

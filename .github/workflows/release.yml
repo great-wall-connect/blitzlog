@@ -984,10 +984,12 @@ jobs:
           VSWITCH_ID="$ALICLOUD_VSWITCH_ID"
 
           # The zone the VSwitch sits in — the builder needs both.
+          # No `--output json`: aliyun CLI 3.x's `--output` is the
+          # TABLE formatter (`--output cols=Field1,Field2`) and rejects
+          # `json`; the CLI's default output is already JSON.
           ZONE_ID=$(aliyun ecs DescribeVSwitches \
             --RegionId "$ALICLOUD_REGION" \
             --VSwitchId "$VSWITCH_ID" \
-            --output json \
             | python3 -c 'import sys,json; print(json.load(sys.stdin)["VSwitches"]["VSwitch"][0]["ZoneId"])')
           if [ -z "$ZONE_ID" ]; then
             echo "FATAL: could not resolve the zone of VSwitch $VSWITCH_ID" >&2
@@ -1003,7 +1005,6 @@ jobs:
             --Architecture arm64 \
             --ImageName 'ubuntu_26_04_arm64*' \
             --Status Available \
-            --output json \
             | python3 -c 'import sys,json; imgs=json.load(sys.stdin)["Images"]["Image"]; print(max((i["ImageId"] for i in imgs), default=""))')
           if [ -z "$SOURCE_IMAGE" ]; then
             echo "FATAL: no ARM64 Ubuntu 26.04 image found in $ALICLOUD_REGION." >&2
@@ -1487,8 +1488,7 @@ jobs:
             value=$(aliyun oos GetSecretParameter \
               --Name "$name" \
               --WithDecryption true \
-              --region "$ALICLOUD_REGION" \
-              --output json 2>/dev/null \
+              --region "$ALICLOUD_REGION" 2>/dev/null \
               | python3 -c 'import sys,json; print(json.load(sys.stdin)["Parameter"]["Value"], end="")' 2>/dev/null || true)
             if [ -z "$value" ]; then
               echo "FATAL: the OOS parameter ${name} is missing or empty." >&2

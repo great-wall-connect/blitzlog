@@ -71,19 +71,22 @@ PARAM="blitzlog/${BLITZLOG_ENV}/agent-ami-id-ecs-ubuntu"
 # so try CreateSecretParameter first and fall through to
 # UpdateSecretParameter (which adds a new version) — the same shape
 # as lambda/provider/alicloud.py::AlicloudSecretStore.put.
+#
+# No `--output json`: aliyun CLI 3.x's `--output` is the TABLE
+# formatter (`--output cols=Field1,Field2`) and rejects `json` with
+# "bad flag format --output with field cols= required" — the CLI's
+# default output is already JSON.
 if aliyun oos CreateSecretParameter \
     --Name "$PARAM" \
     --Value "$IMAGE_ID" \
     --Type "Secret" \
-    --region "$ALICLOUD_REGION" \
-    --output json >/dev/null 2>&1; then
+    --region "$ALICLOUD_REGION" >/dev/null 2>&1; then
     echo "Created $PARAM"
 else
     aliyun oos UpdateSecretParameter \
         --Name "$PARAM" \
         --Value "$IMAGE_ID" \
-        --region "$ALICLOUD_REGION" \
-        --output json >/dev/null
+        --region "$ALICLOUD_REGION" >/dev/null
     echo "Updated $PARAM"
 fi
 

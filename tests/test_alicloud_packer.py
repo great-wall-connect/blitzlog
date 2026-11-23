@@ -814,6 +814,64 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
         )
 
 
+class TestAlicloudCliIsNotAskedForJsonOutput(unittest.TestCase):
+    """aliyun CLI 3.x's `--output` is the TABLE formatter
+    (`--output cols=Field1,Field2 [rows=jmesPath]`) — it rejects
+    `json` with "bad flag format --output with field cols= required".
+
+    The CLI's default output is already JSON, so the flag must not be
+    passed. It fails at the call, not at review: the bake's publish
+    post-processor died with exactly that error after the image had
+    been baked.
+
+    `aws` still takes `--output json` — that is a different CLI — so
+    the check is per aliyun invocation, not per file.
+    """
+
+    # The files that shell out to the aliyun CLI.
+    FILES = (
+        "infra/alicloud/packer/scripts-ecs-ubuntu/05-publish-ami-id.sh",
+        "infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh",
+        "lambda/scripts/alicloud/_common.py",
+        ".github/workflows/release.yml",
+    )
+
+    @staticmethod
+    def _aliyun_calls_with_output_json(text: str) -> list[str]:
+        """Every `--output json` that belongs to an aliyun invocation.
+
+        The invocations span several lines, so the flag is attributed
+        to the aliyun command that opens its continuation window.
+        Comment lines are skipped — the rationale for not passing the
+        flag mentions the flag.
+        """
+        lines = text.splitlines()
+        hits = []
+        for i, line in enumerate(lines):
+            if "--output json" not in line or line.lstrip().startswith("#"):
+                continue
+            window = "\n".join(
+                l
+                for l in lines[max(0, i - 12) : i + 1]
+                if not l.lstrip().startswith("#")
+            )
+            if "aliyun " in window:
+                hits.append(f"line {i + 1}: {line.strip()}")
+        return hits
+
+    def test_no_aliyun_call_asks_for_json_output(self):
+        for rel in self.FILES:
+            path = os.path.join(REPO_ROOT, rel)
+            hits = self._aliyun_calls_with_output_json(_read(path))
+            self.assertEqual(
+                hits,
+                [],
+                f"{rel}: the aliyun CLI rejects `--output json` — its "
+                f"--output is the table formatter and the default output "
+                f"is JSON: {hits}",
+            )
+
+
 class TestAlicloudOssAuthUsesRamRoleAndRegion(unittest.TestCase):
     """ossutil v2 signs with SigV4 and needs the region as its own
     parameter — the `-e` endpoint alone is not enough ("region must
