@@ -146,6 +146,49 @@ def _logs_bucket() -> str:
     return "<your-agent-logs-bucket>"
 
 
+def _instance_profile_name() -> str:
+    """The name of the RAM role / instance profile the agent instance
+    is launched with.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `EC2_INSTANCE_PROFILE_NAME` (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `RAM_INSTANCE_PROFILE_NAME` (infra/alicloud/modules/core/function_compute.tf)
+
+    The VALUE is provider-specific too (an AWS instance profile ARN
+    vs. an Alicloud RAM role name), but the launch spec carries it
+    opaquely — `lambda/provider/alicloud.py` passes it as the
+    instance's `ram_role_name`.
+
+    Both names are accepted here, provider-preference first. Reading
+    only the AWS name raised `KeyError` on the Alicloud path, so the
+    Function Compute function failed before it could launch anything.
+    """
+    for var in ("RAM_INSTANCE_PROFILE_NAME", "EC2_INSTANCE_PROFILE_NAME"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _security_group_id() -> str:
+    """The security group the agent instance is launched into.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `EC2_SECURITY_GROUP_ID` (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `ECS_SECURITY_GROUP_ID` (infra/alicloud/modules/core/function_compute.tf)
+
+    Both names are accepted here, provider-preference first, for the
+    same reason as `_instance_profile_name`.
+    """
+    for var in ("ECS_SECURITY_GROUP_ID", "EC2_SECURITY_GROUP_ID"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
+
+
 # Environment name passed in by Terraform as a Lambda env var
 # (infra/aws/modules/core/lambda.tf). Used to namespace all per-env SSM
 # parameters under /blitzlog/<env>/... so prod and dev can coexist in

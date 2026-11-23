@@ -21,7 +21,14 @@ import base64
 import os
 import uuid
 
-from _env import BLITZLOG_ENV, _logs_bucket, ephemeral_token_ssm_param, logger
+from _env import (
+    BLITZLOG_ENV,
+    _instance_profile_name,
+    _logs_bucket,
+    _security_group_id,
+    ephemeral_token_ssm_param,
+    logger,
+)
 from provider import (
     LaunchSpec,
     get_compute,
@@ -101,7 +108,7 @@ def get_instance_profile_arn() -> str:
     reads the profile name from the env var Terraform injected.
     """
     return get_compute().get_instance_profile_arn(
-        os.environ["EC2_INSTANCE_PROFILE_NAME"],
+        _instance_profile_name(),
     )
 
 
@@ -210,8 +217,8 @@ def launch_ec2_spot_instance(
     user_data_b64 = base64.b64encode(downloader.encode()).decode()
 
     image_id = get_agent_ami()
-    instance_profile_name = os.environ["EC2_INSTANCE_PROFILE_NAME"]
-    security_group_id = os.environ["EC2_SECURITY_GROUP_ID"]
+    instance_profile_name = _instance_profile_name()
+    security_group_id = _security_group_id()
 
     spec = _build_launch_spec(
         image_id=image_id,

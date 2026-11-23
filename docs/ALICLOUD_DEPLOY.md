@@ -431,17 +431,34 @@ instance with the baked image.
 
 ### Before the first run
 
-1. **The app's webhook URL** must be the `webhook_url` output above
+1. **The bot pool must exist.** The function acquires a Telegram bot
+   from the per-user pool before it launches anything, and answers
+   **503 "Bot pool exhausted"** when the pool is empty. The pool is
+   the Alicloud mirror of the AWS user-pool stack — OOS parameters
+   under `blitzlog/users/<login>/…` instead of SSM:
+
+   ```bash
+   cp infra/alicloud/user-pool/terraform.tfvars.example \
+      infra/alicloud/user-pool/terraform.tfvars
+   # fill in telegram_bot_tokens / telegram_allowed_user_id / owner_login
+   cd infra/alicloud/user-pool && terraform init && terraform apply
+   ```
+
+   The pool is env-independent (dev and prod read the same
+   parameters) and carries no KMS key: the per-env CMK cannot
+   encrypt an env-independent namespace.
+
+2. **The app's webhook URL** must be the `webhook_url` output above
    (§3, "The webhook URL"). The app has one URL, so it can only serve
    one deployment at a time.
-2. **The agent instance needs a public address.** It reaches the
+3. **The agent instance needs a public address.** It reaches the
    GitHub API, the model provider and Tailscale, and the VPC has no
    NAT gateway. The launch asks for an ECS-managed public IP
    (`internet_max_bandwidth_out = 100`, `PayByTraffic`) — the exact
    analogue of the AWS side, where the default VPC's subnets
    auto-assign a public IP and route `0.0.0.0/0` to the internet
    gateway. Neither side pays a NAT fee.
-3. **SSH for debugging** is off by default (the security group's
+4. **SSH for debugging** is off by default (the security group's
    ingress rules come from `ssh_allowed_cidrs`). Put your own CIDR in
    `infra/alicloud/dev/terraform.tfvars` and apply if you want to
    look at the host while the agent runs:

@@ -1,0 +1,7 @@
+# Local state is the default — no shared OSS backend, like the AWS
+# sibling (infra/aws/user-pool/). The state holds the bot tokens in
+# the clear, so it must never be committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars

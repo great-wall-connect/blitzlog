@@ -8,7 +8,7 @@ infra/aws/modules/core/iam.tf and assert that:
 - ec2:TerminateInstances is gated on the matching Environment tag
 - Per-env ephemeral SSM params are env-scoped; per-user data (bot pool,
   local LLM config) is env-independent under /blitzlog/users/
-- The user-pool module lives at infra/user-pool/ and creates params under
+- The user-pool module lives at infra/aws/user-pool/ and creates params under
   /blitzlog/users/<login>/telegram/ (no env prefix)
 
 If a refactor accidentally grants cross-env SSM access (e.g. by widening
@@ -28,8 +28,8 @@ EC2_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "ec2.tf"
 ALERTING_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "alerting.tf"
 STORAGE_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "storage.tf"
 LOCALS_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "locals.tf"
-USER_POOL_MAIN = REPO_ROOT / "infra" / "user-pool" / "main.tf"
-USER_POOL_VARS = REPO_ROOT / "infra" / "user-pool" / "variables.tf"
+USER_POOL_MAIN = REPO_ROOT / "infra" / "aws" / "user-pool" / "main.tf"
+USER_POOL_VARS = REPO_ROOT / "infra" / "aws" / "user-pool" / "variables.tf"
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -238,9 +238,10 @@ class TestEnvNamespacing(unittest.TestCase):
             "TerminateInstances condition must reference var.environment",
         )
 
-    def test_user_pool_lives_under_infra_user_pool(self):
-        """The user-pool module must live at infra/user-pool/ (standalone) and
-        create SSM parameters under the env-independent /blitzlog/users/ namespace."""
+    def test_user_pool_lives_under_infra_aws_user_pool(self):
+        """The AWS user-pool module must live at infra/aws/user-pool/ (standalone)
+        and create SSM parameters under the env-independent /blitzlog/users/
+        namespace."""
         main_tf = USER_POOL_MAIN.read_text()
         vars_tf = USER_POOL_VARS.read_text()
         # No environment variable — user pool is shared across envs.
@@ -1408,7 +1409,7 @@ class TestAwsProviderV6(unittest.TestCase):
     AWS_BOOTSTRAP = REPO_ROOT / "infra" / "aws" / "bootstrap"
     AWS_DEV = REPO_ROOT / "infra" / "aws" / "dev"
     AWS_PROD = REPO_ROOT / "infra" / "aws" / "prod"
-    USER_POOL = REPO_ROOT / "infra" / "user-pool"
+    USER_POOL = REPO_ROOT / "infra" / "aws" / "user-pool"
     SCRUMMASTER = REPO_ROOT / "infra" / "scrummaster"
     README = REPO_ROOT / "README.md"
 

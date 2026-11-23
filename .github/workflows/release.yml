@@ -503,7 +503,7 @@ jobs:
           # works on a repo that hasn't yet provisioned a
           # user-pool stack. Operators who want the per-pool
           # identity set vars.OWNER_LOGIN at the repo level and
-          # `cd infra/user-pool && terraform apply` once; the
+          # `cd infra/aws/user-pool && terraform apply` once; the
           # fallback then silently picks up the SSM-sourced
           # identity.
           OWNER_LOGIN: ${{ vars.OWNER_LOGIN }}
@@ -540,9 +540,9 @@ jobs:
             if [ -z "$GIT_AUTHOR_NAME" ] || [ -z "$GIT_AUTHOR_EMAIL" ]; then
               echo "FATAL: /blitzlog/users/${OWNER_LOGIN}/git-author/{name,email}" >&2
               echo "  are not set in SSM (issue #119). Either:" >&2
-              echo "  - run 'cd infra/user-pool && terraform apply' after" >&2
+              echo "  - run 'cd infra/aws/user-pool && terraform apply' after" >&2
               echo "    setting git_author_name / git_author_email in" >&2
-              echo "    infra/user-pool/terraform.tfvars (defaults derive" >&2
+              echo "    infra/aws/user-pool/terraform.tfvars (defaults derive" >&2
               echo "    from owner_login when both are unset), OR" >&2
               echo "  - unset vars.OWNER_LOGIN to fall back to the" >&2
               echo "    historical release-bot identity." >&2
@@ -558,7 +558,7 @@ jobs:
             # without blocking releases.
             echo "WARN: vars.OWNER_LOGIN is unset; falling back to the historical 'release-bot' identity" >&2
             echo "  (issue #119 legacy carve-out). To use an operator-managed identity instead, set" >&2
-            echo "  vars.OWNER_LOGIN to a GitHub login and run 'cd infra/user-pool && terraform apply'." >&2
+            echo "  vars.OWNER_LOGIN to a GitHub login and run 'cd infra/aws/user-pool && terraform apply'." >&2
             GIT_AUTHOR_NAME="release-bot"
             GIT_AUTHOR_EMAIL="release-bot@users.noreply.github.com"
           fi

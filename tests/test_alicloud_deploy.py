@@ -1126,6 +1126,90 @@ class TestAlicloudOssArnsUseTheBucketLocation(unittest.TestCase):
         )
 
 
+class TestAlicloudUserPoolStack(unittest.TestCase):
+    """The Alicloud mirror of `infra/aws/user-pool/`.
+
+    The pool namespace is env-INDEPENDENT (`blitzlog/users/<login>/…`)
+    and holds the Telegram bot tokens, the allowed user id, the
+    per-user local-LLM config and the git author identity. Without
+    it the Function Compute function's `acquire_bot_token` finds an
+    empty pool and answers every webhook with 503.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = os.path.join(REPO_ROOT, "infra/alicloud/user-pool")
+        cls.main_tf = _read(os.path.join(cls.root, "main.tf"))
+        cls.vars_tf = _read(os.path.join(cls.root, "variables.tf"))
+
+    def test_the_stack_creates_oos_parameters(self):
+        self.assertIn(
+            'resource "alicloud_oos_secret_parameter" "telegram_bot_pool"',
+            self.main_tf,
+            "the pool must be OOS parameters — the Alicloud secret store",
+        )
+
+    def test_the_parameters_live_under_the_shared_user_namespace(self):
+        """The names must match the SSM paths the AWS side uses (minus
+        the leading slash) so `lambda/bot_pool.py` reads the same
+        paths on both clouds."""
+        self.assertIn(
+            'user_root = "blitzlog/users/${var.owner_login}"',
+            self.main_tf,
+            "the pool namespace must be blitzlog/users/<owner_login> — the "
+            "same env-independent root the AWS side uses",
+        )
+        for suffix in (
+            "${local.user_root}/telegram/pool/",
+            "${local.user_root}/telegram/allowed-user-id",
+            "${local.user_root}/local-llm/",
+            "${local.user_root}/git-author/",
+        ):
+            self.assertIn(
+                suffix,
+                self.main_tf,
+                f"the pool parameters must be written under {suffix}",
+            )
+
+    def test_the_namespace_is_not_env_scoped(self):
+        """The pool is shared across envs: dev and prod read the same
+        parameters."""
+        self.assertNotIn(
+            'variable "environment"',
+            self.vars_tf,
+            "the user-pool variables must NOT declare an environment — the "
+            "pool is shared across envs",
+        )
+        self.assertNotIn(
+            "var.environment",
+            self.main_tf,
+            "the user-pool parameters must not be env-prefixed",
+        )
+
+    def test_no_kms_key_is_named(self):
+        """The per-env CMK cannot encrypt the pool: the namespace is
+        env-independent, so a CMK-encrypted parameter would be
+        readable by only one of dev/prod. OOS encrypts every parameter
+        with its own key when no key is named."""
+        self.assertNotIn(
+            "key_id",
+            self.main_tf,
+            "the pool parameters must not name a KMS key — the per-env CMK "
+            "cannot encrypt an env-independent namespace",
+        )
+
+    def test_the_git_author_values_are_operator_owned(self):
+        """Mirrors the AWS sibling: the resolved default derives from
+        owner_login, so an apply must not churn the parameter when only
+        the derived default changed."""
+        self.assertEqual(
+            self.main_tf.count("ignore_changes = [value]"),
+            2,
+            "the two git-author parameters ignore upstream value changes — "
+            "the operator owns those values",
+        )
+
+
 class TestAlicloudServiceActivations(unittest.TestCase):
     """Two account-level products must be open before the per-env
     stacks can create anything in them:

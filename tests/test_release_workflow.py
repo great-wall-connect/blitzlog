@@ -807,11 +807,11 @@ class TestReleaseWorkflow(unittest.TestCase):
     def test_bump_step_fails_loud_when_ssm_param_missing(self):
         """When /blitzlog/users/<OWNER_LOGIN>/git-author/{name,email}
         isn't set in SSM (operator hasn't run `terraform apply`
-        in infra/user-pool, or the user-pool stack is stale),
+        in infra/aws/user-pool, or the user-pool stack is stale),
         the Bump step must abort with a clear setup error
         rather than land the commit under a fictional identity
         (the runner hostname). The `FATAL:` line and the
-        `cd infra/user-pool && terraform apply` hint are the
+        `cd infra/aws/user-pool && terraform apply` hint are the
         contract.
         """
         m = re.search(
@@ -827,7 +827,7 @@ class TestReleaseWorkflow(unittest.TestCase):
             "terraform apply",
             body,
             "Bump step's FATAL hint must point the operator at `terraform apply` "
-            "in infra/user-pool (the single source of truth for the identity)",
+            "in infra/aws/user-pool (the single source of truth for the identity)",
         )
 
     def test_release_workflow_does_not_use_gha_git_author_vars(self):
@@ -837,7 +837,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         `vars.GIT_AUTHOR_NAME` / `vars.GIT_AUTHOR_EMAIL`. The
         release.yml contract has no `vars.GIT_AUTHOR_*` references
         anywhere — keeping the operator setup in terraform
-        (infra/user-pool/terraform.tfvars) rather than scattered
+        (infra/aws/user-pool/terraform.tfvars) rather than scattered
         between terraform and `gh variable set` calls.
         """
         self.assertNotIn(
@@ -907,7 +907,7 @@ class TestReleaseWorkflow(unittest.TestCase):
             "Bump step's fallback must log a WARN (not FATAL) when "
             "OWNER_LOGIN is unset so the canonical release pipeline "
             "keeps working without operator setup. The migration "
-            "path (set OWNER_LOGIN + run infra/user-pool apply) is "
+            "path (set OWNER_LOGIN + run infra/aws/user-pool apply) is "
             "documented in the WARN line.",
         )
 
@@ -937,7 +937,7 @@ class TestReleaseWorkflow(unittest.TestCase):
             "terraform apply",
             body,
             "Bump step's SSM-missing FATAL hint must still point the "
-            "operator at `terraform apply` in infra/user-pool.",
+            "operator at `terraform apply` in infra/aws/user-pool.",
         )
 
     def test_ref_gate_mode_release_on_main(self):

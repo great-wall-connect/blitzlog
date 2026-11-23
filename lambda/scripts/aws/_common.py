@@ -237,7 +237,7 @@ def _read_git_identity_ssm_script(owner_login: str) -> str:
 
     The `2>/dev/null || echo ""` swallow keeps the bootstrap working
     when the operator hasn't provisioned the user-pool yet (the
-    git-author params are emitted by `infra/user-pool/main.tf`; a
+    git-author params are emitted by `infra/aws/user-pool/main.tf`; a
     fresh deploy that's running the lambda before the user-pool
     stack falls back to root@<hostname>). The container's
     `entrypoint.sh` already gates the `git config --global` step on
