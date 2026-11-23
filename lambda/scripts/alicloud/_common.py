@@ -231,7 +231,7 @@ fi
 
 
 # ossutil install (one-time per launch, ~5-10s). Same rationale as
-# the aliyun CLI install above. Aliyun's `ossutil64` is the OSS
+# the aliyun CLI install above. Aliyun's `ossutil` is the OSS
 # analogue of `aws s3`; the `--endpoint` flag picks the right
 # regional gateway.
 #

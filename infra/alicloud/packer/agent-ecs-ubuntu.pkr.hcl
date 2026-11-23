@@ -48,23 +48,59 @@ variable "github_token" {
 
 variable "source_image_id" {
   type        = string
-  description = "The Canonical-published Ubuntu image to build from. Resolved by the caller (the release workflow) via `aliyun ecs DescribeImages`; empty means 'let the builder pick the default Ubuntu image'."
-  default     = ""
+  description = "The Alicloud-published Ubuntu image to build from, as an image ID (e.g. `ubuntu_26_04_arm64_20G_alibase_20261016.vhd`). The plugin's key is `source_image`; there is no `image_id`."
+  default     = "ubuntu_26_04_arm64_20G_alibase_20261016.vhd"
 }
 
 variable "instance_type" {
   type        = string
-  description = "Aliyun ECS instance type used for the build instance. The Alicloud analogue of the AWS build instance type."
-  default     = "ecs.g7.large"
+  description = "Aliyun ECS instance type used for the build instance. Must be ARM64 (the agent container image is arm64-only) — `ecs.g8y.*` is the general-purpose ARM64 family in cn-hongkong."
+  default     = "ecs.g8y.large"
+}
+
+variable "vpc_id" {
+  type        = string
+  description = "VPC for the build instance. Empty means 'let the plugin create one' — which it cannot do without vpc:CreateVpc, so pass the bootstrap stack's VPC."
+  default     = ""
+}
+
+variable "vswitch_id" {
+  type        = string
+  description = "VSwitch for the build instance, inside `vpc_id`. Must be in a zone where the ARM64 instance type is offered."
+  default     = ""
+}
+
+variable "zone_id" {
+  type        = string
+  description = "Zone for the build instance. Must be a zone where `instance_type` is offered."
+  default     = ""
 }
 
 source "alicloud-ecs" "ubuntu" {
   region            = var.alicloud_region
-  image_id          = var.source_image_id
+  source_image      = var.source_image_id
   instance_type     = var.instance_type
   instance_name     = "blitzlog-packer-${var.environment}-${local.timestamp}"
   ssh_username      = "root"
   security_group_id = var.packer_security_group_id
+
+  vpc_id    = var.vpc_id
+  vswitch_id = var.vswitch_id
+  zone_id   = var.zone_id
+
+  # cn-hongkong is outside mainland China, so only PayByTraffic is
+  # accepted — PayByBandwidth is rejected by the API. The plugin
+  # defaults to PayByBandwidth when `internet_charge_type` is unset,
+  # which fails the RunInstances call.
+  internet_charge_type      = "PayByTraffic"
+  internet_max_bandwidth_out = 5
+
+  # The build instance has to be reachable over SSH (the plugin's
+  # communicator connects to its public IP) and has to pull the agent
+  # image from ghcr.io and the whisper model from OSS, so it needs a
+  # public address. In VPC mode the plugin reaches that through an
+  # EIP, which this flag triggers.
+  associate_public_ip_address = true
 
   image_name        = "blitzlog-${var.environment}-agent-image-ecs-ubuntu-${local.timestamp}"
   image_description = "Blitzlog agent ECS image (Ubuntu) with dockerd + baked blitzlog-agent:${var.agent_image_tag}"
@@ -83,15 +119,15 @@ source "alicloud-ecs" "ubuntu" {
     AgentImage = "ghcr.io/great-wall-connect/blitzlog-agent:${var.agent_image_tag}"
   }
 
-  system_disk {
-    name = "blitzlog-packer-${var.environment}"
-    size = 40
+  system_disk_mapping {
+    disk_name = "blitzlog-packer-${var.environment}"
+    disk_size = 40
   }
 }
 
 variable "packer_security_group_id" {
   type        = string
-  description = "Security group for the Packer build instance. Must allow SSH (22) inbound from the CI runner and all egress (docker pull + OSS + KMS)."
+  description = "Security group for the Packer build instance. Must allow SSH (22) inbound from the CI runner and all egress (docker pull + OSS + OOS)."
   default     = ""
 }
 

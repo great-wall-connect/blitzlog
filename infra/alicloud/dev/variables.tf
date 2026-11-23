@@ -111,5 +111,5 @@ variable "stt_models_bucket_name" {
 variable "spot_instance_types" {
   description = "ECS preemptible spot instance types the dev function will try, in preference order. Override in terraform.tfvars for regions without the default inventory."
   type        = list(string)
-  default     = ["ecs.t6-c1m2.large", "ecs.t6-c1m4.large", "ecs.t6-c1m4.xlarge"]
+  default     = ["ecs.c8y.large", "ecs.c8y.xlarge", "ecs.c8y.2xlarge"]
 }

@@ -75,15 +75,28 @@ resource "alicloud_ram_role" "packer_build" {
 
 resource "alicloud_ram_policy" "packer_build" {
   policy_name = "blitzlog-packer-build-policy"
+  # Alicloud caps a custom policy at 5 versions, and the provider
+  # creates a new version on every change — without this the fifth
+  # apply fails with "LimitExceeded.Policy.Version: The count of
+  # policy version is limited to 5".
+  rotate_strategy = "DeleteOldestNonDefaultVersionWhenLimitExceeded"
   policy_document = jsonencode({
     Version = "1"
     Statement = [
       {
         # ECS image creation + the instance lifecycle the builder
         # drives (launch, stop, terminate the build instance).
+        #
+        # The list is the plugin's own documented minimum
+        # (packer-plugin-alicloud's builder/alicloud-ecs README) plus
+        # the tag verbs this builder uses. The VPC / security-group /
+        # EIP verbs are needed because the plugin creates the build
+        # instance's own temporary security group and EIP rather than
+        # reusing a pre-existing one.
         Sid    = "AllowECSImageCreation"
         Effect = "Allow"
         Action = [
+          "ecs:AttachKeyPair",
           "ecs:CreateImage",
           "ecs:CopyImage",
           "ecs:DescribeImages",
@@ -94,39 +107,69 @@ resource "alicloud_ram_policy" "packer_build" {
           "ecs:DescribeVSwitches",
           "ecs:DescribeVpcs",
           "ecs:DescribeKeyPairs",
+          "ecs:DescribeDisks",
+          "ecs:DescribeImageFromFamily",
           "ecs:CreateKeyPair",
-          "ecs:DeleteKeyPair",
+          "ecs:DeleteKeyPairs",
+          "ecs:ImportKeyPair",
+          "ecs:DetachKeyPair",
           "ecs:CreateTags",
           "ecs:DeleteTags",
+          "ecs:TagResources",
+          "ecs:UntagResources",
+          "ecs:AddTags",
           "ecs:RegisterImage",
           "ecs:DeregisterImage",
           "ecs:ModifyImageAttribute",
-          "ecs:ModifyImageAttribute",
+          "ecs:DescribeImageSharePermission",
+          "ecs:ModifyImageSharePermission",
+          "ecs:DeleteImage",
+          "ecs:CancelCopyImage",
           "ecs:CreateSnapshot",
           "ecs:DeleteSnapshot",
           "ecs:RunInstances",
           "ecs:StartInstance",
           "ecs:StopInstances",
           "ecs:TerminateInstances",
+          "ecs:CreateInstance",
+          "ecs:DeleteInstance",
+          "ecs:RebootInstance",
+          "ecs:RenewInstance",
+          "ecs:AllocatePublicIpAddress",
+          "ecs:CreateSecurityGroup",
+          "ecs:AuthorizeSecurityGroup",
+          "ecs:AuthorizeSecurityGroupEgress",
+          "ecs:DeleteSecurityGroup",
+          "vpc:DescribeVpcs",
+          "vpc:CreateVpc",
+          "vpc:DeleteVpc",
+          "vpc:DescribeVSwitches",
+          "vpc:CreateVSwitch",
+          "vpc:DeleteVSwitch",
+          "vpc:AllocateEipAddress",
+          "vpc:AssociateEipAddress",
+          "vpc:UnassociateEipAddress",
+          "vpc:ReleaseEipAddress",
         ]
         Resource = ["*"]
       },
       {
-        # The image id is published to KMS by the 05-publish-ami-id.sh
-        # post-processor. One entry per env: the Alicloud RAM ARN for a
-        # KMS secret does not support a `*` wildcard in the env
-        # segment the way the AWS parameter ARN does.
-        Sid    = "AllowKMSPublishAgentImageId"
+        # The image id is published to the OOS Parameter Store by the
+        # 05-publish-ami-id.sh post-processor. One entry per env: the
+        # Alicloud RAM ARN for an OOS parameter does not support a
+        # `*` wildcard in the env segment the way the AWS parameter
+        # ARN does.
+        Sid    = "AllowOOSPublishAgentImageId"
         Effect = "Allow"
         Action = [
-          "kms:CreateSecret",
-          "kms:PutSecretValue",
-          "kms:GetSecretValue",
-          "kms:DeleteSecret",
+          "oos:CreateSecretParameter",
+          "oos:UpdateSecretParameter",
+          "oos:GetSecretParameter",
+          "oos:DeleteSecretParameter",
         ]
         Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/dev/agent-ami-id-ecs-ubuntu",
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/prod/agent-ami-id-ecs-ubuntu",
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/dev/agent-ami-id-ecs-ubuntu",
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/prod/agent-ami-id-ecs-ubuntu",
         ]
       },
       {

@@ -578,9 +578,250 @@ class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
             "aws ssm put-parameter",
             self.publish,
             "the Alicloud publish path must not write to SSM — the "
-            "Alicloud SecretStore reads KMS",
+            "Alicloud SecretStore reads the OOS Parameter Store",
         )
 
+
+class TestAlicloudTemplateMatchesTheBuilderSchema(unittest.TestCase):
+    """The `alicloud-ecs` builder does not accept the AWS builder's
+    attribute names, and the mismatch is silent until the build runs.
+
+    `image_id` / `system_disk` are amazon-ebs spellings; the Alicloud
+    builder calls them `source_image` and `system_disk_mapping`. A
+    template carrying the wrong names fails at build time with a
+    confusing "unsupported argument" rather than at review time, so
+    the names are pinned here.
+
+    The builder also requires the network placement to be explicit:
+    with `vpc_id` unset it creates a throwaway VPC of its own, and
+    `source_image` has no "newest matching image" filter the way the
+    AWS builder's `source_ami_filter` does — the image id has to be
+    named.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = _read(ALICLOUD_TEMPLATE)
+
+    def test_uses_the_alicloud_source_image_key(self):
+        self.assertIn(
+            "source_image",
+            self.template,
+            "the Alicloud builder's key is `source_image`, not the "
+            "amazon-ebs `image_id`",
+        )
+        self.assertNotIn(
+            "image_id ",
+            self.template,
+            "`image_id` is an amazon-ebs attribute; the Alicloud builder " "rejects it",
+        )
+
+    def test_uses_the_alicloud_system_disk_block(self):
+        self.assertIn(
+            "system_disk_mapping",
+            self.template,
+            "the Alicloud builder's disk block is `system_disk_mapping`",
+        )
+        self.assertNotIn(
+            "system_disk {",
+            self.template,
+            "`system_disk` is an amazon-ebs block; the Alicloud builder " "rejects it",
+        )
+
+    def test_pins_the_network_placement(self):
+        """The build instance must land in the account's own VPC, not
+        a throwaway one the plugin creates and then deletes."""
+        for key in ("vpc_id", "vswitch_id", "zone_id"):
+            self.assertIn(
+                key,
+                self.template,
+                f"{key} must be set — the builder creates its own VPC "
+                "when it is not told which one to use",
+            )
+
+    def test_uses_pay_by_traffic(self):
+        """cn-hongkong is outside mainland China, where only
+        PayByTraffic is accepted — PayByBandwidth is rejected."""
+        self.assertIn(
+            'internet_charge_type      = "PayByTraffic"',
+            self.template,
+            "the build instance's charge type must be PayByTraffic in "
+            "the international regions",
+        )
+
+    def test_requests_a_public_address(self):
+        """The plugin's SSH communicator connects to the instance's
+        public IP; without one the build hangs on the first
+        provisioner."""
+        self.assertIn(
+            "associate_public_ip_address",
+            self.template,
+            "the build instance needs a public IP for the SSH "
+            "communicator to reach it",
+        )
+
+    def test_source_image_default_is_arm64(self):
+        """The ghcr agent container image is ARM64-only, so an x86
+        source image would refuse to boot it."""
+        m = re.search(
+            r'variable "source_image_id".*?default\s*=\s*"([^"]+)"',
+            self.template,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(m, "source_image_id must have a default")
+        self.assertIn(
+            "arm64",
+            m.group(1),
+            "the default source image must be the ARM64 one — the agent "
+            "container image is arm64-only",
+        )
+
+    def test_instance_type_default_is_arm64(self):
+        m = re.search(
+            r'variable "instance_type".*?default\s*=\s*"([^"]+)"',
+            self.template,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(m, "instance_type must have a default")
+        self.assertIn(
+            "g8y",
+            m.group(1),
+            "the default build instance type must be an ARM64 family — "
+            "the agent container image is arm64-only",
+        )
+
+
+class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
+    """The build instance is ARM64 and the host CLIs are per-arch
+    binaries. Installing the amd64 build on an arm64 host produces a
+    host where every ossutil / aliyun call fails with
+    "exec format error" — and the bake's own steps fail that way,
+    so the bake never completes.
+
+    Aliyun publishes no versioned arm64 aliyun CLI tarball (only the
+    floating `latest-arm64`), and the ossutil 2.x binaries are
+    published as per-arch zips whose version is read from an
+    upstream version file.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.system = _read(ALICLOUD_01_SYSTEM)
+
+    def test_selects_the_aliyun_cli_by_architecture(self):
+        self.assertIn(
+            'case "$(uname -m)" in',
+            self.system,
+            "the aliyun CLI install must select the tarball by " "architecture",
+        )
+        self.assertIn(
+            "aliyun-cli-linux-latest-arm64.tgz",
+            self.system,
+            "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
+        )
+        self.assertIn(
+            "aliyun-cli-linux-3.0.6-amd64.tgz",
+            self.system,
+            "the amd64 aliyun CLI tarball must be selected on x86 hosts",
+        )
+
+    def test_selects_ossutil_by_architecture(self):
+        self.assertIn(
+            'case "$(uname -m)" in',
+            self.system,
+            "the ossutil install must select the archive by architecture",
+        )
+        self.assertIn(
+            "ossutil-linux-${OSSUTIL_ARCH}.zip",
+            self.system,
+            "the ossutil archive name must carry the resolved arch",
+        )
+
+    def test_ossutil_version_is_not_hardcoded(self):
+        """The 2.0.5 ossutil path the script used to pin now 404s;
+        the live binaries are published under a versioned /v2/ path
+        whose version is read from an upstream file."""
+        self.assertIn(
+            "ossutil/v2/version.txt",
+            self.system,
+            "the ossutil version must be resolved from the upstream " "version file",
+        )
+        self.assertNotIn(
+            "ossutil/2.0.5/ossutil64",
+            self.system,
+            "the ossutil 2.0.5 path is dead (404) — it must not be pinned",
+        )
+
+    def test_installs_unzip(self):
+        """ossutil ships as a zip."""
+        self.assertIn(
+            "unzip",
+            self.system,
+            "unzip must be installed — ossutil ships as a zip archive",
+        )
+
+    def test_docker_repo_line_is_arch_aware(self):
+        """A hardcoded `arch=arm64` breaks the x86 path, and the
+        wrong-arch package set breaks the arm64 one."""
+        self.assertIn(
+            "dpkg --print-architecture",
+            self.system,
+            "the Docker apt repo line must use the running machine's " "architecture",
+        )
+
+
+class TestAlicloudOssAuthUsesRamRoleAndRegion(unittest.TestCase):
+    """ossutil v2 signs with SigV4 and needs the region as its own
+    parameter — the `-e` endpoint alone is not enough ("region must
+    be set in sign version 4"). It also does not read the
+    ALIBABA_CLOUD_* variables the Alicloud SDKs use, and on an ECS
+    instance the credentials come from the instance's RAM role via the
+    metadata service.
+
+    The consequence of getting this wrong is silent: the bake's
+    model download fails, and at runtime every log upload fails behind
+    a `|| true` swallow.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.uploader = _read(ALICLOUD_OSS_UPLOADER)
+        cls.uploader_code = _strip_comments(cls.uploader)
+
+    def test_invocations_go_through_the_auth_wrapper(self):
+        for verb in ("cp", "ls", "rm"):
+            self.assertIn(
+                f"_bl_oss_uploader_ossutil {verb} ",
+                self.uploader_code,
+                f"every ossutil {verb} must go through the wrapper that "
+                "adds the region + RAM-role arguments",
+            )
+
+    def test_wrapper_passes_the_region(self):
+        self.assertIn(
+            "OSS_REGION=",
+            self.uploader_code,
+            "ossutil must be given the region — SigV4 rejects the "
+            "request without it",
+        )
+
+    def test_wrapper_uses_the_ecs_ram_role_mode(self):
+        self.assertIn(
+            "--mode EcsRamRole",
+            self.uploader_code,
+            "ossutil must read the instance RAM role from the metadata " "service",
+        )
+
+    def test_no_bare_ossutil_invocations_remain(self):
+        """A bare `ossutil cp` would bypass the wrapper and fail with
+        the SigV4 region error."""
+        for verb in ("cp", "ls", "rm"):
+            self.assertIsNone(
+                re.search(
+                    rf"(?<!_bl_oss_uploader_)\bossutil {verb}\b", self.uploader_code
+                ),
+                f"every `ossutil {verb}` must go through " "_bl_oss_uploader_ossutil",
+            )
 
 class TestAlicloudImageIdContractIsConsistent(unittest.TestCase):
     """The publish path and the read path must agree on the secret

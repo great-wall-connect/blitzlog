@@ -857,11 +857,47 @@ jobs:
             echo "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}"
             echo "ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}"
             echo "ALIBABA_CLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            # The Packer alicloud plugin reads the access key from
+            # ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY, and the STS
+            # token from SECURITY_TOKEN (not ALICLOUD_SECURITY_TOKEN).
             echo "ALICLOUD_ACCESS_KEY=${ALIYUN_ACCESS_KEY_ID}"
             echo "ALICLOUD_SECRET_KEY=${ALIYUN_ACCESS_KEY_SECRET}"
-            echo "ALICLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            echo "SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
             echo "ALIBABA_CLOUD_REGION=${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}"
+            echo "ALICLOUD_REGION=${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}"
           } >> "$GITHUB_ENV"
+
+          # The aliyun CLI does NOT read the ALIBABA_CLOUD_*
+          # environment variables for authentication — it needs a
+          # profile file, and for STS credentials that profile must be
+          # in "StsToken" mode (an "AK" profile drops the token and the
+          # API rejects the request with MissingSecurityToken). The
+          # 05-publish-ami-id.sh post-processor runs `aliyun oos
+          # CreateSecretParameter`, so without this profile the bake
+          # would publish nothing.
+          mkdir -p "$HOME/.aliyun"
+          ALIYUN_ACCESS_KEY_ID="$ALIYUN_ACCESS_KEY_ID" \
+          ALIYUN_ACCESS_KEY_SECRET="$ALIYUN_ACCESS_KEY_SECRET" \
+          ALIYUN_SECURITY_TOKEN="$ALIYUN_SECURITY_TOKEN" \
+          ALICLOUD_REGION="${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}" \
+          python3 - <<'PY'
+          import json
+          import os
+          profile = {
+              "name": "default",
+              "mode": "StsToken",
+              "access_key_id": os.environ["ALIYUN_ACCESS_KEY_ID"],
+              "access_key_secret": os.environ["ALIYUN_ACCESS_KEY_SECRET"],
+              "sts_token": os.environ["ALIYUN_SECURITY_TOKEN"],
+              "region_id": os.environ["ALICLOUD_REGION"],
+              "output_format": "json",
+              "language": "en",
+          }
+          path = os.path.expanduser("~/.aliyun/config.json")
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump({"current": "default", "profiles": [profile], "meta_path": ""}, fh)
+          os.chmod(path, 0o600)
+          PY
 
       - name: Resolve Packer vars from mode
         id: packer-vars
@@ -1002,10 +1038,14 @@ jobs:
               -var "stt_models_bucket=${STT_BUCKET}" \
               -var "github_token=${GH_TOKEN_FOR_PACKER}" \
               -var "alicloud_region=${ALICLOUD_REGION}" \
+              -var "vpc_id=${VPC_ID}" \
+              -var "vswitch_id=${VSWITCH_ID}" \
+              -var "zone_id=${ZONE_ID}" \
+              -var "source_image_id=${SOURCE_IMAGE_ID}" \
               agent-ecs-ubuntu.pkr.hcl
           # Packer writes manifest.json (via the `manifest` post-processor
           # in agent-ecs-ubuntu.pkr.hcl) with the build's artifact_id
-          # in the form "<region>:image-<id>". The same source of truth
+          # in the form "<region>:<image-id>". The same source of truth
           # the 05-publish-ami-id.sh post-processor reads from.
           if [ ! -r manifest.json ]; then
             echo "FATAL: Packer did not write manifest.json (build may have failed before the post-processor ran)" >&2

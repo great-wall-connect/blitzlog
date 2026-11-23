@@ -55,6 +55,28 @@ _bl_oss_uploader_region() {
     fi
 }
 
+# --- internal ossutil invocation ----------------------------------------
+# ossutil v2 signs with SigV4, which needs the region as its own
+# parameter — the `-e` endpoint alone is not enough ("region must be
+# set in sign version 4"). It also does NOT read the ALIBABA_CLOUD_*
+# environment variables the Alicloud SDKs use; it wants OSS_REGION
+# plus, on an ECS instance with a RAM role attached, the EcsRamRole
+# mode so it fetches the role's temporary credentials from the
+# metadata service at 100.100.100.200.
+#
+# Every caller of this library runs on an ECS instance that has the
+# blitzlog RAM role attached (the agent role at runtime, the packer
+# build role at bake time), so the role mode is always the right one.
+_bl_oss_uploader_ossutil() {
+    local region
+    region="$(_bl_oss_uploader_region "${OSS_REGION:-}")"
+    if [ -n "$region" ]; then
+        OSS_REGION="$region" ossutil --mode EcsRamRole "$@"
+    else
+        ossutil --mode EcsRamRole "$@"
+    fi
+}
+
 # --- internal endpoint resolver ----------------------------------------
 # ossutil needs the regional gateway endpoint for every operation
 # against a bucket that is not in the CLI's own default region. The

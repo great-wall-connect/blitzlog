@@ -244,7 +244,7 @@ terraform output vswitch_ids
 ```
 
 ```hcl
-# infra/alicloud/dev/alicloud.tfvars
+# infra/alicloud/dev/terraform.tfvars
 vpc_id      = "vpc-j6cx5ca2zktpkq7c89w8r"
 vswitch_ids = ["vsw-...", "vsw-...", "vsw-..."]
 ```
@@ -293,12 +293,68 @@ from ghcr.io and the `release` job is what pushes it. The two legs
 read the same resolved version, so they cannot bake different agent
 images.
 
-The bake publishes the new image id to KMS at
-`/blitzlog/<env>/agent-ami-id-ecs-ubuntu`, which is where the
+The bake publishes the new image id to the OOS Parameter Store at
+`blitzlog/<env>/agent-ami-id-ecs-ubuntu`, which is where the
 Function Compute function looks it up at launch time. If the secret is
 missing or the image is retired, the function falls back to the
 public Ubuntu image — it degrades to "no baked agent image" rather
 than failing the launch.
+
+### Running the bake locally
+
+The CI job needs two repo variables — the VPC and the VSwitch the
+bake instance is launched into:
+
+```bash
+gh variable set ALICLOUD_VPC_ID --body "$(cd infra/alicloud/bootstrap && terraform output -raw vpc_id)"
+gh variable set ALICLOUD_VSWITCH_ID --body vsw-j6cnyi1xrg6gbi3zc5ddg
+```
+
+The VSwitch must be in a zone where the ARM64 instance type is
+offered (`cn-hongkong-b` and `cn-hongkong-d` today; `cn-hongkong-c`
+has no ARM64 spot inventory).
+
+Locally, the same bake runs with:
+
+```bash
+cd infra/alicloud/packer
+packer init agent-ecs-ubuntu.pkr.hcl
+
+# The plugin reads the access key from ALICLOUD_ACCESS_KEY /
+# ALICLOUD_SECRET_KEY and the STS token from SECURITY_TOKEN (not
+# ALICLOUD_SECURITY_TOKEN), so export all three.
+source ../../scripts/aliyun-env.sh
+export SECURITY_TOKEN="$ALICLOUD_SECURITY_TOKEN"
+
+packer build -force \
+  -var environment=dev \
+  -var stt_models_bucket=gwc-blitzlog-stt-models \
+  -var agent_image_tag=v0.7.0 \
+  -var vpc_id=vpc-j6csy1qafim6vio53korm \
+  -var vswitch_id=vsw-j6cnyi1xrg6gbi3zc5ddg \
+  -var zone_id=cn-hongkong-b \
+  -var github_token="$(grep -oP 'GITHUB_TOKEN=\K\S+' ../../aws/packer/.env)" \
+  agent-ecs-ubuntu.pkr.hcl
+```
+
+Two things the bake needs that the AWS leg does not:
+
+- **An ARM64 source image and instance type.** The ghcr agent
+  container image is ARM64-only, so an x86 source image refuses to
+  boot it (`InvalidInstanceType.NotSupported`). The default
+  `source_image_id` is the ARM64 Ubuntu 26.04 image.
+- **The whisper model in OSS.** The bake pre-downloads
+  `models/ggml-<model>.bin` from the STT bucket, so that object must
+  exist before the bake — the AWS side uploads it from
+  `terraform apply`; the Alicloud side has no equivalent
+  provisioner, so upload it once with `aliyun ossutil cp`.
+
+`packer init` needs the plugin from the GitHub releases API. When
+that API is rate-limited, install the release asset by hand into
+`~/.config/packer/plugins/github.com/hashicorp/alicloud/` — the
+binary is named `packer-plugin-alicloud_<version>_x5.0_linux_amd64`
+and needs a sibling `<binary>_SHA256SUM` file holding the binary's
+own sha256, or Packer refuses to load it as "possibly unsafe".
 
 ---
 
@@ -339,8 +395,14 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
 | `NoSuchBucket` / bucket not found | The bucket name is `gwc-infra-tf-state` (hyphenated). `gwc-infra-tfstate` does not exist. |
 | `RegionId is empty` | `ALICLOUD_REGION` is not set and the CLI has no configured region. |
 | The OIDC step produces no credentials | `vars.ALICLOUD_ACCOUNT_ID` unset, or the OIDC provider was never registered in the RAM console (§1a). |
-| The KMS render step fails on a missing secret | The dev/prod stack has not been applied, or the secret still holds its placeholder value. |
+| The OOS render step fails on a missing parameter | The dev/prod stack has not been applied, or the parameter still holds its placeholder value. |
+| `ServiceUnOpen` / "Your Gateway service has not been opened." | The API Gateway product is not open. Run the bootstrap apply (`infra/alicloud/bootstrap`) — it opens it (`services.tf`). |
+| `ServiceNotEnable` / "Service not open" | The MNS (Simple Message Queue) product is not open. Activate it from the MNS console — see §1c. The bootstrap apply only creates the subscription. |
+| `InvalidAppName` / `InvalidGroupName` on the API Gateway resources | The names contain a hyphen. API Gateway names accept letters, digits and underscores only. |
 | `packer init` cannot download the alicloud plugin | The `github.com/hashicorp/alicloud` Packer plugin is not reachable from the runner. |
+| `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0 (see Known limitations). |
+| `MissingSecurityToken` from the `aliyun` CLI | The CLI does not read the `ALIBABA_CLOUD_*` environment variables for authentication. It needs a profile file in `StsToken` mode (the CI job writes one; locally `aliyun configure --profile default` does). |
+| `InvalidInstanceType.NotSupported` / "not supported by the image architecture" | An x86 instance type with an ARM64 source image (or the reverse). The agent image is ARM64-only, so both the bake instance type and the runtime spot types must be ARM64 (`ecs.g8y.*`). |
 
 ## Known limitations
 
@@ -352,6 +414,48 @@ gh variable delete ENABLE_ALICLOUD_DEPLOY
 - **No Alicloud scheduler teardown.** The AWS watchdog deletes the
   token-refresh schedule group before it terminates the instance;
   there is nothing equivalent to delete here.
-- **The Packer build instance's network** is not yet modelled: the
-  `packer_security_group_id` and `source_image_id` variables default
-  to empty and must be supplied for the bake to launch.
+- **The Packer build instance's network** is resolved from the
+  bootstrap stack's VPC: the bake passes `vpc_id`, `vswitch_id` and
+  `zone_id` explicitly, so the plugin does not create a throwaway
+  VPC of its own. In CI those come from the repo variables
+  `ALICLOUD_VPC_ID` / `ALICLOUD_VSWITCH_ID`; locally they are
+  `-var` flags. The source image is the newest ARM64 Ubuntu 26.04 in
+  the region (the agent container image is ARM64-only, so an x86
+  source image would refuse to boot it).
+- **ECS instance creation is blocked on this account.**
+  `RunInstances` / `CreateInstance` fail with
+  `Forbidden.RiskControl` — *"This operation is forbidden by Aliyun
+  RiskControl system."* Aliyun's own error-code documentation
+  (`GetErrorCodeSolutions` for `Forbidden.RiskControl` on Ecs) says
+  this means *"您的账户出现异常，详情请联系客服 … 账号存在交易安全
+  问题"* and that it is cleared only by **opening a support ticket**
+  with the account holder's ID / business licence.
+
+  It is an account-level block on ECS purchases, not a template or
+  configuration problem. It reproduces identically for every instance
+  type, image, zone, charge type and security group, while the free
+  resources the bake needs (VPC, VSwitch, security group, key pair)
+  are created without complaint. The underlying cause is visible in
+  the billing API: the account has **no payment method bound** and
+  **no balance** —
+
+  ```
+  aliyun bssopenapi QueryPrepaidCards --endpoint business.ap-southeast-1.aliyuncs.com
+    → {"PrepaidCard":[]}
+  aliyun bssopenapi QueryAccountBalance --endpoint business.ap-southeast-1.aliyuncs.com
+    → {"AvailableAmount":"0.00","CreditAmount":"0.00","AvailableCashAmount":"0.00"}
+  ```
+
+  So the fix is on the account, not in the repo: bind a payment
+  method (or top up the balance) in the billing console, and
+  separately open the support ticket the error documentation asks
+  for. Note the balance query needs the **international** billing
+  endpoint (`business.ap-southeast-1.aliyuncs.com`) — the domestic
+  `business.aliyuncs.com` rejects an international account with
+  `NotApplicable: the caller site matches the API domain regionId`.
+
+  Until then the bake cannot complete, and neither can the runtime
+  agent instances (the FC function launches the same way). Everything
+  else in the pipeline — the Packer template, the build scripts, the
+  RAM policies and the OOS publish step — is verified working up to
+  the point of instance creation.

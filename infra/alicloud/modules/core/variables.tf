@@ -135,9 +135,9 @@ variable "stt_models_bucket_name" {
 }
 
 variable "spot_instance_types" {
-  description = "ECS preemptible spot instance types to try, in preference order. Aliyun ECS instance type names follow ecs.<family>.<size>. AWS analogue: same name (EC2 instance types). Override in terraform.tfvars for regions without the default inventory."
+  description = "ECS preemptible spot instance types to try, in preference order. Aliyun ECS instance type names follow ecs.<family>.<size>. AWS analogue: same name (EC2 instance types). Override in terraform.tfvars for regions without the default inventory. The defaults are ARM64 (ecs.g8y.*) because the baked agent image is ARM64 — an x86 instance type cannot launch an ARM64 image."
   type        = list(string)
-  default     = ["ecs.t6-c1m2.large", "ecs.t6-c1m4.large", "ecs.t6-c1m4.xlarge"]
+  default     = ["ecs.g8y.large", "ecs.g8y.xlarge", "ecs.c8y.large"]
 
   validation {
     condition     = length(var.spot_instance_types) > 0

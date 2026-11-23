@@ -37,7 +37,7 @@ def _error_code(exc: Exception) -> str:
     Each cloud SDK reports "this thing does not exist" differently:
 
       * AWS (botocore) → `exc.response["Error"]["Code"]`
-      * Alicloud (Tea) → `exc.code`, e.g. `"Forbidden.ResourceNotExists"`
+      * Alicloud (Tea) → `exc.code`, e.g. `"EntityNotExists.Parameter"`
       * a cloud-neutral wrapper → `exc.code`
 
     The consumer (`ComputeProvider.get_agent_image_id`) compares the

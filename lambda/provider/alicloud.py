@@ -491,17 +491,18 @@ class AlicloudCompute(ComputeProvider):
 
     # Issue #125: the Alicloud Packer pipeline
     # (infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl) publishes the
-    # baked image id to KMS Secrets Manager — the Alicloud
+    # baked image id to the OOS Parameter Store — the Alicloud
     # `SecretStore` implementation — under this suffix. The AWS
     # analogue is `agent-ami-id-docker-ubuntu` in SSM Parameter
     # Store. The two must differ: the AWS suffix would point at an
-    # SSM parameter that the KMS-backed store cannot read.
+    # SSM parameter that the OOS-backed store cannot read.
     agent_image_param_suffix = "agent-ami-id-ecs-ubuntu"
 
-    # "The parameter does not exist". KMS encodes this as
-    # `Forbidden.ResourceNotExists` (see `_is_not_found` below); the
+    # "The parameter does not exist". OOS encodes this as
+    # `EntityNotExists.Parameter` (see `_is_not_found` below); the
     # AWS-side code is `ParameterNotFound` / `404`.
     secret_not_found_codes = (
+        "EntityNotExists.Parameter",
         "Forbidden.ResourceNotExists",
         "ResourceNotExists",
         "ParameterNotFound",

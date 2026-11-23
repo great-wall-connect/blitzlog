@@ -51,9 +51,9 @@ if [ ! -r "$MANIFEST" ]; then
     exit 1
 fi
 
-# artifact_id is in the form "<region>:image-<id>" — strip the region
+# artifact_id is in the form "<region>:<image-id>" — strip the region
 # prefix. The Alicloud packer builder names the artifact
-# "<region>:image-<image-id>".
+# "<region>:<image-id>" (the ECS image id, e.g. "m-xxxx").
 IMAGE_ID=$(jq -r '.builds[-1].artifact_id' "$MANIFEST" | awk -F: '{print $2}')
 
 if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ] || [ "$IMAGE_ID" = "" ]; then

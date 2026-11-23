@@ -19,12 +19,12 @@ output "stt_models_bucket_name" {
 }
 
 output "vpc_id" {
-  description = "ID of the shared agent VPC. Pass this into infra/alicloud/{dev,prod}/alicloud.tfvars as vpc_id — the ECS instances and the security group attach to it."
+  description = "ID of the shared agent VPC. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as vpc_id — the ECS instances and the security group attach to it."
   value       = alicloud_vpc.agent.id
 }
 
 output "vswitch_ids" {
-  description = "IDs of the shared agent VSwitches. Pass this into infra/alicloud/{dev,prod}/alicloud.tfvars as vswitch_ids — an ECS launch requires a VSwitch."
+  description = "IDs of the shared agent VSwitches. Pass this into infra/alicloud/{dev,prod}/terraform.tfvars as vswitch_ids — an ECS launch requires a VSwitch."
   value       = alicloud_vswitch.agent[*].id
 }
 

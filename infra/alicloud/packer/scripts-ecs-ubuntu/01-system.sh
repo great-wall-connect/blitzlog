@@ -31,7 +31,7 @@ sudo apt-get update
 # arriving as a transitive dependency of docker-ce.
 sudo apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg \
-    jq openssl \
+    jq openssl unzip \
     kmod iptables
 
 # Docker's official Ubuntu repo (installs dockerd + CLI)
@@ -84,14 +84,36 @@ fi
 # `ossutil` — the OSS analogue of `aws s3`. The AWS-side host library
 # (blitzlog_uploader.sh) wraps `aws s3 cp/rm/ls`; the Alicloud-side
 # library (blitzlog_oss_uploader.sh) wraps these ossutil verbs.
+#
+# The 2.x binaries are published as per-arch zips that contain a
+# single `ossutil` executable; the older 2.0.5 path this script
+# previously used returns 404. The version is read from the
+# upstream version file so a new patch release does not need a code
+# change here.
 if ! command -v ossutil >/dev/null 2>&1; then
     echo "Installing ossutil..."
     cd /tmp
-    curl -fsSL -o ossutil64 \
-        https://gosspublic.alicdn.com/ossutil/2.0.5/ossutil64
-    sudo chmod +x ossutil64
-    sudo mv ossutil64 /usr/local/bin/ossutil
-    rm -f ossutil64
+    case "$(uname -m)" in
+        x86_64) OSSUTIL_ARCH="amd64" ;;
+        aarch64 | arm64) OSSUTIL_ARCH="arm64" ;;
+        *)
+            echo "ERROR: unsupported architecture $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+    OSSUTIL_VERSION=$(curl -fsSL https://gosspublic.alicdn.com/ossutil/v2/version.txt \
+        | sed -n 's/^ossutil version: //p')
+    if [ -z "$OSSUTIL_VERSION" ]; then
+        echo "ERROR: could not resolve the ossutil version" >&2
+        exit 1
+    fi
+    curl -fsSL -o ossutil.zip \
+        "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-linux-${OSSUTIL_ARCH}.zip"
+    rm -rf ossutil-unpack
+    unzip -q ossutil.zip -d ossutil-unpack
+    sudo mv "ossutil-unpack/ossutil-linux-${OSSUTIL_ARCH}/ossutil" /usr/local/bin/ossutil
+    sudo chmod +x /usr/local/bin/ossutil
+    rm -rf ossutil.zip ossutil-unpack
 fi
 
 sudo apt-get clean
