@@ -1329,18 +1329,21 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "matching the AWS-side s3:ListBucket condition.",
         )
 
-    def test_terraform_pinned_to_1_16_6(self):
+    def test_terraform_pinned_to_1_17_1(self):
         """Every workflow that installs Terraform + mise.toml must
-        use the same version (1.16.6). A drift between them causes
+        use the same version (1.17.1). A drift between them causes
         `terraform init` to silently re-pick a different provider
         set on CI vs local.
+
+        Issue #191 bumped the pin from 1.16.6 to 1.17.1 so CI runs
+        the same Terraform that wrote the migrated state files.
         """
         # mise.toml
         mise_toml = (self.REPO_ROOT / "mise.toml").read_text()
         self.assertIn(
-            'terraform = "1.16.6"',
+            'terraform = "1.17.1"',
             mise_toml,
-            'mise.toml must pin terraform = "1.16.6"',
+            'mise.toml must pin terraform = "1.17.1"',
         )
 
         # workflows
@@ -1351,16 +1354,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         ):
             text = (self.REPO_ROOT / wf_rel).read_text()
             self.assertIn(
-                "terraform_version: 1.16.6",
+                "terraform_version: 1.17.1",
                 text,
-                f"{wf_rel} must install terraform_version 1.16.6",
+                f"{wf_rel} must install terraform_version 1.17.1",
             )
-            # Old pin must be gone.
-            self.assertNotIn(
-                "terraform_version: 1.9.8",
-                text,
-                f"{wf_rel} must not still pin terraform 1.9.8",
-            )
+            # Old pins must be gone.
+            for stale in ("terraform_version: 1.9.8", "terraform_version: 1.16.6"):
+                self.assertNotIn(
+                    stale,
+                    text,
+                    f"{wf_rel} must not still pin {stale.split(': ')[1]}",
+                )
 
     def test_mise_tf_plan_points_at_real_dir(self):
         """The mise `tf-plan` / `tf-apply` tasks used to point at
