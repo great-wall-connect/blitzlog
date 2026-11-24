@@ -33,7 +33,7 @@ In-scope targets:
   user/permissions and the writable-path contract (see
   `packages/images/agent/container-hardening.env`).
 - **OpenCode configuration** written by the bootstrap — provider block, env-var interpolation, plugin installation.
-- **Terraform backend** (`infra/main.tf`) — S3 state bucket, DynamoDB lock table (if added later).
+- **Terraform backend** (`infra/aws/*/main.tf`) — S3 state bucket and the per-env state keys (`blitzlog/<env>.tfstate`). There is no DynamoDB lock table; applies are serialised by CI concurrency groups instead.
 - **Shell scripts** under `scripts/` — if any are reintroduced.
 
 Out-of-scope:

@@ -165,10 +165,14 @@ class TestAlicloudBackendConstantsAreConsistent(unittest.TestCase):
         from a single expression; the `.hcl.example` files hard-code
         it. The two must agree or the workflow reads a DIFFERENT
         state file than the operator's local apply — which looks
-        exactly like "the state was lost"."""
+        exactly like "the state was lost".
+
+        Issue #191 moved the shared layout to `blitzlog/<env>.tfstate`
+        on BOTH clouds, so the workflow expression and the Alicloud
+        templates must both name the new keys."""
         text = _read(RELEASE_YML)
         self.assertIn(
-            "'prod/blitzlog.tfstate' || 'dev/blitzlog.tfstate'",
+            "'blitzlog/prod.tfstate' || 'blitzlog/dev.tfstate'",
             text,
             "the workflow's STATE_KEY expression must produce the same "
             "keys the backend .hcl examples use",
@@ -176,11 +180,11 @@ class TestAlicloudBackendConstantsAreConsistent(unittest.TestCase):
         for path, key in (
             (
                 os.path.join(ALICLOUD_DEV, "dev-backend.hcl.example"),
-                "dev/blitzlog.tfstate",
+                "blitzlog/dev.tfstate",
             ),
             (
                 os.path.join(ALICLOUD_PROD, "prod-backend.hcl.example"),
-                "prod/blitzlog.tfstate",
+                "blitzlog/prod.tfstate",
             ),
         ):
             self.assertIn(

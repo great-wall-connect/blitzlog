@@ -31,6 +31,6 @@
 # fails with "Authorization header is invalid" or a 404.
 
 bucket = "gwc-infra-tf-state"
-key    = "prod/blitzlog.tfstate"
+key    = "blitzlog/prod.tfstate"
 region = "cn-hongkong"
 profile = "default"
