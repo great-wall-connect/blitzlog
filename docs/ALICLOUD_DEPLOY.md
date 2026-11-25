@@ -63,6 +63,28 @@ The client id MUST be `sts.aliyuncs.com`: it is the `aud` claim the
 workflow requests and the value the role's trust policy conditions
 on.
 
+**The trust policy's condition keys are Alicloud's, not AWS's.**
+Alicloud's RAM exposes the token's claims as `oidc:aud` / `oidc:iss`
+/ `oidc:sub` — NOT as `oidc:token.actions.githubusercontent.com:*`,
+which is what the AWS side uses:
+
+```json
+"Condition": {
+    "StringEquals": {
+        "oidc:aud": ["sts.aliyuncs.com"],
+        "oidc:iss": "https://token.actions.githubusercontent.com"
+    },
+    "StringLike": {
+        "oidc:sub": "repo:great-wall-connect/blitzlog:*"
+    }
+}
+```
+
+With the AWS key names the service populates nothing under them, so
+the conditions can never be satisfied and every assume is denied with
+`AuthenticationFail.NoPermission` / `NoPermissionType: ImplicitDeny`
+— a policy that looks right and never matches.
+
 ### 1b. The account id
 
 ```bash

@@ -387,13 +387,32 @@ class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
             )
 
     def test_the_subject_matches_the_real_claim(self):
+        """Alicloud's RAM does not use the AWS condition keys for an
+        OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
+        `oidc:sub`. With the AWS key names
+        (`oidc:token.actions.githubusercontent.com:*`) the service
+        populates nothing under them, so the conditions can never be
+        satisfied and every assume is denied with
+        `NoPermissionType: ImplicitDeny`."""
         for name, text in (("packer", self.packer), ("deploy", self.deploy)):
             self.assertIn(
-                '"oidc:token.actions.githubusercontent.com:sub" = '
-                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+                '"oidc:sub" = "repo:${local.github_repo}:*"',
                 text,
-                f"the {name} role's sub condition must be "
-                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+                f"the {name} role's sub condition must use Alicloud's "
+                '"oidc:sub" key and match the real subject',
+            )
+            self.assertIn(
+                '"oidc:aud" = "sts.aliyuncs.com"',
+                text,
+                f"the {name} role's audience condition must use "
+                'Alicloud\'s "oidc:aud" key',
+            )
+            self.assertNotIn(
+                '"oidc:token.actions.githubusercontent.com:aud"',
+                text,
+                f"the {name} role must not use the AWS condition keys — "
+                "Alicloud's STS never populates them, so the conditions "
+                "can never match",
             )
 
     def test_the_oidc_provider_arn_matches_the_workflow(self):
@@ -446,9 +465,10 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
     def test_role_has_an_oidc_trust_policy(self):
         self.assertIn('resource "alicloud_ram_role" "deploy"', self.text)
         self.assertIn(
-            "oidc:token.actions.githubusercontent.com:aud",
+            '"oidc:aud"',
             self.text,
-            "the trust policy must condition on the OIDC audience",
+            "the trust policy must condition on the OIDC audience "
+            "(Alicloud's key, not the AWS one)",
         )
         self.assertIn(
             "sts.aliyuncs.com",
@@ -456,9 +476,9 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
             "the trust policy's audience must be sts.aliyuncs.com",
         )
         self.assertIn(
-            "repo:${local.github_repo}*:ref:refs/heads/*",
+            '"oidc:sub" = "repo:${local.github_repo}:*"',
             self.text,
-            "the trust policy must match the same branch wildcard as the "
+            "the trust policy must match the same subject wildcard as the "
             "packer role",
         )
 

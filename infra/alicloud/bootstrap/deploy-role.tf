@@ -31,12 +31,19 @@ resource "alicloud_ram_role" "deploy" {
           Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.oidc_provider_name}"]
         }
         Action = "sts:AssumeRole"
+        # Alicloud's RAM does NOT use the AWS condition keys for an
+        # OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
+        # `oidc:sub`, not under `oidc:token.actions.githubusercontent.com:*`.
+        # With the AWS key names the conditions can never be satisfied
+        # (the service populates nothing under them) and every assume
+        # is denied with `NoPermissionType: ImplicitDeny`.
         Condition = {
           StringEquals = {
-            "oidc:token.actions.githubusercontent.com:aud" = "sts.aliyuncs.com"
+            "oidc:aud" = "sts.aliyuncs.com"
+            "oidc:iss" = "https://token.actions.githubusercontent.com"
           }
           StringLike = {
-            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}*:ref:refs/heads/*"
+            "oidc:sub" = "repo:${local.github_repo}:*"
           }
         }
       },
