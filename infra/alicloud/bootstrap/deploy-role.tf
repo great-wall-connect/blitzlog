@@ -28,7 +28,7 @@ resource "alicloud_ram_role" "deploy" {
         # OIDC provider's client id (sts.aliyuncs.com).
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.oidc_provider_name}"]
         }
         Action = "sts:AssumeRole"
         Condition = {

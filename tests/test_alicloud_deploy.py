@@ -398,19 +398,24 @@ class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
 
     def test_the_oidc_provider_arn_matches_the_workflow(self):
         """The role's Federated principal and the workflow's
-        `oidc-provider-arn` must name the SAME provider — the Alicloud
-        OIDC provider for a GitHub repo is registered under
-        `<org>/<repo>`."""
+        `oidc-provider-arn` must name the SAME provider.
+
+        The provider ARN's last segment is the IdP NAME from the RAM
+        console ("blitzlog"), NOT an `<org>/<repo>` path: Alicloud's
+        IdP-name field takes no slash, so the provider cannot be
+        registered as "great-wall-connect/blitzlog". Naming a
+        provider that does not exist fails the OIDC step with
+        "No such OIDC Provider registered"."""
         for name, text in (("packer", self.packer), ("deploy", self.deploy)):
             self.assertIn(
-                "oidc-provider/${local.github_repo}",
+                "oidc-provider/${local.oidc_provider_name}",
                 text,
-                f"the {name} role's Federated principal must be "
-                "oidc-provider/<owner>/<repo>",
+                f"the {name} role's Federated principal must name the "
+                "provider by its IdP name",
             )
         self.assertIn(
             "oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:"
-            "oidc-provider/great-wall-connect/blitzlog",
+            "oidc-provider/blitzlog",
             self.workflow,
             "the workflow's oidc-provider-arn must match the trust "
             "policy's Federated principal",

@@ -836,7 +836,7 @@ jobs:
         id: aliyun-credentials
         uses: aliyun/configure-aliyun-credentials-action@v1
         with:
-          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/great-wall-connect/blitzlog
+          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/blitzlog
           role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-packer-build-role
           audience: sts.aliyuncs.com
 
@@ -1304,7 +1304,7 @@ jobs:
         id: aliyun-credentials
         uses: aliyun/configure-aliyun-credentials-action@v1
         with:
-          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/great-wall-connect/blitzlog
+          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/blitzlog
           role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-deploy-role
           audience: sts.aliyuncs.com
 

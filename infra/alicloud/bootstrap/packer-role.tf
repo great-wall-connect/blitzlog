@@ -23,11 +23,21 @@
 # shared by this file and the bucket ARNs there.
 
 locals {
-  # The GitHub repo, as "owner/repo". The OIDC provider is registered
-  # under that path and the `sub` claim matches on it, so it must NOT
-  # be prefixed with the org again — that would produce a subject
-  # matching nothing.
+  # The GitHub repo, as "owner/repo". The `sub` claim matches on it,
+  # so it must NOT be prefixed with the org again — that would produce
+  # a subject matching nothing.
   github_repo = "great-wall-connect/blitzlog"
+
+  # The RAM OIDC provider's NAME — the last segment of the provider
+  # ARN (`acs:ram::<account-id>:oidc-provider/<name>`). It is the
+  # IdP name in the RAM console, and Alicloud's name field takes no
+  # slash, so this is NOT `local.github_repo`: the provider is
+  # registered as "blitzlog", not as "great-wall-connect/blitzlog".
+  # The STS OIDC token request names the provider by ARN, and the
+  # trust policies below name it the same way — the three must agree
+  # or the request is rejected with "No such OIDC Provider
+  # registered".
+  oidc_provider_name = "blitzlog"
 
   # The `alicloud_oss_bucket` resource has no `arn` attribute (the
   # data source in the core module does, but the bootstrap stack owns
@@ -54,7 +64,7 @@ resource "alicloud_ram_role" "packer_build" {
       {
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.oidc_provider_name}"]
         }
         Action = "sts:AssumeRole"
         Condition = {

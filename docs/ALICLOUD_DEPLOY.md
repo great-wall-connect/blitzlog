@@ -51,9 +51,13 @@ OIDC identity provider:**
 | Thumbprint | `06d927fecd0a84aeba28aad1d808139470fe95c3` |
 
 The resulting ARN is
-`acs:ram::<account-id>:oidc-provider/great-wall-connect/blitzlog` —
-note the `<org>/<repo>` path, which is how Alicloud names a GitHub
-OIDC provider. The workflow hard-codes that shape.
+`acs:ram::<account-id>:oidc-provider/blitzlog` — the last segment is
+the **IdP name** from the console, NOT an `<org>/<repo>` path:
+Alicloud's IdP-name field takes no slash, so the provider cannot be
+registered as "great-wall-connect/blitzlog". The workflow hard-codes
+that shape, and the bootstrap's trust policies name the provider the
+same way — the three must agree, or the OIDC step fails with "No
+such OIDC Provider registered".
 
 The client id MUST be `sts.aliyuncs.com`: it is the `aud` claim the
 workflow requests and the value the role's trust policy conditions
