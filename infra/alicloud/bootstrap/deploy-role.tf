@@ -37,10 +37,15 @@ resource "alicloud_ram_role" "deploy" {
         # With the AWS key names the conditions can never be satisfied
         # (the service populates nothing under them) and every assume
         # is denied with `NoPermissionType: ImplicitDeny`.
+        # The audience and issuer conditions are LISTS, not a style
+        # choice: GitHub's `aud` claim is a JSON array
+        # (`["sts.aliyuncs.com"]`), and a string condition never
+        # matches an array-valued claim. Alicloud's own examples use
+        # lists for both keys too.
         Condition = {
           StringEquals = {
-            "oidc:aud" = "sts.aliyuncs.com"
-            "oidc:iss" = "https://token.actions.githubusercontent.com"
+            "oidc:aud" = ["sts.aliyuncs.com"]
+            "oidc:iss" = ["https://token.actions.githubusercontent.com"]
           }
           StringLike = {
             "oidc:sub" = "repo:${local.github_repo}:*"

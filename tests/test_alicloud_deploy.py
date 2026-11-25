@@ -402,10 +402,12 @@ class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
                 '"oidc:sub" key and match the real subject',
             )
             self.assertIn(
-                '"oidc:aud" = "sts.aliyuncs.com"',
+                '"oidc:aud" = ["sts.aliyuncs.com"]',
                 text,
                 f"the {name} role's audience condition must use "
-                'Alicloud\'s "oidc:aud" key',
+                "Alicloud's \"oidc:aud\" key AND a list — GitHub's aud "
+                "claim is a JSON array, which never matches a string "
+                "condition",
             )
             self.assertNotIn(
                 '"oidc:token.actions.githubusercontent.com:aud"',

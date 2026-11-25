@@ -72,7 +72,7 @@ which is what the AWS side uses:
 "Condition": {
     "StringEquals": {
         "oidc:aud": ["sts.aliyuncs.com"],
-        "oidc:iss": "https://token.actions.githubusercontent.com"
+        "oidc:iss": ["https://token.actions.githubusercontent.com"]
     },
     "StringLike": {
         "oidc:sub": "repo:great-wall-connect/blitzlog:*"
@@ -80,10 +80,15 @@ which is what the AWS side uses:
 }
 ```
 
-With the AWS key names the service populates nothing under them, so
-the conditions can never be satisfied and every assume is denied with
-`AuthenticationFail.NoPermission` / `NoPermissionType: ImplicitDeny`
-— a policy that looks right and never matches.
+Two traps in that block:
+
+- With the AWS key names the service populates nothing under them, so
+  the conditions can never be satisfied and every assume is denied with
+  `AuthenticationFail.NoPermission` / `NoPermissionType: ImplicitDeny`
+  — a policy that looks right and never matches.
+- The audience and issuer values are **lists**, not strings. GitHub's
+  `aud` claim is a JSON array, and a string condition never matches an
+  array-valued claim.
 
 ### 1b. The account id
 
