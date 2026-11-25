@@ -28,8 +28,8 @@ from _env import _blitzlog_env
 from ._common import (  # sibling subpackage import
     _local_llm_env_block,
     _local_llm_log_line,
-    _read_git_identity_kms_script,
-    _read_secrets_from_kms_script,
+    _read_git_identity_oos_script,
+    _read_secrets_from_oos_script,
     script_header,
 )
 
@@ -126,7 +126,7 @@ def build_assisted_user_data(
     local_llm_log = _local_llm_log_line(local_llm)
     # Symmetric with the AWS-side: the `export GIT_AUTHOR_*` line is
     # emitted by `script_header`; the actual KMS read lives in
-    # `_read_git_identity_kms_script` and runs AFTER `$REGION` is set.
+    # `_read_git_identity_oos_script` and runs AFTER `$REGION` is set.
     git_identity_env = (
         "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n" if sender_login else ""
     )
@@ -148,7 +148,7 @@ def build_assisted_user_data(
         opencode_prompt=None,
     )
 
-    return f"""{header}{_read_secrets_from_kms_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_kms_script(sender_login)}
+    return f"""{header}{_read_secrets_from_oos_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_oos_script(sender_login)}
 TELEGRAM_USER_ID="{telegram_user_id}"
 TELEGRAM_BOT_TOKEN="{bot_token}"
 export TELEGRAM_BOT_TOKEN TELEGRAM_USER_ID
@@ -230,17 +230,16 @@ OPENCODE_RESUMED="${{OPENCODE_RESUMED:-}}"
 OPENCODE_RESUMED_TITLE="${{OPENCODE_RESUMED_TITLE:-}}"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
 # Issue #145: the Alicloud path has no EventBridge Scheduler
-# equivalent in this PR. GITHUB_TOKEN_SCHED_GROUP is set so the
-# watchdog's refresh branch has the right group name to look up;
-# the actual schedule creation is a no-op until the Aliyun
-# scheduler equivalent lands (Phase 5 follow-up).
-GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
+# equivalent, so there is no token-refresh chain and no schedule
+# group to tear down. The Alicloud watchdog (issue #125) does not
+# read GITHUB_TOKEN_SCHED_GROUP at all — the AWS-side watchdog deletes
+# the group before it terminates the instance, and there is nothing
+# equivalent to delete here.
 ENVEOF
 
 # The unit is already enabled (Packer 02-systemd.sh). Just start it; the
 # watchdog will `docker run` the agent, wait for it to exit, then do all
-# AWS-dependent cleanup + terminate the instance.
-# (Cleanup is still AWS-shaped on the Alicloud path — Phase 5
-# follow-up adds the Alicloud equivalents.)
+# Alicloud-dependent cleanup (OSS upload + bot-lock release) + terminate
+# the ECS instance.
 sudo systemctl start blitzlog-agent.service
 """

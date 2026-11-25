@@ -15,15 +15,18 @@ variable "alicloud_region" {
 }
 
 variable "vpc_id" {
-  description = "VPC ID for ECS instances and security group. AWS analogue: same name (vpc_id)."
+  description = "ID of the shared agent VPC, from the bootstrap stack's output ('terraform output vpc_id'). REQUIRED — Alicloud has no default VPC per region. AWS analogue: same name."
   type        = string
-  default     = ""
 }
 
 variable "vswitch_ids" {
-  description = "VSwitch IDs for ECS preemptible instances. ECS supports multiple VSwitches per VPC, so we accept a list. AWS analogue: ec2_subnet_id (single Subnet)."
+  description = "IDs of the agent VSwitches, from the bootstrap stack's output ('terraform output vswitch_ids'). REQUIRED — an ECS launch needs one. AWS analogue: ec2_subnet_id."
   type        = list(string)
-  default     = []
+
+  validation {
+    condition     = length(var.vswitch_ids) > 0
+    error_message = "vswitch_ids must contain at least one VSwitch id. An ECS launch requires a VSwitch, and the on-demand fallback path reads vswitch_ids[0] — an empty list fails the plan with 'Invalid index'. Copy the list from the bootstrap stack: 'terraform output vswitch_ids'."
+  }
 }
 
 variable "ssh_allowed_cidrs" {
@@ -132,9 +135,9 @@ variable "stt_models_bucket_name" {
 }
 
 variable "spot_instance_types" {
-  description = "ECS preemptible spot instance types to try, in preference order. Aliyun ECS instance type names follow ecs.<family>.<size>. AWS analogue: same name (EC2 instance types). Override in terraform.tfvars for regions without the default inventory."
+  description = "ECS preemptible spot instance types to try, in preference order. Aliyun ECS instance type names follow ecs.<family>.<size>. AWS analogue: same name (EC2 instance types). Override in terraform.tfvars for regions without the default inventory. The defaults are ARM64 (ecs.g8y.*) because the baked agent image is ARM64 — an x86 instance type cannot launch an ARM64 image."
   type        = list(string)
-  default     = ["ecs.t6-c1m2.large", "ecs.t6-c1m4.large", "ecs.t6-c1m4.xlarge"]
+  default     = ["ecs.g8y.large", "ecs.g8y.xlarge", "ecs.c8y.large"]
 
   validation {
     condition     = length(var.spot_instance_types) > 0

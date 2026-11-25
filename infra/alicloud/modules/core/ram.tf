@@ -6,7 +6,7 @@
 #
 #   * AWS `lambda.amazonaws.com` -> Alicloud `fc.aliyuncs.com`
 #   * AWS `ec2.amazonaws.com`    -> Alicloud `ecs.aliyuncs.com`
-#   * AWS `ssm:GetParameter`     -> Alicloud `kms:GetSecretValue`
+#   * AWS `ssm:GetParameter`     -> Alicloud `oos:GetSecretParameter`
 #   * AWS `s3:GetObject`         -> Alicloud `oss:GetObject`
 #   * AWS `s3:ListBucket`        -> Alicloud `oss:ListBuckets` +
 #                                   `oss:GetBucketAcl`
@@ -22,10 +22,16 @@
 #                                   issue for the Aliyun scheduler
 #                                   equivalent of #145.
 #
+# The Alicloud secret store is the OOS Parameter Store, so the
+# secret grants are `oos:*` on
+# `acs:oos:<region>:<account>:secretparameter/<name>`. The OOS
+# resource exposes no ARN attribute, so the grants spell the ARNs
+# out (the parameter names live in locals.tf).
+#
 # Three roles mirror the AWS side:
 #   * alicloud_ram_role.lambda_role   - FC execution role
 #   * alicloud_ram_role.ecs_agent_role - ECS instance role
-# Per-user bot pool grants use literal `/blitzlog/users/*` ARNs
+# Per-user bot pool grants use literal `blitzlog/users/*` ARNs
 # (mirroring the AWS-side literal in iam.tf:118-122).
 
 # Function Compute execution role.
@@ -37,7 +43,17 @@ resource "alicloud_ram_role" "lambda_role" {
     Statement = [{
       Effect = "Allow"
       Principal = {
-        Service = ["fc.aliyuncs.com"]
+        # The FC service itself (the function's execution role) and
+        # the API Gateway, which assumes this role to invoke the
+        # function — it is the `arn_role` on the API's FC backend.
+        # Without the gateway in the trust policy its AssumeRole is
+        # rejected with "Function Compute AssumeRole failed: status=403
+        # NoPermission" and every invocation 403s.
+        #
+        # Only the "Service" principal type is accepted here: an
+        # account-root principal is rejected with
+        # "MalformedPolicyDocument — Unsupported principal type".
+        Service = ["fc.aliyuncs.com", "apigateway.aliyuncs.com"]
       }
       Action = "sts:AssumeRole"
     }]
@@ -52,6 +68,11 @@ resource "alicloud_ram_role" "lambda_role" {
 # Sid becomes `ram:GetInstanceProfile`.
 resource "alicloud_ram_policy" "lambda_policy" {
   policy_name = "blitzlog-${var.environment}-function-policy"
+  # Alicloud caps a custom policy at 5 versions, and the provider
+  # creates a new version on every change — without this the fifth
+  # apply fails with "LimitExceeded.Policy.Version: The count of
+  # policy version is limited to 5".
+  rotate_strategy = "DeleteOldestNonDefaultVersionWhenLimitExceeded"
   policy_document = jsonencode({
     Version = "1"
     Statement = [
@@ -84,23 +105,57 @@ resource "alicloud_ram_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:GetSecretValue",
+          "oos:GetSecretParameter",
         ]
         # Env-scoped: the FC reads the per-env GitHub App creds, the
         # STT config, the OpenCode API key, and the per-env ephemeral
         # root. The literal ARNs mirror the AWS-side
         # `aws_ssm_parameter.<name>.arn` references in iam.tf:55-67.
         Resource = [
-          alicloud_kms_secret.github_app_id.arn,
-          alicloud_kms_secret.github_app_private_key.arn,
-          alicloud_kms_secret.github_app_installation_id.arn,
-          alicloud_kms_secret.github_webhook_secret.arn,
+          "${local.oos_secretparameter_arn}${local.oos_github_app_id_name}",
+          "${local.oos_secretparameter_arn}${local.oos_github_app_private_key_name}",
+          "${local.oos_secretparameter_arn}${local.oos_github_app_installation_name}",
+          "${local.oos_secretparameter_arn}${local.oos_github_webhook_secret_name}",
           # Per-user bot pools and per-user local LLM config are
-          # env-independent under /blitzlog/users/ — same posture as
+          # env-independent under blitzlog/users/ — same posture as
           # the AWS-side iam.tf:118-122.
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/users",
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/users/*",
+          "${local.oos_secretparameter_arn}blitzlog/users",
+          "${local.oos_secretparameter_arn}blitzlog/users/*",
+          # The Packer-baked agent image id, published by
+          # infra/alicloud/packer/scripts-ecs-ubuntu/05-publish-ami-id.sh.
+          # The FC reads it at launch time to pick the image the agent
+          # instance boots from (lambda/ec2.py::get_agent_ami). The
+          # AWS-side analogue is the ssm:GetParameter grant on
+          # `blitzlog/<env>/agent-ami-id-docker-ubuntu` in iam.tf:66.
+          "${local.oos_secretparameter_arn}${local.oos_root}/agent-ami-id-ecs-ubuntu",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "oos:GetSecretParametersByPath",
+        ]
+        # The FC lists the per-user bot-pool + local-LLM config under
+        # blitzlog/users/<login>/... (lambda/bot_pool.py::list_bot_pool)
+        # — the OOS analogue of the AWS-side `ssm:GetParametersByPath`
+        # grant. The KMS implementation had no equivalent: it listed
+        # the whole store with `ListSecrets` and filtered client-side,
+        # and that verb was never granted.
+        Resource = [
+          "${local.oos_secretparameter_arn}blitzlog/users/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "fc:InvokeFunction",
+        ]
+        # The API Gateway invokes the function with this role's
+        # credentials (the `arn_role` on the API's FC backend), so
+        # the role needs the invoke verb on the function itself.
+        # Without it the gateway's call is rejected with
+        # "the caller is not authorized to perform 'fc:InvokeFunction'".
+        Resource = "acs:fc:${var.alicloud_region}:${data.alicloud_account.current.id}:functions/${local.fc_function_name}"
       },
       {
         Effect = "Allow"
@@ -135,10 +190,10 @@ resource "alicloud_ram_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:GetSecretValue",
+          "oos:GetSecretParameter",
         ]
         Resource = [
-          alicloud_kms_secret.opencode_api_key.arn,
+          "${local.oos_secretparameter_arn}${local.oos_opencode_api_key_name}",
         ]
       },
       {
@@ -174,9 +229,28 @@ resource "alicloud_ram_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:CreateSecret",
+          "oos:CreateSecretParameter",
+          "oos:UpdateSecretParameter",
+          "oos:DeleteSecretParameter",
         ]
-        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/${local.ssm_ephemeral_root}/*"
+        # The FC writes the per-issue ephemeral GitHub token here at
+        # launch time (lambda/ec2.py) and refreshes it in place
+        # (lambda/handler.py).
+        Resource = "${local.oos_secretparameter_arn}${local.oos_ephemeral_root}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+        ]
+        # The parameters are encrypted with the per-env CMK. OOS
+        # decrypts them server-side, but Alicloud's own docs are
+        # inconsistent about whether the caller also needs the KMS
+        # key grant (the RAM dependent-action table lists only
+        # `oos:TLSVersion`, the API prose mentions a KMS action), so
+        # the grant is here: narrowly scoped to the one CMK, and
+        # harmless if OOS decrypts with its own credentials.
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}"
       },
       {
         Effect = "Allow"
@@ -226,6 +300,11 @@ resource "alicloud_ram_role" "ecs_agent_role" {
 # is dropped — no Alicloud scheduler equivalent in this PR.
 resource "alicloud_ram_policy" "ecs_agent_policy" {
   policy_name = "blitzlog-${var.environment}-ecs-agent-policy"
+  # Alicloud caps a custom policy at 5 versions, and the provider
+  # creates a new version on every change — without this the fifth
+  # apply fails with "LimitExceeded.Policy.Version: The count of
+  # policy version is limited to 5".
+  rotate_strategy = "DeleteOldestNonDefaultVersionWhenLimitExceeded"
   policy_document = jsonencode({
     Version = "1"
     Statement = [
@@ -251,6 +330,41 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
         Resource = [
           "${local.agent_logs_bucket_arn}/${var.environment}/*",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "oss:GetObject",
+          "oss:PutObject",
+          # Issue #125: the watchdog releases the bot-pool lock with
+          # `blitzlog_oss_rm` when the agent container exits
+          # (infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh).
+          # Without oss:DeleteObject the lock would never be released
+          # and the same bot could not be picked up by the next run.
+          # The AWS-side analogue is the s3:DeleteObject grant on
+          # bot-pool-locks/* in infra/aws/modules/core/iam.tf:128.
+          "oss:DeleteObject",
+        ]
+        Resource = [
+          "${local.agent_logs_bucket_arn}/bot-pool-locks/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          # Issue #125: the assisted-mode bootstrap probes for a
+          # previous session's metadata.json with `blitzlog_oss_ls`,
+          # and the watchdog's lock release checks whether the lock
+          # object still exists. The AWS-side analogue is
+          # s3:ListBucket with a bot-pool-locks/* prefix condition.
+          "oss:ListObjects",
+        ]
+        Resource = local.agent_logs_bucket_arn
+        Condition = {
+          StringLike = {
+            "oss:prefix" = "bot-pool-locks/*"
+          }
+        }
       },
       {
         Effect = "Allow"
@@ -285,19 +399,19 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:GetSecretValue",
+          "oos:GetSecretParameter",
         ]
         Resource = [
-          alicloud_kms_secret.opencode_api_key.arn,
-          alicloud_kms_secret.stt_api_url.arn,
-          alicloud_kms_secret.stt_api_key.arn,
-          alicloud_kms_secret.stt_model.arn,
-          alicloud_kms_secret.stt_language.arn,
-          alicloud_kms_secret.stt_models_bucket.arn,
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/${local.ssm_ephemeral_root}/*",
+          "${local.oos_secretparameter_arn}${local.oos_opencode_api_key_name}",
+          "${local.oos_secretparameter_arn}${local.oos_stt_api_url_name}",
+          "${local.oos_secretparameter_arn}${local.oos_stt_api_key_name}",
+          "${local.oos_secretparameter_arn}${local.oos_stt_model_name}",
+          "${local.oos_secretparameter_arn}${local.oos_stt_language_name}",
+          "${local.oos_secretparameter_arn}${local.oos_stt_models_bucket_name}",
+          "${local.oos_secretparameter_arn}${local.oos_ephemeral_root}/*",
           # Per-user local LLM config is env-independent — same
           # posture as the AWS-side iam.tf:323.
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/users/*/local-llm/*",
+          "${local.oos_secretparameter_arn}blitzlog/users/*/local-llm/*",
           # Per-user git author identity (issue #119). Same broad
           # `users/*/git-author/*` shape as the local-llm grant
           # above — narrow enough to exclude the telegram bot tokens
@@ -305,8 +419,17 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
           # must NOT be able to read. The two git-author params are
           # non-secret String types whose values appear on every
           # agent commit.
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/blitzlog/users/*/git-author/*",
+          "${local.oos_secretparameter_arn}blitzlog/users/*/git-author/*",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+        ]
+        # Same reasoning as the FC role's grant: the parameters are
+        # encrypted with the per-env CMK.
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}"
       },
       {
         Effect = "Allow"

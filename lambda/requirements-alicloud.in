@@ -7,10 +7,24 @@
 # depend on.
 #
 # `oss2` re-exports under both `oss2` and `alibabacloud_oss2`
-# namespaces (the legacy short name is the only PyPI package). KMS /
+# namespaces (the legacy short name is the only PyPI package). OOS /
 # ECS use Alibaba's per-product SDK naming.
+#
+# The secret store is the OOS Parameter Store
+# (`alibabacloud_oos20190601`), not KMS Secrets Manager: on KMS 3.0 a
+# secret can only be created inside a dedicated KMS instance, and a
+# KMS instance is a billable resource. The KMS SDK is therefore not
+# needed at runtime — the CMK that encrypts the parameters is only an
+# id we pass to OOS.
 -r requirements.in
 
 oss2
-alibabacloud_kms20160120
+alibabacloud_oos20190601
 alibabacloud_ecs20140526
+
+# `cryptography` is capped at <44 by the SHARED requirements.in — the
+# Function Compute runtime's glibc is older than the build machine's,
+# so cryptography's manylinux_2_34 wheels (v44 and up) do not load
+# there. The cap is shared rather than per-cloud because the
+# development environment installs both bundles and pip cannot
+# satisfy two exact pins of the same package in one environment.

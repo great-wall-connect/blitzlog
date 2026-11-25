@@ -49,6 +49,18 @@ WATCHDOG = os.path.join(REPO_ROOT, "infra/aws/packer/scripts-docker-ubuntu/watch
 AUTONOMOUS_PY = os.path.join(REPO_ROOT, "lambda/scripts/aws/autonomous.py")
 ASSISTED_PY = os.path.join(REPO_ROOT, "lambda/scripts/aws/assisted.py")
 
+# Issue #125: the Alicloud tree has its own watchdog + bootstrap
+# builders. The `set -u` invariant has to be pinned against THOSE
+# files, not the AWS ones — the env-var names differ (OSS_LOGS_BUCKET
+# vs S3_LOGS_BUCKET) and the two trees are separate copies.
+ALICLOUD_WATCHDOG = os.path.join(
+    REPO_ROOT, "infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh"
+)
+ALICLOUD_AUTONOMOUS_PY = os.path.join(
+    REPO_ROOT, "lambda/scripts/alicloud/autonomous.py"
+)
+ALICLOUD_ASSISTED_PY = os.path.join(REPO_ROOT, "lambda/scripts/alicloud/assisted.py")
+
 # Vars the watchdog sets in-script (from SSM, `openssl rand`, etc.)
 # BEFORE the `COMMON_ARGS=(...)` array is built. These do NOT need
 # to appear in either env file. Add to this set ONLY when a new
@@ -319,6 +331,142 @@ class TestWatchdogEnvPinning(unittest.TestCase):
             "OPENCODE_BASE_URL is issue #165's model-selection wiring; it "
             "does not belong on this branch. If you are landing #165, "
             "restore the assertion that it reaches the container.",
+        )
+
+
+class TestAlicloudWatchdogEnvPinning(unittest.TestCase):
+    """The Alicloud watchdog (issue #125) has the same `set -u`
+    invariant as the AWS one: every var referenced in
+    `COMMON_ARGS=( ... )` must be set by the time the array is built,
+    or the watchdog aborts before the container starts.
+
+    The failure mode is identical to issue #97 — a var promoted to
+    COMMON_ARGS without being declared in BOTH env files kills the
+    agent at boot with `unbound variable`. The Alicloud tree has its
+    own bootstrap builders
+    (lambda/scripts/alicloud/{autonomous,assisted}.py), so the
+    invariant has to be pinned against those, not the AWS ones.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.watchdog_src = _read(ALICLOUD_WATCHDOG)
+        cls.autonomous_src = _read(ALICLOUD_AUTONOMOUS_PY)
+        cls.assisted_src = _read(ALICLOUD_ASSISTED_PY)
+        (
+            cls.unconditional,
+            cls.assisted_only,
+        ) = _extract_common_args(cls.watchdog_src)
+        cls.autonomous_env = _extract_blitzlog_env_vars(cls.autonomous_src)
+        cls.assisted_env = _extract_blitzlog_env_vars(cls.assisted_src)
+
+    def test_unconditional_common_args_in_both_env_files(self):
+        missing_autonomous = self.unconditional - (
+            self.autonomous_env | WATCHDOG_SELF_SET
+        )
+        missing_assisted = self.unconditional - (self.assisted_env | WATCHDOG_SELF_SET)
+        problems = []
+        if missing_autonomous:
+            problems.append(
+                "  - autonomous mode missing from /etc/blitzlog.env "
+                "(lambda/scripts/alicloud/autonomous.py): "
+                + ", ".join(sorted(missing_autonomous))
+            )
+        if missing_assisted:
+            problems.append(
+                "  - assisted mode missing from /etc/blitzlog.env "
+                "(lambda/scripts/alicloud/assisted.py): "
+                + ", ".join(sorted(missing_assisted))
+            )
+        if problems:
+            self.fail(
+                "vars in the Alicloud watchdog.sh's unconditional "
+                "COMMON_ARGS=( ...) block are not declared in the matching "
+                "env file. Either declare them in the missing env file, "
+                'or move the line into the `if [ "$MODE" = "assisted" '
+                "]` block (assisted-only). Fix:\n" + "\n".join(problems)
+            )
+
+    def test_assisted_branch_args_in_assisted_env_file(self):
+        missing = self.assisted_only - (self.assisted_env | WATCHDOG_SELF_SET)
+        if missing:
+            self.fail(
+                "vars in the Alicloud watchdog.sh's `if MODE=assisted` "
+                "COMMON_ARGS+= branch are not declared in assisted.py's "
+                "/etc/blitzlog.env: " + ", ".join(sorted(missing))
+            )
+
+    def test_known_unbound_var_does_not_appear_in_unconditional(self):
+        self.assertNotIn(
+            "TELEGRAM_BOT_NAME",
+            self.unconditional,
+            "TELEGRAM_BOT_NAME must NOT be in the Alicloud watchdog's "
+            "unconditional COMMON_ARGS=( ...) — autonomous mode has no "
+            "Telegram bot and `set -u` would abort.",
+        )
+
+    def test_container_cannot_reach_the_aliyun_metadata_service(self):
+        """Issue #165/#175 on the Alicloud side: the ECS instance RAM
+        role can read KMS secrets the container must never see. The
+        watchdog drops metadata traffic from the container's network
+        and disables metadata in the SDK."""
+        self.assertIn(
+            "100.100.100.200",
+            self.watchdog_src,
+            "the Alicloud watchdog must block the Aliyun metadata service "
+            "from the container's network (issue #165)",
+        )
+        self.assertIn("DOCKER-USER", self.watchdog_src)
+        self.assertIn(
+            "ALIBABA_CLOUD_ECS_METADATA_DISABLED=true",
+            self.watchdog_src,
+            "the container must be told that the Aliyun SDK may not use "
+            "the metadata service",
+        )
+
+    def test_metadata_block_is_fail_closed(self):
+        """Issue #175: if the rule cannot be installed, the agent must
+        NOT start — a boundary that fails silently is
+        indistinguishable from one that works."""
+        self.assertIn(
+            "block_metadata_from_container",
+            self.watchdog_src,
+            "the Alicloud watchdog must gate the container start on the "
+            "metadata block being in force (issue #175)",
+        )
+        self.assertIn(
+            "refusing to start the agent container",
+            self.watchdog_src,
+            "the watchdog must say loudly that it is refusing to start "
+            "the container when the metadata block cannot be installed",
+        )
+        self.assertRegex(
+            self.watchdog_src,
+            r"if block_metadata_from_container; then\s+run_agent_container",
+            "the container start must be inside the metadata block's "
+            "success branch (issue #175)",
+        )
+        self.assertIn(
+            "CONTAINER_EXIT=1",
+            self.watchdog_src,
+            "the refused start must set a non-zero exit code so the "
+            "cleanup path runs and the instance terminates",
+        )
+
+    def test_alicloud_ami_installs_iptables_explicitly(self):
+        """The block must not depend on iptables arriving as a
+        transitive dependency of docker-ce: if the binary is missing,
+        the watchdog refuses to start the agent."""
+        system_sh = _read(
+            os.path.join(
+                REPO_ROOT, "infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh"
+            )
+        )
+        self.assertRegex(
+            system_sh,
+            r"apt-get install[^\n]*\n(?:[^\n]*\\\n)*[^\n]*\biptables\b",
+            "the Alicloud 01-system.sh must install iptables explicitly "
+            "(issue #175)",
         )
 
 

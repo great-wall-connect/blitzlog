@@ -5,29 +5,42 @@ user-data prologue that uses the S3 + SSM APIs from a Packer-baked
 Ubuntu AMI. The Alicloud side mirrors those three helpers with:
 
   - `script_header(...)` — same shape, with `OSS_LOGS_BUCKET`
-    instead of `S3_LOGS_BUCKET`, an inline `blitzlog_oss_*` bash
-    library (parallel to the AWS-side `blitzlog_s3_*`), and a
-    `source <(echo ...)` instead of `source /usr/local/bin/...`
-    because the Packer image is still AWS-only and the OSS library
-    doesn't live anywhere on the host.
+    instead of `S3_LOGS_BUCKET`, and the host-side `blitzlog_oss_*`
+    bash library (parallel to the AWS-side `blitzlog_s3_*`).
 
-  - `_read_secrets_from_kms_script(...)` — IMDSv2-equivalent (Aliyun
-    metadata server at 100.100.100.200) + `aliyun kms GetSecretValue`
-    instead of the SSM GetParameter API. Secret paths are byte-for-byte
-    identical (`/blitzlog/<env>/<service>/<name>`), so the FC-side
-    RAM grant in `infra/alicloud/modules/core/ram.tf` is the only
-    ACL the host needs.
+Issue #125: the Alicloud AMI
+(`infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl`) now bakes the OSS
+library at `/usr/local/bin/blitzlog_oss_uploader.sh`, exactly as the
+AWS AMI bakes `blitzlog_uploader.sh` (issue #123). `script_header`
+sources the baked copy when it is present and falls back to an inline
+copy of the same library otherwise — the fallback is what lets a run
+finish against a host that is still on the pre-#125 public Ubuntu
+image.
 
-  - `_read_git_identity_kms_script(...)` — parallel to the AWS
+  - `_read_secrets_from_oos_script(...)` — IMDSv2-equivalent (Aliyun
+    metadata server at 100.100.100.200) + `aliyun oos
+    GetSecretParameter` instead of the SSM GetParameter API. The
+    Alicloud secret store is the OOS Parameter Store (KMS Secrets
+    Manager needs a billable KMS instance on KMS 3.0). The paths
+    mirror the AWS-side SSM paths (`/blitzlog/<env>/<service>/<name>`)
+    minus the leading slash, which is how OOS names its parameters
+    (`blitzlog/<env>/<service>/<name>`), so the FC-side RAM grant
+    in `infra/alicloud/modules/core/ram.tf` is the only ACL the host
+    needs.
+
+  - `_read_git_identity_oos_script(...)` — parallel to the AWS
     `_read_git_identity_ssm_script`. Same `2>/dev/null || echo ""`
     swallow for the unconfigured user-pool case.
 
 The `aliyun` CLI is installed in the user-data prologue (one-time,
-~10s on a fresh ECS instance) and the `aliyun configure` step
-reaches out to the instance RAM role to get credentials — the
-`alicloud_ram_role.lambda_role` policy in `infra/alicloud/modules/
-core/ram.tf` grants `kms:GetSecretValue` on the
-`/blitzlog/<env>/<service>/<name>` paths.
+~10s on a fresh ECS instance) and the `aliyun configure set --mode
+EcsRamRole` step that follows reaches out to the instance RAM role to
+get credentials — the CLI ignores the ALIBABA_CLOUD_* environment
+variables, so without that profile every call fails with "profile
+configuration failed". The `alicloud_ram_role.ecs_agent_role` policy
+in `infra/alicloud/modules/core/ram.tf` grants
+`oos:GetSecretParameter` on the `blitzlog/<env>/<service>/<name>`
+parameters.
 
 This file is the parallel of `scripts/aws/_common.py`. The
 per-cloud `autonomous.py` / `assisted.py` import from this file
@@ -70,8 +83,8 @@ _bl_oss_log() {
 
 # Resolve the region for ossutil --endpoint. Priority: explicit
 # $1 > $REGION (set in the secrets block from IMDS) > $ALIBABA_CLOUD_REGION
-# (set by `aliyun configure`) > "" (let ossutil fall back to its
-# own configured default).
+# (set by `aliyun configure`) > $ALICLOUD_REGION > "" (let ossutil
+# fall back to its own configured default).
 _bl_oss_region() {
     if [ -n "${1:-}" ]; then
         printf '%s' "$1"
@@ -79,14 +92,32 @@ _bl_oss_region() {
         printf '%s' "$REGION"
     elif [ -n "${ALIBABA_CLOUD_REGION:-}" ]; then
         printf '%s' "$ALIBABA_CLOUD_REGION"
+    elif [ -n "${ALICLOUD_REGION:-}" ]; then
+        printf '%s' "$ALICLOUD_REGION"
     fi
 }
 
-# ossutil64's auth: when run on an ECS instance with a RAM role
-# attached (alicloud_ram_role.ecs_agent_role), the SDK reads the
-# credentials from the metadata server at 100.100.100.200 — the same
-# one the bootstrap hits in the secrets block. So `ossutil` needs
-# no explicit access-key flag. We just point at the right endpoint.
+# ossutil's auth: it signs with SigV4, which needs the region as its
+# own parameter (the `-e` endpoint alone is not enough), and it does
+# not read the ALIBABA_CLOUD_* variables the Alicloud SDKs use. On an
+# ECS instance the credentials come from the RAM role attached to the
+# instance (alicloud_ram_role.ecs_agent_role), fetched from the
+# metadata server at 100.100.100.200 — the same one the bootstrap
+# hits in the secrets block. The EcsRamRole mode is what selects that
+# source.
+# The region arrives as an argument: the caller has already
+# resolved it, and re-deriving it from the environment here would
+# drop it whenever the caller knew the region but the environment
+# did not.
+_bl_oss_run() {
+    local region="$1"
+    shift
+    if [ -n "$region" ]; then
+        OSS_REGION="$region" ossutil --region "$region" --mode EcsRamRole "$@"
+    else
+        ossutil --mode EcsRamRole "$@"
+    fi
+}
 
 blitzlog_oss_get() {
     local bucket="$1" key="$2" dest="$3"
@@ -94,12 +125,12 @@ blitzlog_oss_get() {
         _bl_oss_log "ERROR: blitzlog_oss_get: missing arg (bucket='$bucket' key='$key' dest='$dest')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        ossutil cp -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}" "$dest"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" cp -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}" "$dest"
     else
-        ossutil cp "oss://${bucket}/${key}" "$dest"
+        _bl_oss_run "" cp "oss://${bucket}/${key}" "$dest"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -114,12 +145,12 @@ blitzlog_oss_put() {
         _bl_oss_log "ERROR: blitzlog_oss_put: missing arg (bucket='$bucket' key='$key' src='$src')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        ossutil cp -e "oss-${ep}.aliyuncs.com" "$src" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" cp -e "oss-${region}.aliyuncs.com" "$src" "oss://${bucket}/${key}"
     else
-        ossutil cp "$src" "oss://${bucket}/${key}"
+        _bl_oss_run "" cp "$src" "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -134,12 +165,12 @@ blitzlog_oss_ls() {
         _bl_oss_log "ERROR: blitzlog_oss_ls: missing arg (bucket='$bucket' key='$key')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        ossutil ls -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" ls -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}"
     else
-        ossutil ls "oss://${bucket}/${key}"
+        _bl_oss_run "" ls "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -154,12 +185,12 @@ blitzlog_oss_rm() {
         _bl_oss_log "ERROR: blitzlog_oss_rm: missing arg (bucket='$bucket' key='$key')"
         return 64
     fi
-    local ep
-    ep=$(_bl_oss_region)
-    if [ -n "$ep" ]; then
-        ossutil rm -e "oss-${ep}.aliyuncs.com" "oss://${bucket}/${key}"
+    local region
+    region=$(_bl_oss_region)
+    if [ -n "$region" ]; then
+        _bl_oss_run "$region" rm -e "oss-${region}.aliyuncs.com" "oss://${bucket}/${key}"
     else
-        ossutil rm "oss://${bucket}/${key}"
+        _bl_oss_run "" rm "oss://${bucket}/${key}"
     fi
     local rc=$?
     if [ $rc -ne 0 ]; then
@@ -171,21 +202,35 @@ blitzlog_oss_rm() {
 
 
 # Aliyun CLI install (one-time per launch, ~5-10s). The CLI is
-# needed to call `kms:GetSecretValue` for the secret-fetch block.
+# needed to call `oos:GetSecretParameter` for the secret-fetch block.
 # `aliyun` picks up credentials from the ECS instance's RAM role
 # via the metadata server (same one used for ossutil auth).
+#
+# Issue #125: the Alicloud AMI bakes the `aliyun` CLI
+# (infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh), so on a
+# baked host the `command -v` guard below short-circuits and this
+# block costs nothing. The install stays as a fallback for hosts
+# still on the pre-#125 public Ubuntu image.
 _ALIYUN_CLI_INSTALL = r"""
-# Install the aliyun CLI for KMS secret fetch. The host image is
-# still AWS-only (issue #126 Phase 5 brings a per-cloud Packer
-# image); the OSS + KMS CLIs are installed by the user-data on
-# first launch. The Aliyun ECS instance RAM role grants
-# kms:GetSecretValue on /blitzlog/<env>/<service>/<name> paths
-# (see infra/alicloud/modules/core/ram.tf).
+# Install the aliyun CLI for the OOS parameter fetch. The Alicloud
+# AMI (issue #125) ships this CLI, so the guard normally
+# short-circuits; the install is the fallback for hosts still on the
+# pre-#125 public Ubuntu image. The Aliyun ECS instance RAM role
+# grants oos:GetSecretParameter on the
+# blitzlog/<env>/<service>/<name> parameters (see
+# infra/alicloud/modules/core/ram.tf).
 if ! command -v aliyun >/dev/null 2>&1; then
-    log "Installing aliyun CLI for KMS secret fetch..."
+    log "Installing aliyun CLI for OOS parameter fetch..."
     cd /tmp
-    curl -fsSL -o aliyun-cli.tgz \
-        https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.6-amd64.tgz
+    case "$(uname -m)" in
+        x86_64) CLI_TGZ="aliyun-cli-linux-3.0.6-amd64.tgz" ;;
+        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-latest-arm64.tgz" ;;
+        *)
+            log "ERROR: unsupported architecture $(uname -m)"
+            exit 1
+            ;;
+    esac
+    curl -fsSL -o aliyun-cli.tgz "https://aliyuncli.alicdn.com/${CLI_TGZ}"
     tar -xzf aliyun-cli.tgz
     mv aliyun /usr/local/bin/aliyun
     chmod +x /usr/local/bin/aliyun
@@ -195,22 +240,43 @@ fi
 
 
 # ossutil install (one-time per launch, ~5-10s). Same rationale as
-# the aliyun CLI install above. Aliyun's `ossutil64` is the OSS
+# the aliyun CLI install above. Aliyun's `ossutil` is the OSS
 # analogue of `aws s3`; the `--endpoint` flag picks the right
 # regional gateway.
+#
+# Issue #125: baked into the Alicloud AMI like the `aliyun` CLI, so
+# the guard short-circuits on a baked host.
 _OSSUTIL_INSTALL = r"""
 # Install ossutil for OSS operations (download whisper model,
 # upload logs, restore session state, ...). The AWS-side
-# `blitzlog_s3_*` is Packer-baked into the Ubuntu AMI; on the
-# Alicloud path the equivalent `blitzlog_oss_*` helpers wrap
-# ossutil, which is installed here on first launch.
+# `blitzlog_s3_*` is Packer-baked into the Ubuntu AMI; the Alicloud
+# AMI (issue #125) bakes the equivalent `blitzlog_oss_*` helpers and
+# ossutil itself, so this install is the fallback for hosts still on
+# the pre-#125 public Ubuntu image.
 if ! command -v ossutil >/dev/null 2>&1; then
     log "Installing ossutil for OSS operations..."
     cd /tmp
-    curl -fsSL -o ossutil64 \
-        https://gosspublic.alicdn.com/ossutil/2.0.5/ossutil64
-    chmod +x ossutil64
-    mv ossutil64 /usr/local/bin/ossutil
+    case "$(uname -m)" in
+        x86_64) OSSUTIL_ARCH="amd64" ;;
+        aarch64 | arm64) OSSUTIL_ARCH="arm64" ;;
+        *)
+            log "ERROR: unsupported architecture $(uname -m)"
+            exit 1
+            ;;
+    esac
+    OSSUTIL_VERSION=$(curl -fsSL https://gosspublic.alicdn.com/ossutil/v2/version.txt \
+        | sed -n 's/^ossutil version: //p')
+    if [ -z "$OSSUTIL_VERSION" ]; then
+        log "ERROR: could not resolve the ossutil version"
+        exit 1
+    fi
+    curl -fsSL -o ossutil.zip \
+        "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-linux-${OSSUTIL_ARCH}.zip"
+    rm -rf ossutil-unpack
+    unzip -q ossutil.zip -d ossutil-unpack
+    mv "ossutil-unpack/ossutil-linux-${OSSUTIL_ARCH}/ossutil" /usr/local/bin/ossutil
+    chmod +x /usr/local/bin/ossutil
+    rm -rf ossutil.zip ossutil-unpack
 fi
 """
 
@@ -218,8 +284,8 @@ fi
 def _git_identity_ssm_block(owner_login: str) -> str:
     """Symmetric with the AWS-side `_git_identity_ssm_block` — returns
     "" so the byte layout of the pre-#119 prologue is preserved. The
-    actual KMS fetch lives in `_read_git_identity_kms_script` so it
-    runs AFTER `$REGION` is set by `_read_secrets_from_kms_script`.
+    actual OOS fetch lives in `_read_git_identity_oos_script` so it
+    runs AFTER `$REGION` is set by `_read_secrets_from_oos_script`.
     """
     return ""
 
@@ -323,21 +389,33 @@ log() {{
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }}
 
-# Issue #126: the AWS-side bootstrap sources a Packer-baked bash
-# library at /usr/local/bin/blitzlog_uploader.sh. On the Alicloud
-# path the Packer image is still AWS-only, so the equivalent
-# `blitzlog_oss_*` library is inlined below. Sourced AFTER `log()`
-# is defined so library ERROR output uses the same channel.
+# Issue #125: the Alicloud AMI (infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl)
+# bakes the host-side OSS abstraction at /usr/local/bin/blitzlog_oss_uploader.sh,
+# exactly as the AWS AMI bakes blitzlog_uploader.sh (issue #123). Source it
+# when it is present — that is the canonical copy.
+#
+# The inline fallback below is kept for hosts still running the PUBLIC
+# Ubuntu image (the pre-#125 Alicloud path, which had no baked agent
+# image at all). It is the same library, byte-for-byte the same four
+# verbs; the fallback is what lets an in-flight run finish against an
+# old image while the baked image rolls out.
+#
+# Sourced AFTER `log()` is defined so library ERROR output uses the
+# same channel.
 {_ALIYUN_CLI_INSTALL}{_OSSUTIL_INSTALL}
-export BLITZLOG_OSS_HELPERS=$(cat <<'OSS_LIB_EOF'
+if [ -r /usr/local/bin/blitzlog_oss_uploader.sh ]; then
+    source /usr/local/bin/blitzlog_oss_uploader.sh
+else
+    export BLITZLOG_OSS_HELPERS=$(cat <<'OSS_LIB_EOF'
 {_BLITZLOG_OSS_HELPERS}
 OSS_LIB_EOF
 )
-unset BLITZLOG_OSS_HELPERS_NAME
-BLITZLOG_OSS_HELPERS_NAME="blitzlog_oss"
-# Source the inlined library. The heredoc + read-into-var pattern
-# survives the f-string escaping in script_header.
-eval "$BLITZLOG_OSS_HELPERS"
+    unset BLITZLOG_OSS_HELPERS_NAME
+    BLITZLOG_OSS_HELPERS_NAME="blitzlog_oss"
+    # Source the inlined library. The heredoc + read-into-var pattern
+    # survives the f-string escaping in script_header.
+    eval "$BLITZLOG_OSS_HELPERS"
+fi
 
 ISSUE_NUMBER={issue_number}
 REPO="{repo}"
@@ -353,37 +431,48 @@ log "=== Cloud-coder bootstrap starting ({mode}) ==="
 log "Repo: $REPO, Issue: $ISSUE_NUMBER"
 {local_llm_log_line}
 
-log "Reading secrets from KMS..."
+log "Reading secrets from the OOS Parameter Store..."
 """
 
 
-def _read_secrets_from_kms_script(issue_number: int, local_llm: bool = False) -> str:
+def _read_secrets_from_oos_script(issue_number: int, local_llm: bool = False) -> str:
     """Render the bootstrap snippet that fetches the GitHub token and (when a
-    cloud run is intended) the OPENCODE_API_KEY from Aliyun KMS via the
-    instance metadata server (Aliyun's IMDSv2-equivalent at 100.100.100.200).
+    cloud run is intended) the OPENCODE_API_KEY from the Aliyun OOS
+    Parameter Store via the instance metadata server (Aliyun's
+    IMDSv2-equivalent at 100.100.100.200).
 
     Parallel to `scripts/aws/_common.py:_read_secrets_from_ssm_script`. The
-    secret paths are byte-for-byte identical to the AWS-side SSM paths
-    (`/blitzlog/<env>/<service>/<name>`), so the FC-side RAM grant in
-    `infra/alicloud/modules/core/ram.tf` is the only ACL the host needs.
+    Alicloud secret store is the OOS Parameter Store, so the read is
+    `aliyun oos GetSecretParameter --WithDecryption true`. The
+    parameter names mirror the AWS-side SSM paths
+    (`/blitzlog/<env>/<service>/<name>`) minus the leading slash —
+    OOS names its parameters `blitzlog/<env>/<service>/<name>` — so
+    the FC-side RAM grant in `infra/alicloud/modules/core/ram.tf` is
+    the only ACL the host needs.
 
-    `aliyun kms GetSecretValue` returns the secret value in JSON; the
-    `--output json` flag + `python3 -c '... json.load(sys.stdin)["SecretData"]'`
-    is the canonical way to extract the value. We do the same dance the
-    AWS-side does (IMDS token → region → KMS read), so the byte layout
-    of the pre-#126 prologue stays the same except for the API name.
+    `aliyun oos GetSecretParameter` returns the parameter in JSON —
+    the CLI's default output — so
+    `python3 -c '... json.load(sys.stdin) ["Parameter"]["Value"]'` is
+    the canonical way to extract the value. (The CLI's `--output`
+    flag is the TABLE formatter — `--output cols=Field1,Field2` — and
+    rejects `json` with "bad flag format --output with field cols=
+    required".)
+    We do the same dance the AWS-side does (IMDS token → region →
+    store read), so the byte layout of the pre-#126 prologue stays the
+    same except for the API name.
     """
-    ssm_root = _ssm_root()
+    oos_root = _ssm_root().lstrip("/")
 
     api_key_block = ""
     if not local_llm:
         api_key_block = (
             "\n"
-            f"OPENCODE_API_KEY=$(aliyun kms GetSecretValue "
-            f'--SecretName "{ssm_root}/opencode/api-key" '
+            f"OPENCODE_API_KEY=$(aliyun oos GetSecretParameter "
+            f'--Name "{oos_root}/opencode/api-key" '
+            f"--WithDecryption true "
             f'--region "$REGION" '
-            f"--output json 2>/dev/null | python3 -c "
-            f"'import sys, json; print(json.load(sys.stdin)[\"SecretData\"])')\n"
+            f"2>/dev/null | python3 -c "
+            f'\'import sys, json; print(json.load(sys.stdin)["Parameter"]["Value"])\')\n'
             "export OPENCODE_API_KEY\n"
         )
 
@@ -397,45 +486,54 @@ REGION=$(curl -s -H "X-aliyun-ecs-metadata-token: $TOKEN" http://100.100.100.200
 export ALIBABA_CLOUD_REGION=$REGION
 export BLITZLOG_ENV={_blitzlog_env()}
 
+# The aliyun CLI authenticates from a PROFILE, not from the
+# ALIBABA_CLOUD_* environment variables — without one every call
+# fails with "profile configuration failed". The credential source is
+# the RAM role the FC attached to this instance, so the profile is
+# written in EcsRamRole mode and the CLI resolves the role name from
+# IMDS itself. This must come before the first `aliyun` call below.
+aliyun configure set --profile default --mode EcsRamRole --region "$REGION" >/dev/null
+
 _CCSECRET=/tmp/cc_secret.json
-get_kms() {{
+get_oos_param() {{
     local name="$1" out="$2"
     if [ -z "$name" ]; then
         return 64
     fi
-    aliyun kms GetSecretValue \\
-        --SecretName "$name" \\
+    aliyun oos GetSecretParameter \\
+        --Name "$name" \\
+        --WithDecryption true \\
         --region "$REGION" \\
-        --output json 2>/dev/null > "$out"
-    python3 -c "import json,sys; print(json.load(open('$out'))['SecretData'])" 2>/dev/null
+        2>/dev/null > "$out"
+    python3 -c "import json,sys; print(json.load(open('$out'))['Parameter']['Value'])" 2>/dev/null
 }}
 
 _CCSECRET_OUT=/tmp/cc_secret_value.txt
-_CCSECRET_PATH="{ssm_root}/ephemeral/gh/$REPO/{issue_number}"
-get_kms "$_CCSECRET_PATH" "$_CCSECRET"
+_CCSECRET_PATH="{oos_root}/ephemeral/gh/$REPO/{issue_number}"
+get_oos_param "$_CCSECRET_PATH" "$_CCSECRET"
 _CC_GITHUB_TOKEN=$(cat "$_CCSECRET_OUT" 2>/dev/null || cat "$_CCSECRET" 2>/dev/null)
 # Re-extract from the JSON dump for the simple case (small files).
 if [ -f "$_CCSECRET" ]; then
-    _CC_GITHUB_TOKEN=$(python3 -c "import json; print(json.load(open('$_CCSECRET'))['SecretData'])" 2>/dev/null || echo "")
+    _CC_GITHUB_TOKEN=$(python3 -c "import json; print(json.load(open('$_CCSECRET'))['Parameter']['Value'])" 2>/dev/null || echo "")
 fi
 export _CC_GITHUB_TOKEN{api_key_block}
 
-STT_API_URL=$(get_kms "{ssm_root}/stt/api-url" /tmp/stt_api_url.json)
+STT_API_URL=$(get_oos_param "{oos_root}/stt/api-url" /tmp/stt_api_url.json)
 export STT_API_URL
-STT_API_KEY=$(get_kms "{ssm_root}/stt/api-key" /tmp/stt_api_key.json)
+STT_API_KEY=$(get_oos_param "{oos_root}/stt/api-key" /tmp/stt_api_key.json)
 export STT_API_KEY
-STT_MODEL=$(get_kms "{ssm_root}/stt/model" /tmp/stt_model.json)
+STT_MODEL=$(get_oos_param "{oos_root}/stt/model" /tmp/stt_model.json)
 export STT_MODEL
-STT_LANGUAGE=$(get_kms "{ssm_root}/stt/language" /tmp/stt_language.json)
+STT_LANGUAGE=$(get_oos_param "{oos_root}/stt/language" /tmp/stt_language.json)
 export STT_LANGUAGE
-STT_MODELS_BUCKET=$(get_kms "{ssm_root}/stt/models-bucket" /tmp/stt_models_bucket.json)
+STT_MODELS_BUCKET=$(get_oos_param "{oos_root}/stt/models-bucket" /tmp/stt_models_bucket.json)
 export STT_MODELS_BUCKET
 """
 
 
-def _read_git_identity_kms_script(owner_login: str) -> str:
+def _read_git_identity_oos_script(owner_login: str) -> str:
     """Render the bootstrap snippet that fetches the operator-configured
-    git author identity from KMS. Parallel to
+    git author identity from the OOS Parameter Store. Parallel to
     `scripts/aws/_common.py:_read_git_identity_ssm_script`.
 
     The `2>/dev/null || echo ""` swallow keeps the bootstrap working
@@ -448,11 +546,11 @@ def _read_git_identity_kms_script(owner_login: str) -> str:
     """
     if not owner_login:
         return ""
-    root = f"/blitzlog/users/{owner_login}/git-author"
+    root = f"blitzlog/users/{owner_login}/git-author"
     return (
-        f'\nGIT_AUTHOR_NAME=$(get_kms "{root}/name" /tmp/git_author_name.json '
+        f'\nGIT_AUTHOR_NAME=$(get_oos_param "{root}/name" /tmp/git_author_name.json '
         f'2>/dev/null || echo "")\n'
-        f'GIT_AUTHOR_EMAIL=$(get_kms "{root}/email" /tmp/git_author_email.json '
+        f'GIT_AUTHOR_EMAIL=$(get_oos_param "{root}/email" /tmp/git_author_email.json '
         f'2>/dev/null || echo "")\n'
     )
 
@@ -471,11 +569,11 @@ if [ -f "$LOG_FILE" ] && grep -qE "insufficient_balance|insufficient balance|\\(
     log "ACTIONABLE: LLM provider returned insufficient balance / HTTP 1008."
     log "ACTIONABLE: The token-plan account for the configured provider (${{OPENCODE_MODEL:-unknown}}) has zero credits."
     log "ACTIONABLE: Top up at the provider console (e.g. https://platform.minimax.io) before retrying."
-    log "ACTIONABLE: Verify the API key at KMS secret {ssm_root}/opencode/api-key belongs to a funded account."
+    log "ACTIONABLE: Verify the API key in the OOS parameter {ssm_root}/opencode/api-key belongs to a funded account."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "Unauthorized|invalid_api_key|\\(401\\)|Authentication" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider rejected the API key as unauthorized (HTTP 401)."
-    log "ACTIONABLE: Rotate {ssm_root}/opencode/api-key in KMS and re-run terraform apply."
+    log "ACTIONABLE: Rotate {ssm_root}/opencode/api-key in the OOS Parameter Store and re-run terraform apply."
 fi
 if [ -f "$LOG_FILE" ] && grep -qE "rate.?limit|quota.?exceeded|too.?many.?requests|\\(429\\)" "$LOG_FILE"; then
     log "ACTIONABLE: LLM provider returned a rate-limit / quota error (HTTP 429)."

@@ -153,6 +153,61 @@ class TestLambdaHandlerBotPool(unittest.TestCase):
         # bot pool SSM list is also untouched.
 
 
+class TestNormalizeEvent(unittest.TestCase):
+    """The handler must speak the API Gateway proxy shape on both
+    clouds.
+
+    AWS hands the handler the proxy event (a dict with `body` /
+    `headers` / `isBase64Encoded`). Function Compute delivers the
+    request as BYTES: an HTTP trigger wraps it in FC's own event
+    envelope, and an event invocation delivers the bare body with no
+    headers at all — in which case the GitHub signature cannot be
+    verified and the check has to fail closed.
+    """
+
+    def _handler(self):
+        import handler
+
+        return handler
+
+    def test_the_aws_proxy_event_passes_through(self):
+        handler = self._handler()
+        event = {
+            "body": '{"action":"labeled"}',
+            "headers": {"X-Hub-Signature-256": "sha256=abc"},
+            "isBase64Encoded": False,
+        }
+        self.assertEqual(handler._normalize_event(event), event)
+
+    def test_the_fc_http_trigger_envelope_is_unwrapped(self):
+        """FC's HTTP trigger delivers
+        `{"version": "v1", "rawPath": ..., "headers": {...},
+        "body": ..., "isBase64Encoded": ...}` as bytes."""
+        handler = self._handler()
+        envelope = json.dumps(
+            {
+                "version": "v1",
+                "rawPath": "/",
+                "headers": {"X-Hub-Signature-256": "sha256=abc"},
+                "queryParameters": {},
+                "body": '{"action":"labeled"}',
+                "isBase64Encoded": False,
+            }
+        ).encode()
+        event = handler._normalize_event(envelope)
+        self.assertEqual(event["body"], '{"action":"labeled"}')
+        self.assertEqual(event["headers"]["X-Hub-Signature-256"], "sha256=abc")
+        self.assertFalse(event["isBase64Encoded"])
+
+    def test_a_bare_body_carries_no_headers(self):
+        """An event invocation delivers the body and nothing else —
+        the signature check then fails closed."""
+        handler = self._handler()
+        event = handler._normalize_event(b'{"action":"labeled"}')
+        self.assertEqual(event["body"], '{"action":"labeled"}')
+        self.assertEqual(event["headers"], {})
+
+
 class TestLambdaBuildConfiguration(unittest.TestCase):
     """Regression tests for infra/aws/modules/core/lambda.tf build-time configuration.
 

@@ -86,6 +86,39 @@ The plumbing for this is in three places (issue #119):
 
 The `### Carve-out for infra/scrummaster/` subsection under **Trigger Labels** above is unaffected — that rule governs who may apply the `autonomous` / `assisted` labels, not who may edit the files.
 
+## Terraform
+
+**Do not run `terraform apply` or `terraform destroy`.** The operator runs them. `terraform fmt`, `validate`, and `plan` are fine.
+
+`destroy` is called out separately because it is not merely "a stronger apply": it deletes real infrastructure, and on Alicloud it burns the bucket *name* for a 4-8 hour cool-down (OSS names are globally unique and enter a recycle period after deletion). An agent that runs `destroy` to "reset a test" can therefore leave the operator unable to recreate the resource for hours, with the state emptied and the live infrastructure gone.
+
+The same reasoning applies to the commands that mutate a remote backend — `terraform state rm`, `terraform state mv`, `terraform import`, `terraform workspace delete`, and `terraform taint`. If a plan needs one of them, that is an operator decision: describe the command and the reason, and let the operator run it.
+
+Read-only commands are fine and encouraged — `terraform plan`, `terraform validate`, `terraform fmt`, `terraform show`, `terraform state list`, and the provider/CLI equivalents (`aliyun oss ls`, `aliyun vpc DescribeVpcs`) — because they are how you find out what the operator is actually looking at.
+
+If a task genuinely cannot be verified without an apply, say so and stop; do not apply "just to check". The verification the agent can do locally (fmt, validate, plan, unit tests) is what the task is graded on.
+
+## Comments
+
+Write fewer comments. Explain *why* when it isn't obvious; skip *what* the next line already says.
+
+The cost of a redundant comment is not the line itself — it is that the next reader has to decide whether the comment and the code can disagree. A comment that restates the code ("// increment the counter" above `i++`) goes stale the moment the code changes, and the reader has to check which one is lying.
+
+A comment earns its place when it carries something the code cannot: the reason for a non-obvious choice, a constraint from an API or a provider, a past failure it prevents, or a warning about what will break if someone changes it.
+
+```hcl
+# bad — restates the code
+count = length(var.vswitch_ids)
+
+# good — says why the empty case is a problem
+# An ECS launch requires a VSwitch, and the on-demand fallback path
+# reads vswitch_ids[0] — an empty list fails the plan with
+# 'Invalid index'.
+count = length(var.vswitch_ids)
+```
+
+Do not use comments as a place to restate the issue, narrate the change, or address the reviewer. The commit message and the PR body carry that.
+
 ## Testing Commands
 
 Run before pushing:
@@ -124,19 +157,19 @@ For other stacks, mirror this with the equivalent "build + lint + test" sequence
 
 ## Agent Commit Attribution (Audit Trail, issue #119)
 
-The agent never commits as a fictional identity. Every commit — EC2 host (assisted + autonomous) and GHA worker (release Bump step) — is attributed to the operator of this blitzlog deployment via two SSM parameters that the `infra/user-pool/` module manages:
+The agent never commits as a fictional identity. Every commit — EC2 host (assisted + autonomous) and GHA worker (release Bump step) — is attributed to the operator of this blitzlog deployment via two SSM parameters that the `infra/aws/user-pool/` module manages:
 
 - `/blitzlog/users/<owner_login>/git-author/name`
 - `/blitzlog/users/<owner_login>/git-author/email`
 
-The values default to `var.owner_login` and `"<owner_login>@users.noreply.github.com"`; override either in `infra/user-pool/terraform.tfvars` when you need a different attribution (e.g. the canonical `release-bot` carve-out for `[skip ci]` bumps).
+The values default to `var.owner_login` and `"<owner_login>@users.noreply.github.com"`; override either in `infra/aws/user-pool/terraform.tfvars` when you need a different attribution (e.g. the canonical `release-bot` carve-out for `[skip ci]` bumps).
 
 Hard rules:
 
-1. **Never `root@<hostname>`.** That happens when the user-pool stack hasn't been applied yet (no SSM params to read); the bootstrap's `2>/dev/null || echo ""` fallback is behaviour-preserving, but the operator must run `terraform apply` in `infra/user-pool/` so the params exist.
+1. **Never `root@<hostname>`.** That happens when the user-pool stack hasn't been applied yet (no SSM params to read); the bootstrap's `2>/dev/null || echo ""` fallback is behaviour-preserving, but the operator must run `terraform apply` in `infra/aws/user-pool/` so the params exist.
 2. **Never a GHA repo variable like `vars.GIT_AUTHOR_NAME`.** The release Bump step reads from SSM, not from a repo variable. The only GHA-side knob is `vars.OWNER_LOGIN` (the pool whose git-author params to fetch).
 3. **Never per-sender identity in the bootstrap.** The audit-trail identity is owned by the operator, not by the webhook `sender_login`. Assisted commits and autonomous commits get the same identity, sourced from the same SSM parameters.
-4. **Surface setup errors loudly.** When the Bump step finds a missing `OWNER_LOGIN` or missing SSM param, it aborts with `FATAL: ... terraform apply in infra/user-pool/`. The EC2 bootstrap's `2>/dev/null || echo ""` swallow only covers the case where the user-pool stack simply hasn't been applied yet — never fall back to a fictional identity silently.
+4. **Surface setup errors loudly.** When the Bump step finds a missing `OWNER_LOGIN` or missing SSM param, it aborts with `FATAL: ... terraform apply in infra/aws/user-pool/`. The EC2 bootstrap's `2>/dev/null || echo ""` swallow only covers the case where the user-pool stack simply hasn't been applied yet — never fall back to a fictional identity silently.
 
 The container's `entrypoint.sh:88-91` reads `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` from env and runs `git config --global user.{name,email}`. The watchdog (`infra/aws/packer/scripts-docker-ubuntu/watchdog.sh`) passes both vars to the container via `-e`. The bootstrap writes them to `/etc/blitzlog.env` so the watchdog's rewrite preserves them.
 

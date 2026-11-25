@@ -21,21 +21,30 @@ import base64
 import os
 import uuid
 
-from _env import BLITZLOG_ENV, ephemeral_token_ssm_param, logger
-from botocore.exceptions import ClientError
+from _env import (
+    BLITZLOG_ENV,
+    _instance_profile_name,
+    _logs_bucket,
+    _security_group_id,
+    ephemeral_token_ssm_param,
+    logger,
+)
 from provider import (
     LaunchSpec,
     get_compute,
     get_object_store,
     get_secrets,
 )
-from provider.aws import AwsCompute
 
 # Fallback used when SPOT_INSTANCE_TYPES_JSON is unset or unparseable. Kept
 # in sync with the default of `var.spot_instance_types` in infra/aws/modules/core
 # /variables.tf — Terraform is the source of truth at deploy time; this only
 # protects unit tests and out-of-Lambda callers from a hard failure.
-_DEFAULT_SPOT_INSTANCE_TYPES = AwsCompute._default_spot_instance_types()
+# Resolved through the provider factory rather than `provider.aws`
+# directly: the AWS module imports boto3, which the Alicloud bundle
+# does not ship, so importing it here made the Alicloud handler
+# unimportable (`ModuleNotFoundError: No module named 'boto3'`).
+_DEFAULT_SPOT_INSTANCE_TYPES = get_compute()._default_spot_instance_types()
 
 
 def _load_spot_instance_types() -> list[str]:
@@ -47,11 +56,11 @@ def _load_spot_instance_types() -> list[str]:
     on parse failure so a misconfigured Terraform apply is visible in
     CloudWatch without aborting the request.
 
-    Implementation lives in `AwsCompute._load_spot_instance_types`
+    Implementation lives on the provider's compute class
     (post-#83). Kept as a top-level shim so `tests/test_ec2.py`
     can still import it via `from ec2 import _load_spot_instance_types`.
     """
-    return AwsCompute()._load_spot_instance_types()
+    return get_compute()._load_spot_instance_types()
 
 
 # `SPOT_INSTANCE_TYPES` is the module-level frozen copy other code
@@ -71,67 +80,27 @@ def get_latest_ubuntu_ami() -> str:
     return get_compute().get_latest_image("26.04")
 
 
-def _read_custom_agent_ami(ssm_param_suffix: str, fallback_getter) -> str:
-    """Read /blitzlog/<env>/<suffix>; validate; fall back via fallback_getter().
-
-    The custom agent AMI is published by the Packer pipelines in
-    infra/aws/packer/ to this SSM parameter. We validate the id is still
-    launchable via compute.describe_image so a retired/deregistered AMI
-    doesn't silently turn every webhook into a 500.
-
-    Fallback chain:
-      1. SSM param missing (ParameterNotFound) → fallback_getter()
-      2. AMI is retired (InvalidAMIID.NotFound) → clear the SSM param
-         (best-effort) and fall back
-      3. Any other ClientError → re-raise so the caller surfaces it
-    """
-    from _env import _ssm_root  # late import to read env at call time
-
-    param_name = f"{_ssm_root()}/{ssm_param_suffix}"
-    secrets = get_secrets()
-    try:
-        ami_id = secrets.get(param_name, decrypt=False)
-    except ClientError as e:
-        if e.response["Error"]["Code"] in ("ParameterNotFound", "404"):
-            logger.info("No custom agent AMI at %s; falling back", param_name)
-            return fallback_getter()
-        raise
-
-    try:
-        get_compute().describe_image(ami_id)
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if code in ("InvalidAMIID.NotFound", "InvalidAMIID.Unavailable"):
-            logger.warning(
-                "Custom agent AMI %s is unlaunchable (%s); clearing SSM param and falling back",
-                ami_id,
-                code,
-            )
-            try:
-                secrets.delete(param_name)
-            except ClientError as del_err:
-                logger.warning(
-                    "Failed to delete stale agent-ami-id param %s: %s",
-                    param_name,
-                    del_err,
-                )
-            return fallback_getter()
-        raise
-
-    logger.info("Using custom agent AMI: %s", ami_id)
-    return ami_id
-
-
 def get_agent_ami() -> str:
-    """Read the Packer-built Ubuntu 26.04 arm64 agent AMI id from SSM.
+    """Read the Packer-built agent image id from the provider's secret store.
 
-    Packer publishes the AMI id to /blitzlog/<env>/agent-ami-id-docker-ubuntu
-    via infra/aws/packer/agent-docker-ubuntu.pkr.hcl. If the SSM param is
-    missing or the AMI is retired, fall back to the Canonical-published
-    Ubuntu 26.04 LTS arm64 minimal AMI (the same one Packer uses as
-    source_ami_filter).
+    AWS: the AMI id lives in SSM Parameter Store at
+    `/blitzlog/<env>/agent-ami-id-docker-ubuntu`, published by
+    infra/aws/packer/agent-docker-ubuntu.pkr.hcl.
+
+    Alicloud (issue #125): the image id lives in the OOS Parameter
+    Store at `blitzlog/<env>/agent-ami-id-ecs-ubuntu`, published by
+    infra/alicloud/packer/agent-ecs-ubuntu.pkr.hcl.
+
+    If the parameter is missing or the image is retired, fall back to
+    the cloud-published Ubuntu 26.04 LTS arm64 minimal image (the same
+    one Packer uses as its source image).
+
+    The resolution logic lives on the provider
+    (`ComputeProvider.get_agent_image_id`) because the parameter
+    suffix and the error taxonomy are provider-specific; this function
+    is the provider-agnostic entry point the rest of the Lambda uses.
     """
-    return _read_custom_agent_ami("agent-ami-id-docker-ubuntu", get_latest_ubuntu_ami)
+    return get_compute().get_agent_image_id(get_secrets())
 
 
 def get_instance_profile_arn() -> str:
@@ -139,7 +108,7 @@ def get_instance_profile_arn() -> str:
     reads the profile name from the env var Terraform injected.
     """
     return get_compute().get_instance_profile_arn(
-        os.environ["EC2_INSTANCE_PROFILE_NAME"],
+        _instance_profile_name(),
     )
 
 
@@ -234,11 +203,11 @@ def launch_ec2_spot_instance(
 
     user_data = user_data_builder(repo, issue_number, sender_login, sender_id)
 
-    s3_bucket = os.environ.get("S3_LOGS_BUCKET", "<your-agent-logs-bucket>")
+    s3_bucket = _logs_bucket()
     s3_key = f"user-data/{mode}-issue-{issue_number}-{uuid.uuid4().hex[:8]}.sh"
     get_object_store().put(s3_bucket, s3_key, user_data.encode())
     logger.info(
-        "Uploaded user-data to s3://%s/%s (%d bytes)",
+        "Uploaded user-data to %s/%s (%d bytes)",
         s3_bucket,
         s3_key,
         len(user_data.encode()),
@@ -248,8 +217,8 @@ def launch_ec2_spot_instance(
     user_data_b64 = base64.b64encode(downloader.encode()).decode()
 
     image_id = get_agent_ami()
-    instance_profile_name = os.environ["EC2_INSTANCE_PROFILE_NAME"]
-    security_group_id = os.environ["EC2_SECURITY_GROUP_ID"]
+    instance_profile_name = _instance_profile_name()
+    security_group_id = _security_group_id()
 
     spec = _build_launch_spec(
         image_id=image_id,

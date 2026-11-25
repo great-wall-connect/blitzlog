@@ -31,8 +31,8 @@ from _env import _blitzlog_env
 from ._common import (  # sibling subpackage import
     _local_llm_env_block,
     _local_llm_log_line,
-    _read_git_identity_kms_script,
-    _read_secrets_from_kms_script,
+    _read_git_identity_oos_script,
+    _read_secrets_from_oos_script,
     script_header,
 )
 
@@ -76,7 +76,7 @@ def build_autonomous_user_data(
     # Symmetric with the AWS-side: the `export GIT_AUTHOR_*` line is
     # emitted by `script_header` (so the watchdog/container see the
     # values the fetch below assigns); the actual KMS read lives in
-    # `_read_git_identity_kms_script` and runs AFTER `$REGION` is set
+    # `_read_git_identity_oos_script` and runs AFTER `$REGION` is set
     # so the IMDS dance completes first.
     git_identity_env = (
         "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL\n" if sender_login else ""
@@ -99,7 +99,7 @@ def build_autonomous_user_data(
         opencode_prompt=prompt,
     )
 
-    return f"""{header}{_read_secrets_from_kms_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_kms_script(sender_login)}
+    return f"""{header}{_read_secrets_from_oos_script(issue_number, local_llm=bool(local_llm))}{_read_git_identity_oos_script(sender_login)}
 
 log "Downloading whisper model..."
 mkdir -p /opt/whisper-stt/models
@@ -128,12 +128,12 @@ log "Starting autonomous opencode agent via systemd watchdog..."
 # session artifacts to OSS, releases the bot pool lock, and terminates
 # the ECS instance.
 #
-# KNOWN LIMITATION (issue #126 Phase 5): the watchdog's log upload
-# uses the AWS-side `blitzlog_s3_*` library
-# (infra/aws/packer/scripts-docker-ubuntu/watchdog.sh). On the
-# Alicloud path the upload will fail silently (`|| true` swallow) —
-# the MNS DLQ + FC dead-letter config catch the eventual session-
-# export failure.
+# Issue #125: the watchdog is now the Alicloud variant
+# (infra/alicloud/packer/scripts-ecs-ubuntu/watchdog.sh), which uses
+# the `blitzlog_oss_*` library (ossutil) and the Aliyun metadata
+# service. The known limitation that used to sit here — the watchdog
+# uploading logs with the AWS-side `blitzlog_s3_*` library, so every
+# upload failed silently on the `|| true` swallow — is resolved.
 #
 # Write the env file the watchdog reads. Tailscale + local LLM env
 # vars are passed through so the container can join a Tailnet and
@@ -168,16 +168,13 @@ GIT_AUTHOR_EMAIL="${{GIT_AUTHOR_EMAIL:-}}"
 OPENCODE_SERVER_USERNAME="agent"
 GITHUB_TOKEN_SSM_PARAM="/blitzlog/${{BLITZLOG_ENV}}/ephemeral/gh/${{REPO}}/${{ISSUE_NUMBER}}"
 # Issue #145: the Alicloud path has no EventBridge Scheduler
-# equivalent in this PR (no token-refresh chain — the 1h GitHub
-# token cap is operationally visible). The watchdog's refresh
-# branch is a no-op on Alicloud until the Aliyun scheduler
-# equivalent lands (Phase 5 follow-up).
-GITHUB_TOKEN_SCHED_GROUP="blitzlog-${{BLITZLOG_ENV}}-token-refresh-$(printf '%s|%s' "${{REPO}}" "${{ISSUE_NUMBER}}" | sha256sum | cut -c1-16)"
+# equivalent, so there is no token-refresh chain and no schedule
+# group to tear down. The Alicloud watchdog (issue #125) does not
+# read GITHUB_TOKEN_SCHED_GROUP at all.
 ENVEOF
 
 # Unit is already enabled (Packer 02-systemd.sh). Start it; watchdog
-# runs the agent container, waits for exit, then does AWS cleanup.
-# (Cleanup is still AWS-shaped on the Alicloud path — Phase 5
-# follow-up adds the Alicloud equivalents.)
+# runs the agent container, waits for exit, then does the Alicloud
+# cleanup (OSS upload + ECS terminate + bot-lock release).
 sudo systemctl start blitzlog-agent.service
 """

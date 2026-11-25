@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import ec2 as ec2_module
 import provider
+from _env import _instance_profile_name, _security_group_id
 from botocore.exceptions import ClientError
 from ec2 import (
     _DEFAULT_SPOT_INSTANCE_TYPES,
@@ -182,6 +183,63 @@ class TestS3Downloader(unittest.TestCase):
         self.assertIn("s3://my-bucket/user-data/assisted-issue-42-abc.sh", downloader)
         self.assertIn("aws s3 cp", downloader)
         self.assertIn("bash /tmp/bootstrap.sh", downloader)
+
+
+class TestLaunchInputEnvVars(unittest.TestCase):
+    """The launch reads the RAM role / instance profile and the
+    security group from env vars whose NAMES differ per cloud.
+
+    Reading only the AWS names raised `KeyError` inside the
+    Function Compute function on the Alicloud path, so the very
+    first webhook failed before anything could be launched.
+    """
+
+    VARS = (
+        "RAM_INSTANCE_PROFILE_NAME",
+        "EC2_INSTANCE_PROFILE_NAME",
+        "ECS_SECURITY_GROUP_ID",
+        "EC2_SECURITY_GROUP_ID",
+    )
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in self.VARS}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_reads_the_alicloud_names(self):
+        os.environ["RAM_INSTANCE_PROFILE_NAME"] = "blitzlog-dev-ecs-agent-role"
+        os.environ["ECS_SECURITY_GROUP_ID"] = "sg-j6c3"
+        os.environ.pop("EC2_INSTANCE_PROFILE_NAME", None)
+        os.environ.pop("EC2_SECURITY_GROUP_ID", None)
+        self.assertEqual(_instance_profile_name(), "blitzlog-dev-ecs-agent-role")
+        self.assertEqual(_security_group_id(), "sg-j6c3")
+
+    def test_reads_the_aws_names(self):
+        os.environ["EC2_INSTANCE_PROFILE_NAME"] = "blitzlog-agent-profile"
+        os.environ["EC2_SECURITY_GROUP_ID"] = "sg-123"
+        os.environ.pop("RAM_INSTANCE_PROFILE_NAME", None)
+        os.environ.pop("ECS_SECURITY_GROUP_ID", None)
+        self.assertEqual(_instance_profile_name(), "blitzlog-agent-profile")
+        self.assertEqual(_security_group_id(), "sg-123")
+
+    def test_the_alicloud_names_win_when_both_are_set(self):
+        os.environ["RAM_INSTANCE_PROFILE_NAME"] = "alicloud-role"
+        os.environ["EC2_INSTANCE_PROFILE_NAME"] = "aws-profile"
+        os.environ["ECS_SECURITY_GROUP_ID"] = "sg-alicloud"
+        os.environ["EC2_SECURITY_GROUP_ID"] = "sg-aws"
+        self.assertEqual(_instance_profile_name(), "alicloud-role")
+        self.assertEqual(_security_group_id(), "sg-alicloud")
+
+    def test_empty_when_neither_is_set(self):
+        for k in self.VARS:
+            os.environ.pop(k, None)
+        self.assertEqual(_instance_profile_name(), "")
+        self.assertEqual(_security_group_id(), "")
 
 
 class TestLaunchEc2SpotInstance(unittest.TestCase):

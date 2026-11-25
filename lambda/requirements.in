@@ -4,7 +4,7 @@
 # this file via `-r requirements.in` and add the cloud-specific SDKs.
 #
 # This split exists because PR #84 added the alibaba SDKs
-# (oss2 / alibabacloud_kms20160120 / alibabacloud_ecs20140526) for the
+# (oss2 / alibabacloud_oos20190601 / alibabacloud_ecs20140526) for the
 # BLITZLOG_PROVIDER=alicloud path. The factory in lambda/provider/
 # __init__.py lazy-imports the alicloud provider, so an AWS cold start
 # never loads the alibaba wheels — but `terraform apply` of
@@ -19,5 +19,19 @@
 # Then run `mise run lock` (or the explicit pip-compile invocations
 # documented in mise.toml) to regenerate both per-cloud .txt files.
 PyJWT
-cryptography
+# Capped at <44 for the Function Compute runtime: cryptography's
+# manylinux_2_34 wheels (v44 and up) need GLIBC_2.33, which the FC
+# runtime does not have — the import dies with "version
+# `GLIBC_2.33' not found (required by
+# /code/cryptography/hazmat/bindings/_rust.abi3.so)". 43.0.3 is the
+# newest release whose x86_64 wheels top out at manylinux_2_28.
+#
+# The cap lives HERE, not in the per-cloud files, because the two
+# bundles have to agree: the development environment installs BOTH of
+# them (requirements.txt chains them), and pip cannot satisfy two
+# exact pins of the same package in one environment. The AWS Lambda
+# runtime is AL2023 (new enough for the newer wheels), but pinning
+# both keeps the development environment installable — and the
+# Alicloud bundle is the one that cannot move.
+cryptography<44
 requests

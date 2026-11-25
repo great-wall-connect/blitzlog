@@ -189,7 +189,7 @@ class TestGitIdentitySSMBlock(unittest.TestCase):
         # The block must not abort the bootstrap when the
         # operator hasn't provisioned the user-pool yet (the
         # git-author params only exist after `terraform apply`
-        # in infra/user-pool). The container's entrypoint.sh
+        # in infra/aws/user-pool). The container's entrypoint.sh
         # already gates the git config on GIT_AUTHOR_NAME
         # being non-empty, so the empty-string fallback is
         # behaviour-preserving for unconfigured pools.

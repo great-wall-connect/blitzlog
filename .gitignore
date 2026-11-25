@@ -28,6 +28,7 @@ out/
 # samples for the assisted and autonomous variants)
 packages/images/agent/.env.assisted.test
 packages/images/agent/.env.autonomous.test
+packages/images/agent/.env.test
 
 # typescript recordings of interactive shell sessions (created by `script`)
 typescript

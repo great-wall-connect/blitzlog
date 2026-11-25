@@ -713,16 +713,22 @@ class TestScrummasterPackerInRelease(unittest.TestCase):
     def test_both_jobs_call_the_same_ref_gate(self):
         """Single source of truth for the ref -> env decision.
 
-        If the two jobs ever diverge, the agent AMI lands in one env's
+        If the jobs ever diverge, the agent AMI lands in one env's
         SSM param and the scrummaster AMI in the other's — two AMIs, two
         environments, no error anywhere.
+
+        Issue #125 adds a third caller: the `alicloud-packer` job,
+        which bakes the Alicloud ECS image. It must use the SAME
+        composite action, so the AWS agent AMI, the scrummaster AMI and
+        the Alicloud agent image can never land in different
+        environments.
         """
         uses = self.wf.count("uses: ./.github/actions/ref-gate")
         self.assertEqual(
             uses,
-            2,
-            "both the release job and the scrummaster-packer job must call "
-            "the shared ref-gate action",
+            3,
+            "the release job, the scrummaster-packer job and the "
+            "alicloud-packer job must all call the shared ref-gate action",
         )
         self.assertNotIn(
             "gh pr list --state open",

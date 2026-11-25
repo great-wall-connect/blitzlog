@@ -77,8 +77,8 @@ agent_logs_bucket_name     = "gwc-blitzlog-agent-logs"           # MUST match in
 #
 # See README.md for the full setup walkthrough.
 
-# State file: S3 key is "prod/blitzlog.tfstate" in the bucket named in prod-backend.hcl.
-# Migrate the legacy single-key state ("blitzlog.tfstate") with:
+# State file: S3 key is "blitzlog/prod.tfstate" in the bucket named in prod-backend.hcl.
+# Migrate a legacy state key ("<env>/blitzlog.tfstate") with:
 #   terraform init -migrate-state -backend-config=prod-backend.hcl
 
 # ---------------------------------------------------------------------------

@@ -22,17 +22,27 @@ data "alicloud_oss_buckets" "agent_logs" {
 }
 
 data "alicloud_oss_buckets" "stt_models" {
-  name_regex = local.stt_models_bucket
+  name_regex = var.stt_models_bucket_name
 }
 
 # Construct the OSS bucket ARNs from the data-source names.
 # Alicloud OSS bucket ARN format:
-#   acs:oss:<region>:<account-id>:<bucket-name>
+#   acs:oss:<location>:<account-id>:<bucket-name>
 # The data source returns names but not ARNs, so we build them.
+#
+# The region segment is the bucket's OSS LOCATION ("oss-cn-hongkong"),
+# NOT the region id ("cn-hongkong"). OSS matches a RAM grant against
+# the bucket's location string, so a grant written with the region id
+# silently never matches: every object request comes back 403
+# AccessDenied ("The bucket you access does not belong to you") even
+# though the policy document looks right. The location is what the
+# provider reports for the bucket.
 locals {
-  agent_logs_bucket_name_resolved = data.alicloud_oss_buckets.agent_logs.buckets[0].name
-  stt_models_bucket_name_resolved = data.alicloud_oss_buckets.stt_models.buckets[0].name
+  agent_logs_bucket_name_resolved     = data.alicloud_oss_buckets.agent_logs.buckets[0].name
+  agent_logs_bucket_location_resolved = data.alicloud_oss_buckets.agent_logs.buckets[0].location
+  stt_models_bucket_name_resolved     = data.alicloud_oss_buckets.stt_models.buckets[0].name
+  stt_models_bucket_location_resolved = data.alicloud_oss_buckets.stt_models.buckets[0].location
 
-  agent_logs_bucket_arn = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${local.agent_logs_bucket_name_resolved}"
-  stt_models_bucket_arn = "acs:oss:${var.alicloud_region}:${data.alicloud_account.current.id}:${local.stt_models_bucket_name_resolved}"
+  agent_logs_bucket_arn = "acs:oss:${local.agent_logs_bucket_location_resolved}:${data.alicloud_account.current.id}:${local.agent_logs_bucket_name_resolved}"
+  stt_models_bucket_arn = "acs:oss:${local.stt_models_bucket_location_resolved}:${data.alicloud_account.current.id}:${local.stt_models_bucket_name_resolved}"
 }

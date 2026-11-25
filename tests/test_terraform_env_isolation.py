@@ -8,7 +8,7 @@ infra/aws/modules/core/iam.tf and assert that:
 - ec2:TerminateInstances is gated on the matching Environment tag
 - Per-env ephemeral SSM params are env-scoped; per-user data (bot pool,
   local LLM config) is env-independent under /blitzlog/users/
-- The user-pool module lives at infra/user-pool/ and creates params under
+- The user-pool module lives at infra/aws/user-pool/ and creates params under
   /blitzlog/users/<login>/telegram/ (no env prefix)
 
 If a refactor accidentally grants cross-env SSM access (e.g. by widening
@@ -28,8 +28,8 @@ EC2_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "ec2.tf"
 ALERTING_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "alerting.tf"
 STORAGE_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "storage.tf"
 LOCALS_TF = REPO_ROOT / "infra" / "aws" / "modules" / "core" / "locals.tf"
-USER_POOL_MAIN = REPO_ROOT / "infra" / "user-pool" / "main.tf"
-USER_POOL_VARS = REPO_ROOT / "infra" / "user-pool" / "variables.tf"
+USER_POOL_MAIN = REPO_ROOT / "infra" / "aws" / "user-pool" / "main.tf"
+USER_POOL_VARS = REPO_ROOT / "infra" / "aws" / "user-pool" / "variables.tf"
 
 
 def _policy_body_for_role(role_resource_name: str, iam_tf: str) -> str:
@@ -238,9 +238,10 @@ class TestEnvNamespacing(unittest.TestCase):
             "TerminateInstances condition must reference var.environment",
         )
 
-    def test_user_pool_lives_under_infra_user_pool(self):
-        """The user-pool module must live at infra/user-pool/ (standalone) and
-        create SSM parameters under the env-independent /blitzlog/users/ namespace."""
+    def test_user_pool_lives_under_infra_aws_user_pool(self):
+        """The AWS user-pool module must live at infra/aws/user-pool/ (standalone)
+        and create SSM parameters under the env-independent /blitzlog/users/
+        namespace."""
         main_tf = USER_POOL_MAIN.read_text()
         vars_tf = USER_POOL_VARS.read_text()
         # No environment variable — user pool is shared across envs.
@@ -652,20 +653,19 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
     def test_alicloud_dev_prod_terraform_tfvars_example_exists(self):
         """The per-env tfvars.example must exist for the operator to copy from.
 
-        The release workflow's `terraform plan` step requires
-        `<provider>.tfvars` to exist (it fails fast if not). The
-        operator copies the `.tfvars.example` to the actual tfvars
-        file. Same convention as the AWS path.
+        The operator copies `terraform.tfvars.example` to
+        `terraform.tfvars` — the name Terraform auto-loads from the
+        stack directory. Same convention as the AWS path.
         """
         for layer_dir, env in (
             (self.ALICLOUD_DEV, "dev"),
             (self.ALICLOUD_PROD, "prod"),
         ):
-            example = layer_dir / "alicloud.tfvars.example"
+            example = layer_dir / "terraform.tfvars.example"
             self.assertTrue(
                 example.exists(),
-                f"infra/alicloud/{env}/alicloud.tfvars.example must exist "
-                f"as the template the operator copies to alicloud.tfvars",
+                f"infra/alicloud/{env}/terraform.tfvars.example must exist "
+                f"as the template the operator copies to terraform.tfvars",
             )
 
     def test_alicloud_bootstrap_exists(self):
@@ -714,9 +714,12 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
                     break
             i += 1
         block = fc[start : i + 1]
-        self.assertIn(
-            'BLITZLOG_PROVIDER     = "alicloud"',
+        # Whitespace-insensitive: `terraform fmt` realigns the `=`
+        # in the block, so pinning the exact padding would break on
+        # a reformat that changes nothing semantic.
+        self.assertRegex(
             block,
+            r'BLITZLOG_PROVIDER\s*=\s*"alicloud"',
             f'environment_variables must set BLITZLOG_PROVIDER = "alicloud"; got:\n{block}',
         )
 
@@ -790,15 +793,18 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "deploy job working-directory must use the provider prefix",
         )
 
-    def test_release_workflow_refuses_alicloud_deploy(self):
-        """No workflow may apply Alicloud resources — deliberately, not by omission.
+    def test_release_workflow_gates_alicloud_deploy(self):
+        """No workflow may apply Alicloud resources by accident.
 
-        The Alicloud tree ships and validates in CI so the aws/alicloud
-        segmentation is visible to contributors, but nothing may reach a
-        real Alicloud account until the per-cloud structure is on main. The
-        deploy job's `Validate provider` step is a hard stop: an operator who
-        sets `vars.BLITZLOG_PROVIDER=alicloud` gets a loud, actionable message
-        rather than a partial apply.
+        Issue #125: the Alicloud deploy is now IMPLEMENTED (deploy
+        role, OSS backend wiring, KMS-backed TF_VAR render), so the
+        deploy job's `Validate provider` step no longer refuses it
+        outright — it refuses it unless the operator has explicitly
+        opted in via the ENABLE_ALICLOUD_DEPLOY repo variable.
+
+        The opt-in matters because the Alicloud path reaches a REAL
+        account: a stray `vars.BLITZLOG_PROVIDER=alicloud` must not
+        apply to it by accident.
 
         `terraform-apply-dev.yml` needs no such guard because it is
         hardcoded to `infra/aws/dev` — it cannot reach an Alicloud stack at all.
@@ -807,7 +813,7 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         deploy_idx = text.find("deploy:\n")
         body = text[deploy_idx:]
         self.assertIn(
-            "FATAL: Alicloud deploy is disabled by design.",
+            "FATAL: the Alicloud deploy is gated off.",
             body,
             "the deploy job must refuse BLITZLOG_PROVIDER=alicloud with an "
             "actionable message",
@@ -819,68 +825,64 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "BLITZLOG_PROVIDER must default to 'aws' so the common path "
             "never touches the guard",
         )
+        # And the Alicloud path must be opt-in, not opt-out.
+        self.assertIn(
+            "ENABLE_ALICLOUD_DEPLOY",
+            body,
+            "the Alicloud deploy must be gated on the ENABLE_ALICLOUD_DEPLOY "
+            "repo variable — it reaches a real account",
+        )
 
-    def test_aws_plan_uses_ssm_env_not_a_tfvars_file(self):
-        """The AWS plan must NOT require a `-var-file`.
+    def test_plan_uses_store_env_not_a_tfvars_file(self):
+        """Neither plan branch may require a `-var-file`.
 
-        Every AWS variable arrives as `TF_VAR_*` from the "Render TF_VAR_*
-        env from SSM" step, so the plan needs no tfvars file. And
-        `<provider>.tfvars` is gitignored (see .gitignore's `*.tfvars`), so
-        it can never exist in a fresh CI checkout.
+        Every variable arrives as `TF_VAR_*` from the "Render TF_VAR_*
+        env from SSM" (AWS) / "from OOS" (Alicloud) step, so the plan
+        needs no tfvars file. And `*.tfvars` is gitignored (see
+        .gitignore's `*.tfvars`), so it can never exist in a fresh CI
+        checkout.
 
         #126 made `-var-file` unconditional with a FATAL when absent, which
         failed the AWS deploy with "FATAL: aws.tfvars not found" on the
         first release run — even though SSM had already supplied every
-        variable. The AWS branch must call `terraform plan` bare, exactly
-        as the pre-#126 workflow did.
+        variable. The Alicloud branch grew the same shape in #125 and had
+        the same flaw. The plan step must call `terraform plan` bare on
+        both paths; an operator's local `terraform.tfvars` is auto-loaded
+        by Terraform from the stack directory.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
         body = text[deploy_idx:]
-
-        # The AWS branch must plan without -var-file.
-        self.assertRegex(
-            body,
-            r'if\s+\[\s*"\$\{BLITZLOG_PROVIDER\}"\s*=\s*"aws"\s*\];\s*then\s*\n\s*'
-            r"terraform plan -no-color -input=false -out=tfplan",
-            "the AWS branch of the plan step must run `terraform plan` with "
-            "no -var-file — the SSM render already supplied every variable",
-        )
-
-    def test_alicloud_plan_requires_its_tfvars_file(self):
-        """The Alicloud branch must still require `-var-file`.
-
-        There is no SSM-backed `TF_VAR_*` render for Alicloud yet (Phase 5),
-        so the operator's `alicloud.tfvars` is the source of config. Keeping
-        the FATAL there preserves that path's ergonomics without touching
-        the AWS one.
-        """
-        text = self.RELEASE_YML.read_text()
-        deploy_idx = text.find("deploy:\n")
-        body = text[deploy_idx:]
-        self.assertIn(
-            "${BLITZLOG_PROVIDER}.tfvars",
-            body,
-            "the plan step must still reference the per-provider tfvars file",
+        plan_match = re.search(r"(?ms)- name: terraform plan\b.*?(?=\n\s*-\s|\Z)", body)
+        self.assertIsNotNone(plan_match, "the deploy job must have a plan step")
+        plan_block = plan_match.group(0)
+        self.assertNotIn(
+            "-var-file=",
+            plan_block,
+            "the plan step must not pass a -var-file — in CI the file is "
+            "always missing (it is gitignored) and the values come from "
+            "the render steps",
         )
         self.assertIn(
-            '-var-file="${TFVARS_FILE}"',
-            body,
-            "the non-AWS branch must pass -var-file",
-        )
-        self.assertRegex(
-            body,
-            r"elif\s+\[\s*-f\s+\"\$\{TFVARS_FILE\}\"\s*\]",
-            "the non-AWS branch must test for the tfvars file before using it",
+            "terraform plan -no-color -input=false -out=tfplan",
+            plan_block,
+            "the plan step must run bare on both paths",
         )
 
     def test_release_workflow_picks_oss_backend_for_alicloud(self):
         """The `terraform init` step must switch backends based on
         `BLITZLOG_PROVIDER`. AWS uses S3 + ap-east-1; Alicloud uses
-        OSS + cn-hangzhou.
+        OSS + the Alicloud region.
 
         Without the switch, the Alicloud apply would try to
         initialise an S3 backend (wrong cloud).
+
+        Issue #125: the Alicloud region is now a VARIABLE, defaulting
+        to cn-hongkong — the region the real state bucket lives in.
+        The previous literal (`cn-hangzhou`) named a region that is
+        not the bucket's, which fails with "Authorization header is
+        invalid" rather than a clear "no such bucket": an OSS bucket
+        name is globally unique but its REGION is not.
         """
         text = self.RELEASE_YML.read_text()
         deploy_idx = text.find("deploy:\n")
@@ -891,9 +893,15 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "terraform init step must reference TF_BACKEND_BUCKET_OSS for the Alicloud path",
         )
         self.assertIn(
-            "region=cn-hangzhou",
+            '-backend-config="region=${ALICLOUD_REGION}"',
             body,
-            "terraform init step must use cn-hangzhou as the OSS backend region",
+            "terraform init step must pass the Alicloud region as a variable",
+        )
+        self.assertIn(
+            "vars.ALICLOUD_REGION || 'cn-hongkong'",
+            body,
+            "the Alicloud region default must be cn-hongkong — the region "
+            "the state bucket actually lives in",
         )
 
     # ------------------------------------------------------------------
@@ -1238,18 +1246,104 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "ram.tf must grant oss:GetObject for the FC code download",
         )
 
-    def test_terraform_pinned_to_1_16_6(self):
+    def test_ecs_agent_policy_grants_put_object_for_its_own_env_prefix(self):
+        """Issue #125: the ECS agent role must allow `oss:PutObject`
+        on `${var.environment}/*`.
+
+        This is the RAM half of the log-upload contract: the upload
+        code (lambda/scripts/alicloud/{autonomous,assisted}.py)
+        prefixes keys with `$BLITZLOG_ENV/`, and this grant must match
+        that prefix. If a future refactor narrows the resource
+        pattern to e.g. a hard-coded `prod/*` literal, the upload
+        silently fails (swallowed by `|| true`).
+
+        The AWS-side analogue is the
+        `s3:PutObject` grant on
+        `${data.aws_s3_bucket.agent_logs.arn}/${var.environment}/*`
+        asserted by `TestEnvNamespacing`.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:PutObject",
+            ram,
+            "ecs_agent_policy must include oss:PutObject — without it, the "
+            "watchdog's `blitzlog_oss_put ... /var/log/backend-bootstrap.log "
+            "...` upload fails with AccessDenied and is silently swallowed "
+            "by `|| true`.",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/${var.environment}/*",
+            ram,
+            "ecs_agent_policy must grant on "
+            "${local.agent_logs_bucket_arn}/${var.environment}/* — the "
+            "log-upload code prefixes keys with $BLITZLOG_ENV/, so this is "
+            "the path the runtime actually uses.",
+        )
+
+    def test_ecs_agent_policy_grants_delete_object_for_bot_pool_locks(self):
+        """Issue #125: the watchdog releases the bot-pool lock with
+        `blitzlog_oss_rm` when the agent container exits.
+
+        Without `oss:DeleteObject` the lock is never released and the
+        same bot can never be picked up by the next run — a deadlock
+        that is invisible until the pool is exhausted.
+
+        The AWS-side analogue is the `s3:DeleteObject` grant on
+        `bot-pool-locks/*` in infra/aws/modules/core/iam.tf.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:DeleteObject",
+            ram,
+            "ecs_agent_policy must include oss:DeleteObject — the watchdog "
+            "releases the bot-pool lock with `blitzlog_oss_rm` and the "
+            "upload would fail with AccessDenied (swallowed by `|| true`).",
+        )
+        self.assertIn(
+            "${local.agent_logs_bucket_arn}/bot-pool-locks/*",
+            ram,
+            "the delete grant must be scoped to bot-pool-locks/* — the "
+            "AWS-side analogue grants s3:DeleteObject on exactly that path.",
+        )
+
+    def test_ecs_agent_policy_grants_list_objects_for_lock_probe(self):
+        """Issue #125: the assisted-mode bootstrap probes for a
+        previous session's metadata.json with `blitzlog_oss_ls`, and
+        the watchdog's lock release checks whether the lock object
+        still exists.
+
+        The AWS-side analogue is the `s3:ListBucket` grant with a
+        `bot-pool-locks/*` prefix condition.
+        """
+        ram = (self.ALICLOUD_MODULE / "ram.tf").read_text()
+        self.assertIn(
+            "oss:ListObjects",
+            ram,
+            "ecs_agent_policy must include oss:ListObjects — the "
+            "assisted-mode session-restore probe uses `blitzlog_oss_ls`.",
+        )
+        self.assertIn(
+            '"oss:prefix" = "bot-pool-locks/*"',
+            ram,
+            "the list grant must be scoped to the bot-pool-locks/* prefix, "
+            "matching the AWS-side s3:ListBucket condition.",
+        )
+
+    def test_terraform_pinned_to_1_17_1(self):
         """Every workflow that installs Terraform + mise.toml must
-        use the same version (1.16.6). A drift between them causes
+        use the same version (1.17.1). A drift between them causes
         `terraform init` to silently re-pick a different provider
         set on CI vs local.
+
+        Issue #191 bumped the pin from 1.16.6 to 1.17.1 so CI runs
+        the same Terraform that wrote the migrated state files.
         """
         # mise.toml
         mise_toml = (self.REPO_ROOT / "mise.toml").read_text()
         self.assertIn(
-            'terraform = "1.16.6"',
+            'terraform = "1.17.1"',
             mise_toml,
-            'mise.toml must pin terraform = "1.16.6"',
+            'mise.toml must pin terraform = "1.17.1"',
         )
 
         # workflows
@@ -1260,16 +1354,17 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
         ):
             text = (self.REPO_ROOT / wf_rel).read_text()
             self.assertIn(
-                "terraform_version: 1.16.6",
+                "terraform_version: 1.17.1",
                 text,
-                f"{wf_rel} must install terraform_version 1.16.6",
+                f"{wf_rel} must install terraform_version 1.17.1",
             )
-            # Old pin must be gone.
-            self.assertNotIn(
-                "terraform_version: 1.9.8",
-                text,
-                f"{wf_rel} must not still pin terraform 1.9.8",
-            )
+            # Old pins must be gone.
+            for stale in ("terraform_version: 1.9.8", "terraform_version: 1.16.6"):
+                self.assertNotIn(
+                    stale,
+                    text,
+                    f"{wf_rel} must not still pin {stale.split(': ')[1]}",
+                )
 
     def test_mise_tf_plan_points_at_real_dir(self):
         """The mise `tf-plan` / `tf-apply` tasks used to point at
@@ -1318,7 +1413,7 @@ class TestAwsProviderV6(unittest.TestCase):
     AWS_BOOTSTRAP = REPO_ROOT / "infra" / "aws" / "bootstrap"
     AWS_DEV = REPO_ROOT / "infra" / "aws" / "dev"
     AWS_PROD = REPO_ROOT / "infra" / "aws" / "prod"
-    USER_POOL = REPO_ROOT / "infra" / "user-pool"
+    USER_POOL = REPO_ROOT / "infra" / "aws" / "user-pool"
     SCRUMMASTER = REPO_ROOT / "infra" / "scrummaster"
     README = REPO_ROOT / "README.md"
 

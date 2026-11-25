@@ -60,7 +60,7 @@ Two modes:
 | `infra/alicloud/modules/core/` | Reusable Terraform module containing all Alicloud-shaped blitzlog resources (Function Compute + ECS + RAM + API Gateway + OSS + MNS + KMS). Issue #126. |
 | `infra/alicloud/{dev,prod}/` | Thin Terraform wrappers that deploy the Alicloud core module with `environment = "dev"` / `"prod"`. The release workflow picks the tree based on `vars.BLITZLOG_PROVIDER`. |
 | `infra/alicloud/bootstrap/` | One-time Alicloud bootstrap stack: shared OSS buckets (agent logs + STT models) |
-| `infra/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool and per-user local LLM config into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
+| `infra/aws/user-pool/` | Per-user Terraform sub-module (local state) that provisions that user's Telegram bot pool and per-user local LLM config into SSM Parameter Store. **Shared across envs** — params live at `/blitzlog/users/<login>/...` (no env prefix). |
 | `packages/whisper-stt-shim/` | Local Node.js shim exposing a Whisper-compatible `/v1/audio/transcriptions` endpoint that wraps `whisper.cpp` for the agent's voice-note STT |
 | `AGENTS.md` | Conventions the agent follows and contributors match: branch naming, commits, testing, PR process |
 | `.opencode/skills/` | OpenCode skills bundled with the agent (e.g. `resume-aborted-session`) |
@@ -88,15 +88,17 @@ Blitzlog deploys into a single AWS account but supports multiple **environments*
 Both `prod` and `dev` reference the same shared S3 buckets (`agent_logs` and `stt_models`) via data sources. Those buckets are owned by a separate one-time stack at `infra/aws/bootstrap/`. Apply it once before any env:
 
 ```bash
-cd infra/bootstrap
+cd infra/aws/bootstrap
 cp terraform.tfvars.example terraform.tfvars
 # fill in: aws_region, agent_logs_bucket_name, stt_models_bucket_name
+cp bootstrap-backend.hcl.example bootstrap-backend.hcl
+# edit the bucket in bootstrap-backend.hcl if it is not gwc-infra-tf-state
 terraform init -backend-config=bootstrap-backend.hcl
 terraform plan
 terraform apply
 ```
 
-This creates the two buckets and configures encryption, versioning, public-access-block, and lifecycle rules on them. Per-env stacks never mutate the buckets — they only read/write keys under them, scoped by IAM to the env-specific key prefix (`s3://<bucket>/prod/...` vs `s3://<bucket>/dev/...`).
+This creates the two buckets and configures encryption, versioning, public-access-block, and lifecycle rules on them. Per-env stacks never mutate the buckets — they only read/write keys under them, scoped by IAM to the env-specific state key (`s3://<bucket>/blitzlog/prod.tfstate` vs `s3://<bucket>/blitzlog/dev.tfstate`).
 
 After the bootstrap apply, copy the bucket names into both `infra/aws/prod/terraform.tfvars` and `infra/aws/dev/terraform.tfvars` (`agent_logs_bucket_name` and `stt_models_bucket_name` — they MUST match).
 
@@ -115,7 +117,7 @@ The state backend (`backend "s3"`) in `infra/aws/prod/main.tf` is generic — th
 ```hcl
 # infra/aws/prod/prod-backend.hcl
 bucket = "<your-tf-state-bucket>"
-key    = "prod/blitzlog.tfstate"
+key    = "blitzlog/prod.tfstate"
 region = "ap-east-1"
 ```
 
@@ -167,8 +169,8 @@ Blitzlog runs in two isolated environments inside the same AWS account:
 
 | Env | Audience | Triggered by | Webhook | Lambda | SSM root | State key |
 |---|---|---|---|---|---|---|
-| `prod` | All real users + repos | Merges to `main` (manual apply) | `terraform output -chdir=infra/prod webhook_url` | `blitzlog-prod-handler` | `/blitzlog/prod` | `s3://<bucket>/prod/blitzlog.tfstate` |
-| `dev` | Maintainer + a sandbox repo | Any unstable branch (manual apply) | `terraform output -chdir=infra/dev webhook_url` | `blitzlog-dev-handler` | `/blitzlog/dev` | `s3://<bucket>/dev/blitzlog.tfstate` |
+| `prod` | All real users + repos | Merges to `main` (manual apply) | `terraform output -chdir=infra/prod webhook_url` | `blitzlog-prod-handler` | `/blitzlog/prod` | `s3://<bucket>/blitzlog/prod.tfstate` |
+| `dev` | Maintainer + a sandbox repo | Any unstable branch (manual apply) | `terraform output -chdir=infra/dev webhook_url` | `blitzlog-dev-handler` | `/blitzlog/dev` | `s3://<bucket>/blitzlog/dev.tfstate` |
 
 Each env has:
 
@@ -181,7 +183,7 @@ Each env has:
 ### Directory layout
 
 Issue #126 moved every cloud-specific path under `infra/<cloud>/`.
-The `infra/user-pool/` module is the only top-level per-user stack
+The `infra/aws/user-pool/` module is the only top-level per-user stack
 (Phase 5 will split it per-cloud as well).
 
 ```
@@ -197,6 +199,7 @@ infra/
 │   │   ├── integration-test-role.tf
 │   │   ├── github-oidc-provider.tf
 │   │   ├── data-sources.tf
+│   │   ├── bootstrap-backend.hcl.example
 │   │   └── terraform.tfvars.example
 │   ├── modules/
 │   │   └── core/               # all AWS resources, parameterized by var.environment
@@ -225,7 +228,12 @@ infra/
 │   │   ├── dev-backend.hcl.example
 │   │   ├── aws.tfvars.example
 │   │   └── .terraform.lock.hcl
-│   └── packer/                 # Packer AMI build (AWS-only; baked by release workflow)
+│   ├── packer/                 # Packer AMI build (AWS-only; baked by release workflow)
+│   └── user-pool/              # per-user Telegram bot pool + per-user local LLM config.
+│                               # SSM parameters. Each user runs this LOCALLY
+│                               # (no shared S3 backend). Params land under
+│                               # /blitzlog/users/<login>/... — shared across envs,
+│                               # no `environment` variable needed.
 ├── alicloud/                   # Alicloud-shaped tree (`BLITZLOG_PROVIDER=alicloud`)
 │   ├── bootstrap/              # ONE-TIME: shared OSS buckets
 │   │   ├── main.tf             # (agent_logs + stt_models, encryption, versioning, PAB)
@@ -244,25 +252,25 @@ infra/
 │   │       ├── oss.tf                # data sources — buckets owned by alicloud/bootstrap
 │   │       ├── mns.tf                # alicloud_mns_queue (SQS analogue)
 │   │       ├── kms.tf                # CMK
-│   │       ├── secrets.tf            # alicloud_kms_secret (SSM analogue)
+│   │       ├── secrets.tf            # alicloud_oos_secret_parameter (SSM analogue)
 │   │       └── locals.tf
 │   ├── prod/                   # prod wrapper, alicloud-shaped
 │   │   ├── main.tf
 │   │   ├── variables.tf
 │   │   ├── outputs.tf
 │   │   ├── prod-backend.hcl.example  # `oss` backend
-│   │   └── alicloud.tfvars.example
-│   └── dev/                    # dev wrapper, alicloud-shaped
-│       ├── main.tf
-│       ├── variables.tf
-│       ├── outputs.tf
-│       ├── dev-backend.hcl.example
-│       └── alicloud.tfvars.example
-└── user-pool/                  # per-user Telegram bot pool + per-user local LLM config.
-                               # Each user runs this LOCALLY (no shared S3 backend).
-                               # Params land under /blitzlog/users/<login>/... — shared
-                               # across envs, no `environment` variable needed.
-                               # Phase 5 follow-up moves it to infra/{aws,alicloud}/user-pool/.
+│   │   └── terraform.tfvars.example
+│   ├── dev/                    # dev wrapper, alicloud-shaped
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── dev-backend.hcl.example
+│   │   └── terraform.tfvars.example
+│   └── user-pool/              # per-user Telegram bot pool + per-user local LLM config.
+│                               # OOS parameters (the Alicloud secret store).
+│                               # Each user runs this LOCALLY (no shared backend).
+│                               # Params land under blitzlog/users/<login>/... — shared
+│                               # across envs, no `environment` variable needed.
 ```
 
 ### User-data scripts (per-cloud split, issue #126)
@@ -318,7 +326,8 @@ swallow) — the MNS DLQ + FC dead-letter config catch the failure.
 
 4. **Apply:**
    ```bash
-   cd infra/dev
+   cd infra/aws/dev
+   cp dev-backend.hcl.example dev-backend.hcl   # edit the bucket if yours differs
    terraform init -backend-config=dev-backend.hcl
    terraform plan
    terraform apply
@@ -342,10 +351,9 @@ picks the tree based on the `BLITZLOG_PROVIDER` repo variable
 | `vars.BLITZLOG_PROVIDER` | Per-env stack | Backend | Per-provider tfvars |
 |---|---|---|---|
 | `aws` (default) | `infra/aws/{dev,prod}/` | `s3` (ap-east-1) | `aws.tfvars` |
-| `alicloud` | `infra/alicloud/{dev,prod}/` | `oss` (cn-hangzhou) | `alicloud.tfvars` |
+| `alicloud` | `infra/alicloud/{dev,prod}/` | `oss` (cn-hongkong) | `terraform.tfvars` |
 
-The `terraform init` step switches backends, the `terraform plan`
-step passes the per-provider tfvars file, and the Lambda's
+The `terraform init` step switches backends, and the Lambda's
 `BLITZLOG_PROVIDER` env var is set by Terraform from the chosen
 module. The `BLITZLOG_PROVIDER=alicloud` path is a **runtime path
 only** for now: the Packer AMI build is AWS-only (Phase 5 adds
@@ -361,7 +369,7 @@ The Alicloud user-data installs `ossutil` + `aliyun` CLI on first
 boot (the Packer image is still AWS-only) and inlines a
 `blitzlog_oss_*` bash library (parallel to the AWS-side
 `blitzlog_s3_*`). The Aliyun IMDS at 100.100.100.200 replaces
-AWS IMDSv2; `aliyun kms GetSecretValue` replaces
+AWS IMDSv2; `aliyun oos GetSecretParameter` replaces
 `aws ssm get-parameter`. The bucket env-var names are
 `OSS_LOGS_BUCKET` / `OSS_LOG_PREFIX` (vs the AWS-side
 `S3_*` prefix). The runtime half of the dispatch is the
@@ -375,10 +383,17 @@ terraform init -backend-config=bootstrap-backend.hcl
 terraform apply
 
 cd ../dev
-cp alicloud.tfvars.example alicloud.tfvars  # fill in your values
+cp terraform.tfvars.example terraform.tfvars  # fill in your values
 terraform init -backend-config=dev-backend.hcl
-terraform plan -var-file=alicloud.tfvars
+terraform plan   # Terraform auto-loads terraform.tfvars
 terraform apply
+```
+
+The webhook URL is an output — point the GitHub App at it:
+
+```bash
+cd infra/alicloud/dev && terraform output webhook_url
+# https://<api-gateway-group>.cn-hongkong.alicloudapi.com/
 ```
 
 The Lambda-side provider factory (`lambda/provider/__init__.py`)
@@ -393,7 +408,7 @@ is needed when switching clouds.
 | Test an unstable branch | Trigger **Actions → terraform-apply-dev → Run workflow** with `ref=my-branch` |
 | Verify prod is unchanged after a dev change | Trigger **Actions → release → Run workflow** against the dev ref; the prod apply is the prod step's plan in the run summary |
 | Inspect current state of either env | `cd infra/prod` or `cd infra/dev` and `terraform output` (local apply still works as a fallback — see *Local applies* below) |
-| Add/rotate a bot token | `cd infra/user-pool && terraform apply` (per-user stack stays local — see [Per-user bot pool setup](#per-user-bot-pool-setup-assisted-mode)) |
+| Add/rotate a bot token | `cd infra/aws/user-pool && terraform apply` (per-user stack stays local — see [Per-user bot pool setup](#per-user-bot-pool-setup-assisted-mode)) |
 
 ### Applying from GitHub Actions
 
@@ -565,22 +580,46 @@ the state bucket). The setup is one-time per repo:
    > writes the new value to SSM in place; the next deploy picks
    > it up. Automated rotation is tracked in issue #120.
 
-The deploy workflows hard-code the state keys to `dev/blitzlog.tfstate`
-and `prod/blitzlog.tfstate` to match the existing layout in
+The deploy workflows hard-code the state keys to `blitzlog/dev.tfstate`
+and `blitzlog/prod.tfstate` to match the existing layout in
 [State file layout](#state-file-layout).
 
-### Migrating an existing single-env deployment to the new layout
+### Migrating to the `blitzlog/<env>.tfstate` state layout
 
-If you are upgrading from a pre-issue-#50 deploy where everything lived under `infra/` and the state was at `s3://<bucket>/blitzlog.tfstate`:
+The current layout is `blitzlog/<env>.tfstate` — see
+[State file layout](#state-file-layout). Deployments that pre-date it
+live under one of the older keys:
+
+| Old key | New key |
+|---|---|
+| `s3://<bucket>/blitzlog.tfstate` (pre-#50 single-env deploy) | `s3://<bucket>/blitzlog/prod.tfstate` |
+| `s3://<bucket>/<env>/blitzlog.tfstate` | `s3://<bucket>/blitzlog/<env>.tfstate` |
+| `s3://<bucket>/bootstrap/blitzlog-bootstrap.tfstate` | `s3://<bucket>/blitzlog/bootstrap.tfstate` |
+
+Migrate one stack at a time, **locally** — the operator runs this, never from CI:
 
 ```bash
-cd infra/prod
-terraform init -migrate-state -backend-config=prod-backend.hcl
-terraform plan    # review — every blitzlog-* resource will be replaced because names are now prefixed
-terraform apply
+# 1. Write the new backend file. The key is pinned in the shipped example;
+#    edit the bucket if yours is not gwc-infra-tf-state.
+cp infra/aws/prod/prod-backend.hcl.example infra/aws/prod/prod-backend.hcl
+
+# 2. Point the stack at the new key and copy the state across.
+cd infra/aws/prod
+terraform init -input=false -migrate-state -backend-config=prod-backend.hcl
+
+# 3. Verify: the plan MUST be empty (no resource is created or destroyed).
+terraform plan
+
+# 4. Only then remove the old object. The bucket is versioned, so the
+#    previous versions stay recoverable.
+aws s3 rm s3://<bucket>/<env>/blitzlog.tfstate
 ```
 
-The first apply recreates every resource (Lambda, API Gateway, IAM roles, etc.) under the new `blitzlog-prod-*` names. Brief API Gateway outage is expected; the SQS DLQ absorbs in-flight requests. After migration, subsequent `terraform plan` against `infra/aws/prod/` should be empty.
+> **Order matters.** The deploy workflows hard-code the new keys and the
+> deploy role's IAM grants are scoped to them, so land both together. A CI
+> apply *before* the IAM is widened fails closed with `AccessDenied` (safe);
+> widening the IAM while the workflows still point at the old, deleted key
+> reads an EMPTY state and plans to recreate every resource (not safe).
 
 ### Migrating S3 buckets out of the prod stack into the bootstrap stack
 
@@ -615,16 +654,18 @@ After this, both buckets are owned by `infra/aws/bootstrap/`. `infra/aws/prod/` 
 
 ### State file layout
 
-All stacks share the same S3 state bucket, separated by key prefix:
+All stacks share the same S3 state bucket, separated by key:
 
 ```
 s3://gwc-infra-tf-state/
-├── bootstrap/blitzlog-bootstrap.tfstate   # infra/bootstrap — one-time bucket creation
-├── prod/blitzlog.tfstate                  # infra/prod
-└── dev/blitzlog.tfstate                   # infra/dev
+├── blitzlog/bootstrap.tfstate   # infra/aws/bootstrap — one-time bucket creation
+├── blitzlog/prod.tfstate        # infra/aws/prod
+└── blitzlog/dev.tfstate         # infra/aws/dev
 ```
 
-The bucket name is configurable in each stack's `-backend.hcl` file. Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+The bucket name is configurable in each stack's `-backend.hcl` file (the key is pinned to `blitzlog/<env>.tfstate` in the shipped `*-backend.hcl.example` files and hard-coded in the deploy workflows, so the CI and the operator's copy cannot drift apart). Each stack has its own DynamoDB-free local-state-only setup; you can also point them at separate buckets if you prefer.
+
+The Alicloud OSS backend uses the same key layout. Its backend blocks pin `prefix = ""` so the OSS backend does not prepend its default `env:` directory to the key.
 
 > **CI concurrency.** The deploy workflows (`.github/workflows/release.yml`'s
 > `deploy` job and `.github/workflows/terraform-apply-dev.yml`) serialize
@@ -647,7 +688,7 @@ The bucket name is configurable in each stack's `-backend.hcl` file. Each stack 
 > analysis, recommendation, and roadmap. The setup below describes the
 > existing Telegram-only path.
 
-The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
+The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each assisted-mode user provisions their own pool by running `infra/aws/user-pool/` **locally** — there is no shared Terraform state, no shared S3 backend, and no DynamoDB lock table. Your `terraform.tfvars` file is the working source of truth; `terraform.tfstate` is a local cache of resolved SSM ARNs that you can always regenerate by re-running `terraform apply`.
 
 > **Shared across envs.** Per-user bot tokens are stored under `/blitzlog/users/<login>/...` with **no env prefix** — both prod and dev Lambdas read from this single namespace. A user configures their bot pool once. The same applies to per-user local LLM config (`/blitzlog/users/<login>/local-llm/...`).
 
@@ -679,11 +720,11 @@ The shared Lambda has no Telegram bot tokens or allowed user IDs baked in. Each 
 From the repository root:
 
 ```bash
-cp infra/user-pool/terraform.tfvars.example \
-   infra/user-pool/terraform.tfvars
+cp infra/aws/user-pool/terraform.tfvars.example \
+   infra/aws/user-pool/terraform.tfvars
 ```
 
-Open `infra/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
+Open `infra/aws/user-pool/terraform.tfvars` (the file is gitignored — never commit it) and fill in:
 
 ```hcl
 owner_login              = "your-github-username"   # exactly as it appears in the issue sender
@@ -702,7 +743,7 @@ telegram_bot_tokens = {
 ### Step 2 — Apply
 
 ```bash
-cd infra/user-pool
+cd infra/aws/user-pool
 terraform init
 terraform plan    # reviews the SSM parameters that will be created
 terraform apply   # type 'yes' to confirm
@@ -730,9 +771,37 @@ aws ssm get-parameters-by-path \
 
 You should see your `allowed-user-id` parameter and one `pool/<bot>` parameter per bot.
 
+### On Alicloud
+
+The Alicloud deployment has its own pool stack —
+`infra/alicloud/user-pool/` — because the secret store is the OOS
+Parameter Store, not SSM. Same variables, same `blitzlog/users/<login>/…`
+namespace (without the leading slash, which is how OOS names its
+parameters), same env-independence:
+
+```bash
+cp infra/alicloud/user-pool/terraform.tfvars.example \
+   infra/alicloud/user-pool/terraform.tfvars
+# fill in telegram_bot_tokens / telegram_allowed_user_id / owner_login
+cd infra/alicloud/user-pool
+terraform init && terraform apply
+```
+
+```bash
+aliyun oos GetSecretParametersByPath \
+  --Path "blitzlog/users/<owner_login>/telegram" \
+  --recursive --with-decryption true --region cn-hongkong
+```
+
+The pool parameters carry no KMS key: the namespace is
+env-independent while the per-env CMK is not, so a CMK-encrypted
+pool parameter would be readable by only one of dev/prod. OOS
+encrypts every parameter it holds with its own key when none is
+named.
+
 ### Rotate, add, or remove bots
 
-1. Edit `infra/user-pool/terraform.tfvars`.
+1. Edit `infra/aws/user-pool/terraform.tfvars`.
 2. `terraform plan` — review the diff.
 3. `terraform apply` — adds are created, renames move parameters, deletions remove them.
 
@@ -741,7 +810,7 @@ To add a bot, add a new key/token pair. To remove one, delete the line. To rotat
 ### Tear down
 
 ```bash
-cd infra/user-pool
+cd infra/aws/user-pool
 terraform destroy
 ```
 
@@ -761,7 +830,7 @@ Or, since the resolution is deterministic from `terraform.tfvars`, simply delete
 
 ## Agent commit attribution (issue #119)
 
-Every commit the agent makes — on the EC2 host (assisted + autonomous) and on the GHA worker (the release Bump step) — is attributed to the **operator of this blitzlog deployment**, not the webhook `sender_login`, not `root@<hostname>`, not the runner hostname. The identity is a single operator-managed value living in your `infra/user-pool/terraform.tfvars` and surfaced through two non-secret String parameters in SSM:
+Every commit the agent makes — on the EC2 host (assisted + autonomous) and on the GHA worker (the release Bump step) — is attributed to the **operator of this blitzlog deployment**, not the webhook `sender_login`, not `root@<hostname>`, not the runner hostname. The identity is a single operator-managed value living in your `infra/aws/user-pool/terraform.tfvars` and surfaced through two non-secret String parameters in SSM:
 
 - `/blitzlog/users/<owner_login>/git-author/name`
 - `/blitzlog/users/<owner_login>/git-author/email`
@@ -769,7 +838,7 @@ Every commit the agent makes — on the EC2 host (assisted + autonomous) and on 
 The defaults derive from `var.owner_login` (`git_author_name = owner_login`, `git_author_email = "<owner_login>@users.noreply.github.com"`), so an operator who only sets `owner_login` gets a working identity. Override either field in your `terraform.tfvars` when you need a different attribution — e.g. the canonical `[skip ci]` `release-bot` carve-out:
 
 ```hcl
-# infra/user-pool/terraform.tfvars
+# infra/aws/user-pool/terraform.tfvars
 owner_login     = "release-bot"
 git_author_name = "release-bot"                                       # optional (defaults to owner_login)
 git_author_email = "release-bot@users.noreply.github.com"              # optional (defaults to "<owner_login>@users.noreply.github.com")
@@ -783,7 +852,7 @@ git_author_name  = "your-github-username"
 git_author_email = "12345678+your-github-username@users.noreply.github.com"
 ```
 
-After editing `terraform.tfvars`, run `terraform apply` in `infra/user-pool/` to push the new values to SSM. The agent and the GHA worker read them on every run.
+After editing `terraform.tfvars`, run `terraform apply` in `infra/aws/user-pool/` to push the new values to SSM. The agent and the GHA worker read them on every run.
 
 The audit-friendly URL form requires the GitHub numeric user id; the public-facing `<login>@users.noreply.github.com` form (the default) does not.
 
@@ -791,7 +860,7 @@ The audit-friendly URL form requires the GitHub numeric user id; the public-faci
 
 ## Local LLMs (route agents to a model you control)
 
-You can configure blitzlog to point this user's agents at a local LLM you run yourself — e.g. Ollama, LM Studio, or llama.cpp on a Mac mini at home — instead of (or, in assisted mode, as a fallback to) the shared cloud provider. Configuration is per-user and lives in the same `infra/user-pool/` module that owns your Telegram bot pool.
+You can configure blitzlog to point this user's agents at a local LLM you run yourself — e.g. Ollama, LM Studio, or llama.cpp on a Mac mini at home — instead of (or, in assisted mode, as a fallback to) the shared cloud provider. Configuration is per-user and lives in the same `infra/aws/user-pool/` module that owns your Telegram bot pool.
 
 > **Endpoints must not be publicly addressable.** blitzlog rejects any endpoint that resolves to a public IP, with no opt-in. All supported transports keep the endpoint on a private network (VPN, mesh, or VPC-internal). The endpoint URL is stored as a `SecureString` SSM parameter because it can reveal home-network topology.
 
@@ -799,7 +868,7 @@ You can configure blitzlog to point this user's agents at a local LLM you run yo
 
 ### Configuration
 
-Add the following block to your `infra/user-pool/terraform.tfvars`:
+Add the following block to your `infra/aws/user-pool/terraform.tfvars`:
 
 ```hcl
 # Endpoint must resolve to a private IP. Allowed private ranges:
@@ -874,7 +943,7 @@ sudo tailscale up
 # Verify with: tailscale status
 ```
 
-**Per-user Tailscale auth key** (once, in your `infra/user-pool/terraform.tfvars`):
+**Per-user Tailscale auth key** (once, in your `infra/aws/user-pool/terraform.tfvars`):
 
 Generate at https://login.tailscale.com/admin/settings/keys with these flags:
 
@@ -883,7 +952,7 @@ Generate at https://login.tailscale.com/admin/settings/keys with these flags:
 - **Tags**: `tag:blitzlog-agent` — your Tailnet ACL grants this tag scoped access to the LLM endpoint
 - **Expiration**: none
 
-Then in `infra/user-pool/terraform.tfvars`:
+Then in `infra/aws/user-pool/terraform.tfvars`:
 
 ```hcl
 local_llm_endpoint                       = "http://100.x.y.z:11434"   # your Mac mini's Tailnet IP
@@ -1070,7 +1139,7 @@ In CloudWatch (`/aws/lambda/blitzlog-prod-handler`), look for `Signature present
 
 **Symptom:** Assisted mode fails; Lambda logs `No bot pool configured for user <login>` (and the API body reports the same).
 
-**Diagnose:** `owner_login` in `infra/user-pool/terraform.tfvars` must match the issue `sender.login` exactly. Verify SSM under that login:
+**Diagnose:** `owner_login` in `infra/aws/user-pool/terraform.tfvars` must match the issue `sender.login` exactly. Verify SSM under that login:
 
 ```bash
 aws ssm get-parameters-by-path \
@@ -1081,7 +1150,7 @@ aws ssm get-parameters-by-path \
 
 You should see `.../telegram/allowed-user-id` and at least one `.../telegram/pool/<bot>`.
 
-**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, re-run `terraform apply` in `infra/user-pool/`, and confirm the path above exists. The bot pool is shared across envs — both prod and dev Lambdas read from this same namespace.
+**Fix:** Set `owner_login` to the GitHub login that opens/labels the issue, re-run `terraform apply` in `infra/aws/user-pool/`, and confirm the path above exists. The bot pool is shared across envs — both prod and dev Lambdas read from this same namespace.
 
 ### All bot pool bots locked
 

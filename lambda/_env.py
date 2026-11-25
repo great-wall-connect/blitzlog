@@ -68,21 +68,45 @@ def _aliyun_access_key_id() -> str:
     the ECS instance RAM role (no static key on the box); the
     Lambda-side ALI access keys are a stop-gap until Terraform
     ships the InstanceRole assumption path (Phase 4+).
+
+    The Function Compute runtime injects the function role's
+    temporary credentials under the SDK-standard
+    `ALIBABA_CLOUD_ACCESS_KEY_ID` name, so that is the fallback:
+    the FC path has no static key to configure.
     """
-    return os.environ.get("ALIYUN_ACCESS_KEY_ID", "").strip()
+    return (
+        os.environ.get("ALIYUN_ACCESS_KEY_ID", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", "").strip()
+    )
 
 
 def _aliyun_access_key_secret() -> str:
     """Aliyun AccessKey secret. Pair to `_aliyun_access_key_id`."""
-    return os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "").strip()
+    return (
+        os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "").strip()
+    )
+
+
+def _aliyun_security_token() -> str:
+    """The STS token that pairs with the access key, if any.
+
+    Function Compute hands the function role's credentials over as an
+    STS session, so the token is required there — the SDKs reject a
+    key without it.
+    """
+    return (
+        os.environ.get("ALIYUN_SECURITY_TOKEN", "").strip()
+        or os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN", "").strip()
+    )
 
 
 def _aliyun_kms_key_id() -> str:
-    """Customer-managed CMK id used to encrypt secrets at rest in
-    KMS. Optional: when unset the secrets are encrypted with the
-    service default key. `AwsSecretStore` reads the equivalent
-    from the SSM parameter's encryption flag, so this is the
-    Alicloud-side knob to keep parity with the AWS SSM
+    """Customer-managed CMK id used to encrypt the OOS Parameter Store
+    parameters at rest. Optional: when unset the parameter is
+    encrypted with OOS's own key. `AwsSecretStore` reads the
+    equivalent from the SSM parameter's encryption flag, so this is
+    the Alicloud-side knob to keep parity with the AWS SSM
     `KMSKeyID` parameter.
     """
     return os.environ.get("ALIYUN_KMS_KEY_ID", "").strip()
@@ -90,6 +114,79 @@ def _aliyun_kms_key_id() -> str:
 
 def _ssm_root() -> str:
     return f"/blitzlog/{_blitzlog_env()}"
+
+
+def _logs_bucket() -> str:
+    """The name of the bucket that holds the agent's run logs, the
+    session archives, the bot-pool locks, and the user-data handoff
+    scripts.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `S3_LOGS_BUCKET`  (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `OSS_LOGS_BUCKET` (infra/alicloud/modules/core/function_compute.tf)
+
+    Both names are accepted here, provider-preference first, so a
+    misconfigured deploy cannot silently fall through to the
+    placeholder. The fallback literal is the same one the pre-#125
+    call sites used.
+
+    Why this matters (issue #125): the bot-pool lock is written to
+    and released from this bucket, and the user-data script is
+    uploaded to it. Reading only `S3_LOGS_BUCKET` on the Alicloud
+    path resolved to the placeholder `<your-agent-logs-bucket>`, so
+    the lock was written to a bucket that does not exist and the
+    user-data downloader fetched from it. The Alicloud instance
+    would then boot without a bootstrap script.
+    """
+    for var in ("OSS_LOGS_BUCKET", "S3_LOGS_BUCKET"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return "<your-agent-logs-bucket>"
+
+
+def _instance_profile_name() -> str:
+    """The name of the RAM role / instance profile the agent instance
+    is launched with.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `EC2_INSTANCE_PROFILE_NAME` (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `RAM_INSTANCE_PROFILE_NAME` (infra/alicloud/modules/core/function_compute.tf)
+
+    The VALUE is provider-specific too (an AWS instance profile ARN
+    vs. an Alicloud RAM role name), but the launch spec carries it
+    opaquely — `lambda/provider/alicloud.py` passes it as the
+    instance's `ram_role_name`.
+
+    Both names are accepted here, provider-preference first. Reading
+    only the AWS name raised `KeyError` on the Alicloud path, so the
+    Function Compute function failed before it could launch anything.
+    """
+    for var in ("RAM_INSTANCE_PROFILE_NAME", "EC2_INSTANCE_PROFILE_NAME"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _security_group_id() -> str:
+    """The security group the agent instance is launched into.
+
+    The env-var NAME is provider-specific:
+
+      * AWS      → `EC2_SECURITY_GROUP_ID` (infra/aws/modules/core/lambda.tf)
+      * Alicloud → `ECS_SECURITY_GROUP_ID` (infra/alicloud/modules/core/function_compute.tf)
+
+    Both names are accepted here, provider-preference first, for the
+    same reason as `_instance_profile_name`.
+    """
+    for var in ("ECS_SECURITY_GROUP_ID", "EC2_SECURITY_GROUP_ID"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
 
 
 # Environment name passed in by Terraform as a Lambda env var

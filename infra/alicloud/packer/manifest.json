@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "name": "ubuntu",
+      "builder_type": "alicloud-ecs",
+      "build_time": 1795440676,
+      "files": null,
+      "artifact_id": "cn-hongkong:m-j6cderbtuzqb7q5idymd",
+      "packer_run_uuid": "31eda830-e85f-e2c0-0dca-3db30a770b71",
+      "custom_data": null
+    }
+  ],
+  "last_run_uuid": "31eda830-e85f-e2c0-0dca-3db30a770b71"
+}
