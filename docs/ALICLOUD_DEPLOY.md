@@ -71,24 +71,40 @@ which is what the AWS side uses:
 ```json
 "Condition": {
     "StringEquals": {
-        "oidc:aud": ["sts.aliyuncs.com"],
-        "oidc:iss": ["https://token.actions.githubusercontent.com"]
+        "oidc:aud": "sts.aliyuncs.com",
+        "oidc:iss": "https://token.actions.githubusercontent.com"
     },
     "StringLike": {
-        "oidc:sub": "repo:great-wall-connect/blitzlog:*"
+        "oidc:sub": "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
     }
 }
 ```
 
-Two traps in that block:
+Three traps in that block:
 
 - With the AWS key names the service populates nothing under them, so
   the conditions can never be satisfied and every assume is denied with
   `AuthenticationFail.NoPermission` / `NoPermissionType: ImplicitDeny`
   — a policy that looks right and never matches.
-- The audience and issuer values are **lists**, not strings. GitHub's
-  `aud` claim is a JSON array, and a string condition never matches an
-  array-valued claim.
+- The subject is **not** `repo:<owner>/<repo>:<ref>`. GitHub embeds the
+  numeric ids:
+  `repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`, so the wildcard
+  has to cover them (`great-wall-connect*/blitzlog*`) — which is why
+  the AWS-side policy looks the way it does.
+- The audience and issuer are plain strings, and the `aud` value must
+  be the provider's client id (`sts.aliyuncs.com`), not the token's
+  default audience.
+
+The token's actual claims (printed from a workflow) are:
+
+```json
+{
+  "aud": "sts.aliyuncs.com",
+  "iss": "https://token.actions.githubusercontent.com",
+  "ref": "refs/heads/<branch>",
+  "sub": "repo:great-wall-connect@203322663/blitzlog@1336839410:ref:refs/heads/<branch>"
+}
+```
 
 ### 1b. The account id
 

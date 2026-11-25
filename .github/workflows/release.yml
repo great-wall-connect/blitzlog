@@ -120,24 +120,6 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # TEMPORARY diagnostic: print the OIDC token's claims so the
-      # trust policy's conditions can be matched against what the token
-      # actually carries (aud / iss / sub). The payload is not a
-      # secret; the signature is not printed.
-      - name: DEBUG OIDC claims
-        run: |
-          python3 - <<'PY'
-          import base64, json, os, urllib.request
-          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.aliyuncs.com"
-          req = urllib.request.Request(
-              url,
-              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
-          )
-          token = json.load(urllib.request.urlopen(req))["value"]
-          payload = token.split(".")[1]
-          payload += "=" * (-len(payload) % 4)
-          print("OIDC CLAIMS:", json.dumps(json.loads(base64.urlsafe_b64decode(payload)), indent=2))
-          PY
 
       # Decide the mode (pr-test vs release) from the BUILD_REF +
       # the ref's open-PR status. The primary gate is the ref itself
@@ -859,24 +841,6 @@ jobs:
           role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-packer-build-role
           audience: sts.aliyuncs.com
 
-      # TEMPORARY diagnostic: print the OIDC token's claims so the
-      # trust policy's conditions can be matched against what the token
-      # actually carries (aud / iss / sub). The payload is not a
-      # secret; the signature is not printed.
-      - name: DEBUG OIDC claims
-        run: |
-          python3 - <<'PY'
-          import base64, json, os, urllib.request
-          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.aliyuncs.com"
-          req = urllib.request.Request(
-              url,
-              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
-          )
-          token = json.load(urllib.request.urlopen(req))["value"]
-          payload = token.split(".")[1]
-          payload += "=" * (-len(payload) % 4)
-          print("OIDC CLAIMS:", json.dumps(json.loads(base64.urlsafe_b64decode(payload)), indent=2))
-          PY
 
       - name: Export Alicloud credentials for the aliyun CLI
         env:

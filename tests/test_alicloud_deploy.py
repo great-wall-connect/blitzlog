@@ -396,18 +396,18 @@ class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
         `NoPermissionType: ImplicitDeny`."""
         for name, text in (("packer", self.packer), ("deploy", self.deploy)):
             self.assertIn(
-                '"oidc:sub" = "repo:${local.github_repo}:*"',
+                '"oidc:sub" = "repo:great-wall-connect*/blitzlog*' ':ref:refs/heads/*"',
                 text,
                 f"the {name} role's sub condition must use Alicloud's "
-                '"oidc:sub" key and match the real subject',
+                '"oidc:sub" key and a wildcard that covers the numeric '
+                "owner/repo ids GitHub embeds in the subject",
             )
             self.assertIn(
-                '"oidc:aud" = ["sts.aliyuncs.com"]',
+                '"oidc:aud" = "sts.aliyuncs.com"',
                 text,
                 f"the {name} role's audience condition must use "
-                "Alicloud's \"oidc:aud\" key AND a list — GitHub's aud "
-                "claim is a JSON array, which never matches a string "
-                "condition",
+                'Alicloud\'s "oidc:aud" key — the claim is a plain '
+                "string",
             )
             self.assertNotIn(
                 '"oidc:token.actions.githubusercontent.com:aud"',
@@ -478,10 +478,11 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
             "the trust policy's audience must be sts.aliyuncs.com",
         )
         self.assertIn(
-            '"oidc:sub" = "repo:${local.github_repo}:*"',
+            '"oidc:sub" = "repo:great-wall-connect*/blitzlog*' ':ref:refs/heads/*"',
             self.text,
             "the trust policy must match the same subject wildcard as the "
-            "packer role",
+            "packer role (GitHub embeds the numeric owner/repo ids in "
+            "the subject, so the wildcard has to cover them)",
         )
 
     def test_role_grants_the_resources_the_apply_manages(self):

@@ -70,21 +70,27 @@ resource "alicloud_ram_role" "packer_build" {
         # Alicloud's RAM does NOT use the AWS condition keys for an
         # OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
         # `oidc:sub`, not under `oidc:token.actions.githubusercontent.com:*`.
-        # With the AWS key names the conditions can never be satisfied
-        # (the service populates nothing under them) and every assume
-        # is denied with `NoPermissionType: ImplicitDeny`.
-        # The audience and issuer conditions are LISTS, not a style
-        # choice: GitHub's `aud` claim is a JSON array
-        # (`["sts.aliyuncs.com"]`), and a string condition never
-        # matches an array-valued claim. Alicloud's own examples use
-        # lists for both keys too.
+        # With the AWS key names the service populates nothing under them,
+        # so the conditions can never be satisfied and every assume is
+        # denied with `NoPermissionType: ImplicitDeny`.
+        #
+        # The subject needs the same globbing the AWS side uses:
+        # GitHub embeds the numeric owner and repo ids in it
+        # (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`), so
+        # `repo:owner/repo:*` matches nothing. The `*` after each
+        # name covers the ids.
         Condition = {
           StringEquals = {
-            "oidc:aud" = ["sts.aliyuncs.com"]
-            "oidc:iss" = ["https://token.actions.githubusercontent.com"]
+            "oidc:aud" = "sts.aliyuncs.com"
+            "oidc:iss" = "https://token.actions.githubusercontent.com"
           }
           StringLike = {
-            "oidc:sub" = "repo:${local.github_repo}:*"
+            # The same glob the AWS side uses, and for the same reason:
+            # GitHub embeds the numeric owner and repo ids in the
+            # subject (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`),
+            # so a literal `repo:owner/repo:*` matches nothing. The `*`
+            # after each name covers the ids.
+            "oidc:sub" = "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
           }
         }
       },
