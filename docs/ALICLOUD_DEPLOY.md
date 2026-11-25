@@ -497,7 +497,8 @@ on the instance (SSH in, or read it after the run).
 | `ServiceNotEnable` / "Service not open" | The MNS (Simple Message Queue) product is not open. Activate it from the MNS console — see §1c. The bootstrap apply only creates the subscription. |
 | `InvalidAppName` / `InvalidGroupName` on the API Gateway resources | The names contain a hyphen. API Gateway names accept letters, digits and underscores only. |
 | `packer init` cannot download the alicloud plugin | The `github.com/hashicorp/alicloud` Packer plugin is not reachable from the runner. |
-| `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0 (see Known limitations). |
+| `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0. It is an account-side approval (payment method + a support ticket), not a repo change; this account cleared it, a fresh one has not. |
+| `AuthenticationFail.NoPermission` / "No such OIDC Provider registered" on the bake job | The RAM OIDC provider was never registered in the Alicloud account — it is a console step (§1a), and the bootstrap's trust policies reference it. Register it before the CI bake can assume the packer role. |
 | `MissingSecurityToken` from the `aliyun` CLI | The CLI does not read the `ALIBABA_CLOUD_*` environment variables for authentication. It needs a profile file in `StsToken` mode (the CI job writes one; locally `aliyun configure --profile default` does). |
 | `InvalidInstanceType.NotSupported` / "not supported by the image architecture" | An x86 instance type with an ARM64 source image (or the reverse). The agent image is ARM64-only, so both the bake instance type and the runtime spot types must be ARM64 (`ecs.g8y.*`). |
 | `EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP` on the bake's "Error associating EIP" | The build instance already had an ECS-managed public IP ("natpublicip") — the template asks ECS for one, and Alicloud will not replace it with an EIP. The instance must get its public address from the EIP alone: leave `internet_charge_type` / `internet_max_bandwidth_out` unset and pass `-var eip_id=...`. |
@@ -528,22 +529,16 @@ on the instance (SSH in, or read it after the run).
   above). The source image is the newest ARM64 Ubuntu 26.04 in
   the region (the agent container image is ARM64-only, so an x86
   source image would refuse to boot it).
-- **ECS instance creation is blocked on this account.**
-  `RunInstances` / `CreateInstance` fail with
+- **ECS purchases need an account-side approval.** This account
+  was initially blocked: `RunInstances` / `CreateInstance` failed with
   `Forbidden.RiskControl` — *"This operation is forbidden by Aliyun
   RiskControl system."* Aliyun's own error-code documentation
   (`GetErrorCodeSolutions` for `Forbidden.RiskControl` on Ecs) says
   this means *"您的账户出现异常，详情请联系客服 … 账号存在交易安全
-  问题"* and that it is cleared only by **opening a support ticket**
-  with the account holder's ID / business licence.
-
-  It is an account-level block on ECS purchases, not a template or
-  configuration problem. It reproduces identically for every instance
-  type, image, zone, charge type and security group, while the free
-  resources the bake needs (VPC, VSwitch, security group, key pair)
-  are created without complaint. The underlying cause is visible in
-  the billing API: the account has **no payment method bound** and
-  **no balance** —
+  问题"* and that it is cleared by **binding a payment method** and
+  **opening a support ticket** with the account holder's ID /
+  business licence. The underlying cause is visible in the billing
+  API:
 
   ```
   aliyun bssopenapi QueryPrepaidCards --endpoint business.ap-southeast-1.aliyuncs.com
@@ -552,16 +547,12 @@ on the instance (SSH in, or read it after the run).
     → {"AvailableAmount":"0.00","CreditAmount":"0.00","AvailableCashAmount":"0.00"}
   ```
 
-  So the fix is on the account, not in the repo: bind a payment
-  method (or top up the balance) in the billing console, and
-  separately open the support ticket the error documentation asks
-  for. Note the balance query needs the **international** billing
-  endpoint (`business.ap-southeast-1.aliyuncs.com`) — the domestic
+  (The balance query needs the **international** billing endpoint
+  (`business.ap-southeast-1.aliyuncs.com`) — the domestic
   `business.aliyuncs.com` rejects an international account with
-  `NotApplicable: the caller site matches the API domain regionId`.
+  `NotApplicable: the caller site matches the API domain regionId`.)
 
-  Until then the bake cannot complete, and neither can the runtime
-  agent instances (the FC function launches the same way). Everything
-  else in the pipeline — the Packer template, the build scripts, the
-  RAM policies and the OOS publish step — is verified working up to
-  the point of instance creation.
+  The approval took a few days and has since come through: the bake
+  creates its build instance and the runtime agent instances launch.
+  A **fresh** account still has to clear this before either can run
+  — it is an account-side gate, not a repo change.
