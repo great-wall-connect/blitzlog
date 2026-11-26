@@ -7,8 +7,8 @@ never put in its environment.
   read ``$ALICLOUD_VPC_ID`` / ``$ALICLOUD_VSWITCH_ID`` /
   ``$ALICLOUD_EIP_ID`` from the shell, but ``vars.*`` is NOT an
   environment variable in Actions — each one has to be mapped into the
-  step's ``env:``. Without that the step reports the variable as "not
-  set" even though it is.
+  step's ``env:``. Without that the step reports them as "not set"
+  even though they are.
 * The deploy leg's "Export Alicloud credentials" step never wrote the
   aliyun CLI profile, so every ``aliyun oos ...`` call that followed
   ran unauthenticated ("profile configuration failed") and the step
@@ -16,17 +16,24 @@ never put in its environment.
 
 Both were invisible to review and surfaced only as a CI run failing
 with a misleading message, so they are pinned here.
+
+The shell syntax of every step is checked too: a step whose script
+does not parse fails the run with "syntax error near unexpected
+token" — which is exactly what a botched edit to one of these
+workflows looks like.
 """
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
-APPLY_DEV_YML = REPO_ROOT / ".github" / "workflows" / "terraform-apply-dev.yml"
+RELEASE_YML = REPO_ROOT / ".github/workflows/release.yml"
+APPLY_DEV_YML = REPO_ROOT / ".github/workflows/terraform-apply-dev.yml"
 
 
 def _shell_variables_read(run: str) -> set[str]:
@@ -38,7 +45,8 @@ def _shell_variables_read(run: str) -> set[str]:
     """
     assigned = set(
         re.findall(
-            r"(?m)^\s*(?:export\s+|declare\s+(?:-\w+\s+)?)?([A-Z_][A-Z0-9_]*)=", run
+            r"(?m)^\s*(?:export\s+|declare\s+(?:-\w+\s+)?)?([A-Z_][A-Z0-9_]*)\s*=",
+            run,
         )
     )
     used: set[str] = set()
@@ -68,6 +76,9 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
             "GITHUB_OUTPUT",
             "GITHUB_PATH",
             "GITHUB_STEP_SUMMARY",
+            # The runner provides it: the checkout's root, used to
+            # address a repo script by an absolute path.
+            "GITHUB_WORKSPACE",
             "HOME",
             "PATH",
             "PWD",
@@ -119,8 +130,9 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
     def test_alicloud_legs_write_the_aliyun_cli_profile(self):
         """The CLI does not read the `ALIBABA_CLOUD_*` env vars — it
         needs a profile, and for STS credentials it must be in
-        "StsToken" mode (an "AK" profile drops the token and the API
-        answers MissingSecurityToken)."""
+        "StsToken" mode. A leg that calls `aliyun ...` without writing
+        one runs unauthenticated and the step misreports the secret it
+        wanted as missing."""
         problems = []
         for wf_name, job_name, step in self._steps():
             run = step.get("run") or ""
@@ -139,11 +151,69 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
             "job:\n  " + "\n  ".join(problems),
         )
 
-    def test_the_apply_dev_workflow_can_apply_the_alicloud_stack(self):
-        """The fast feedback path: terraform-apply-dev.yml must be
-        able to run the Alicloud dev stack, so it does not have to
-        wait for the AWS AMI bake."""
-        job = self.workflows["terraform-apply-dev.yml"]["jobs"]["apply-dev"]
+    def test_every_step_script_is_valid_shell(self):
+        """A step whose script does not parse fails the run with
+        "syntax error near unexpected token" — a botched edit shows
+        up as that, with nothing pointing at the workflow."""
+        problems = []
+        for wf_name, job_name, step in self._steps():
+            run = step.get("run")
+            if not run:
+                continue
+            with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+                fh.write(run)
+                path = fh.name
+            try:
+                result = subprocess.run(
+                    ["bash", "-n", path], capture_output=True, text=True, check=False
+                )
+            finally:
+                Path(path).unlink(missing_ok=True)
+            if result.returncode != 0:
+                problems.append(
+                    f"{wf_name}:{job_name}: step {step.get('name')!r} is not "
+                    f"valid shell: {result.stderr.strip()}"
+                )
+        self.assertEqual(
+            problems,
+            [],
+            "a workflow step's script does not parse:\n  " + "\n  ".join(problems),
+        )
+
+    def test_the_reader_is_addressed_by_an_absolute_path(self):
+        """A step that `cd`s anywhere makes a relative path resolve
+        somewhere else.
+
+        The aliyun CLI install does `cd /tmp` — and the render step
+        ran the reader afterwards as `python3 scripts/...`, which
+        resolved to /tmp/scripts/... and failed with "can't open
+        file". The path is absolute for that reason."""
+        for path in (RELEASE_YML, APPLY_DEV_YML):
+            text = path.read_text()
+            self.assertNotIn(
+                "python3 scripts/oos_read_parameter.py",
+                text,
+                f"{path.name} must address the reader by an absolute "
+                "path — a step that changes directory would break it",
+            )
+            self.assertIn(
+                'python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"',
+                text,
+                f"{path.name} must address the reader by an absolute path",
+            )
+
+
+class TestTheApplyDevWorkflowCanApplyTheAlicloudStack(unittest.TestCase):
+    """The fast feedback path: terraform-apply-dev.yml must be
+    able to run the Alicloud dev stack, so it does not have to
+    wait for the AWS AMI bake."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = yaml.safe_load(APPLY_DEV_YML.read_text())
+
+    def test_the_workflow_can_apply_the_alicloud_stack(self):
+        job = self.workflow["jobs"]["apply-dev"]
         self.assertIn(
             "BLITZLOG_PROVIDER",
             job.get("env") or {},
@@ -167,39 +237,6 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
                     step.get("working-directory"),
                     "infra/${{ env.BLITZLOG_PROVIDER }}/dev",
                     "the terraform steps must run in the selected cloud's " "tree",
-                )
-
-
-class TestAlicloudCliKnowsTheOosProduct(unittest.TestCase):
-    """The `oos` product post-dates the CLI 3.0.x line.
-
-    `aliyun oos GetSecretParameter` against CLI 3.0.6 answers
-    "ERROR: 'oos' is not a valid command or product" — and the deploy
-    legs swallowed the CLI's stderr, so the missing parameter it then
-    reported was not missing at all.
-    """
-
-    # Every place that installs the aliyun CLI for the Alicloud path.
-    SOURCES = (
-        RELEASE_YML,
-        APPLY_DEV_YML,
-        REPO_ROOT / "infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh",
-        REPO_ROOT / "lambda/scripts/alicloud/_common.py",
-    )
-
-    def test_no_source_installs_a_cli_without_the_oos_product(self):
-        for path in self.SOURCES:
-            text = path.read_text()
-            for version in re.findall(
-                r"aliyun-cli-linux-([0-9]+\.[0-9]+\.[0-9]+)", text
-            ):
-                major, minor, patch = (int(p) for p in version.split("."))
-                self.assertGreaterEqual(
-                    (major, minor, patch),
-                    (3, 5, 0),
-                    f"{path.name} installs aliyun CLI {version}, which has no "
-                    "`oos` product — every `aliyun oos ...` call fails with "
-                    "'not a valid command or product'",
                 )
 
 

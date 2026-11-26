@@ -1496,14 +1496,19 @@ jobs:
           # default. Install the same pinned build the baked host
           # image uses (infra/alicloud/packer/scripts-ecs-ubuntu/
           # 01-system.sh) so the two paths cannot drift.
+          # The install runs in a subshell: a `cd` here would change the
+          # step's working directory, and the repo script the step runs
+          # below is addressed by an absolute path.
           if ! command -v aliyun >/dev/null 2>&1; then
-            cd /tmp
-            curl -fsSL -o aliyun-cli.tgz \
-              https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
-            tar -xzf aliyun-cli.tgz
-            sudo mv aliyun /usr/local/bin/aliyun
-            sudo chmod +x /usr/local/bin/aliyun
-            rm -f aliyun-cli.tgz
+            (
+              cd /tmp
+              curl -fsSL -o aliyun-cli.tgz \
+                https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
+              tar -xzf aliyun-cli.tgz
+              sudo mv aliyun /usr/local/bin/aliyun
+              sudo chmod +x /usr/local/bin/aliyun
+              rm -f aliyun-cli.tgz
+            )
           fi
 
           # The deploy-time parameters, created by the bootstrap stack
@@ -1537,7 +1542,7 @@ jobs:
               --Name "$name" \
               --WithDecryption true \
               --region "$ALICLOUD_REGION" \
-              | python3 scripts/oos_read_parameter.py); then
+              | python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"); then
               echo "FATAL: the OOS parameter ${name} could not be read." >&2
               echo "  The error above is OOS's own. A permission" >&2
               echo "  failure (Kms.SecretFailed) means this role" >&2
@@ -1583,7 +1588,7 @@ jobs:
           if ! kms_key_id=$(aliyun oos GetParameter \
             --Name "blitzlog/shared/kms-key-id" \
             --region "$ALICLOUD_REGION" \
-            | python3 scripts/oos_read_parameter.py); then
+            | python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"); then
             echo "FATAL: the OOS parameter blitzlog/shared/kms-key-id could not be read." >&2
             exit 1
           fi

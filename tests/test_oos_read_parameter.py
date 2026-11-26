@@ -118,6 +118,28 @@ class TestOosReadParameterInTheWorkflows(unittest.TestCase):
         REPO_ROOT / ".github" / "workflows" / "terraform-apply-dev.yml",
     )
 
+    def test_the_reader_is_addressed_by_an_absolute_path(self):
+        """A step that `cd`s anywhere makes a relative path resolve
+        somewhere else.
+
+        The aliyun CLI install does `cd /tmp` — and the render step
+        ran the reader afterwards as `python3 scripts/...`, which
+        resolved to /tmp/scripts/... and failed with "can't open
+        file". The path is absolute for that reason."""
+        for path in self.WORKFLOWS:
+            text = path.read_text()
+            self.assertNotIn(
+                "python3 scripts/oos_read_parameter.py",
+                text,
+                f"{path.name} must address the reader by an absolute "
+                "path — a step that changes directory would break it",
+            )
+            self.assertIn(
+                'python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"',
+                text,
+                f"{path.name} must address the reader by an absolute path",
+            )
+
     def test_both_legs_call_the_shared_reader(self):
         for path in self.WORKFLOWS:
             text = path.read_text()
