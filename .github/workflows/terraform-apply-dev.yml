@@ -397,11 +397,26 @@ jobs:
 
           for secret in "${OOS_PARAMS[@]}"; do
             name="${OOS_ROOT}/${secret}"
-            value=$(aliyun oos GetSecretParameter \
+            # The CLI answers an API error with a JSON document on
+            # stdout and a ZERO exit code, so its output cannot be
+            # trusted to be a successful response — a caller that
+            # only looks for `Parameter.Value` reads "the parameter
+            # is missing" when the truth is "you may not read it".
+            # scripts/oos_read_parameter.py parses the response, says
+            # what failed, and logs the CMK the parameter is
+            # encrypted with (the only place it is visible).
+            if ! value=$(aliyun oos GetSecretParameter \
               --Name "$name" \
               --WithDecryption true \
               --region "$ALICLOUD_REGION" \
-              | python3 -c 'import sys,json; print(json.load(sys.stdin)["Parameter"]["Value"], end="")' 2>/dev/null || true)
+              | python3 scripts/oos_read_parameter.py); then
+              echo "FATAL: the OOS parameter ${name} could not be read." >&2
+              echo "  The error above is OOS's own. A permission" >&2
+              echo "  failure (Kms.SecretFailed) means this role" >&2
+              echo "  cannot read the parameter — not that it is" >&2
+              echo "  missing." >&2
+              exit 1
+            fi
             if [ -z "$value" ]; then
               echo "FATAL: the OOS parameter ${name} is missing or empty." >&2
               echo "  Run 'cd infra/alicloud/dev && terraform apply' first to" >&2

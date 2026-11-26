@@ -255,16 +255,24 @@ resource "alicloud_ram_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:Decrypt",
+          "kms:GetSecretValue",
         ]
-        # OOS encrypts every parameter with its OWN service key
-        # (`secret/oos...`), not (only) the CMK named on the
-        # parameter, so reading one fails with
-        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
-        # caller can decrypt that key too. It is a service-managed
-        # key, so there is no id to scope to — the `secret/oos*`
-        # prefix is.
-        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*"
+        # Each OOS encrypted parameter is a KMS SECRET named
+        # `secret/oos/<parameter path>` — OOS implements its
+        # encrypted parameter kind on top of KMS Secrets Manager, so
+        # reading one needs `kms:GetSecretValue` on that secret.
+        # `kms:Decrypt` is the action for CMKs (`key/...`) and does
+        # NOT apply to a secret resource.
+        #
+        # Without this grant every read fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission` ("This
+        # operation for acs:kms:<region>:<account>:secret/oos/... is
+        # not allowed"), which the deploy legs read as "the
+        # parameter is missing or empty" — it is neither.
+        Resource = [
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/${var.environment}/*",
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/users/*",
+        ]
       },
       {
         Effect = "Allow"
@@ -448,16 +456,24 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
       {
         Effect = "Allow"
         Action = [
-          "kms:Decrypt",
+          "kms:GetSecretValue",
         ]
-        # OOS encrypts every parameter with its OWN service key
-        # (`secret/oos...`), not (only) the CMK named on the
-        # parameter, so reading one fails with
-        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
-        # caller can decrypt that key too. It is a service-managed
-        # key, so there is no id to scope to — the `secret/oos*`
-        # prefix is.
-        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*"
+        # Each OOS encrypted parameter is a KMS SECRET named
+        # `secret/oos/<parameter path>` — OOS implements its
+        # encrypted parameter kind on top of KMS Secrets Manager, so
+        # reading one needs `kms:GetSecretValue` on that secret.
+        # `kms:Decrypt` is the action for CMKs (`key/...`) and does
+        # NOT apply to a secret resource.
+        #
+        # Without this grant every read fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission` ("This
+        # operation for acs:kms:<region>:<account>:secret/oos/... is
+        # not allowed"), which the deploy legs read as "the
+        # parameter is missing or empty" — it is neither.
+        Resource = [
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/${var.environment}/*",
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/users/*",
+        ]
       },
       {
         Effect = "Allow"

@@ -1,16 +1,20 @@
 """Guards for the OOS parameter reads' KMS grants.
 
-OOS encrypts every parameter with its OWN service key
-(`acs:kms:<region>:<account>:secret/oos...`), not only with the CMK
-named on the parameter. A caller that can decrypt the per-env CMK but
-not that service key gets:
+OOS implements its *encrypted* parameter kind on top of KMS Secrets
+Manager: each encrypted parameter is a KMS secret named
+`secret/oos/<parameter path>`, and the API docs require
+`kms:GetSecretValue` on that secret. A caller without it gets:
 
     Kms.SecretFailed / Forbidden.NoPermission
-    This operation for acs:kms:cn-hongkong:<account>:secret/oos... is
+    This operation for acs:kms:<region>:<account>:secret/oos/... is
     not allowed
 
 which the deploy legs read as "the parameter is missing or empty" —
-the parameter is there, the caller just cannot decrypt it.
+the parameter is there.
+
+The trap this file pins: `kms:Decrypt` is the action for a CMK
+(`key/...`), NOT for a secret (`secret/...`). Granting Decrypt on
+`secret/oos*` looks right and does nothing.
 """
 
 import re
@@ -21,10 +25,40 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_RAM = REPO_ROOT / "infra/alicloud/modules/core/ram.tf"
 BOOTSTRAP_DEPLOY = REPO_ROOT / "infra/alicloud/bootstrap/deploy-role.tf"
 
+# The action that unlocks a KMS secret, and the one that unlocks a CMK.
+GET_SECRET_VALUE = "kms:GetSecretValue"
+DECRYPT = "kms:Decrypt"
+
+
+def _statements(text: str) -> list[tuple[list[str], list[str]]]:
+    """The (actions, resources) pairs of every policy statement.
+
+    The RAM policies in these files are a flat list of statements,
+    each with an `Action` list followed by a `Resource` list (or a
+    single resource string).
+    """
+    pairs = []
+    for match in re.finditer(r"Action\s*=\s*\[(?P<actions>.*?)\]", text, re.DOTALL):
+        actions = re.findall(r'"([^"]+)"', match.group("actions"))
+        tail = text[match.end() : match.end() + 2000]
+        resource_match = re.search(
+            r"""Resource\s*=\s*(?:\[(?P<list>.*?)\]|"(?P<one>[^"]+)")""",
+            tail,
+            re.DOTALL,
+        )
+        if resource_match is None:
+            continue
+        if resource_match.group("list") is not None:
+            resources = re.findall(r'"([^"]+)"', resource_match.group("list"))
+        else:
+            resources = [resource_match.group("one") or ""]
+        pairs.append((actions, resources))
+    return pairs
+
 
 class TestAlicloudOosReadersCanDecryptTheServiceKey(unittest.TestCase):
     """Every role that reads an OOS parameter needs
-    `kms:Decrypt` on the OOS service key."""
+    `kms:GetSecretValue` on the OOS secret."""
 
     # The roles that read parameters, and where they live.
     ROLES = (
@@ -33,37 +67,81 @@ class TestAlicloudOosReadersCanDecryptTheServiceKey(unittest.TestCase):
         ("CI deploy role", BOOTSTRAP_DEPLOY),
     )
 
-    def test_the_service_key_grant_is_present(self):
+    @staticmethod
+    def _statements_touching(text: str, resource_prefix: str):
+        """The statements that grant access to a matching resource."""
+        return [
+            (actions, resources)
+            for actions, resources in _statements(text)
+            if any(resource_prefix in resource for resource in resources)
+        ]
+
+    def test_the_oos_secret_grant_is_present(self):
         for name, path in self.ROLES:
             text = path.read_text()
-            self.assertIn(
-                "secret/oos*",
-                text,
-                f"the {name} must be able to decrypt the OOS service "
-                "key (`secret/oos*`) — without it every parameter read "
+            matching = self._statements_touching(text, "secret/oos")
+            self.assertTrue(
+                matching,
+                f"the {name} must be able to read the OOS secret "
+                "(`secret/oos/...`) — without it every parameter read "
                 "fails with Kms.SecretFailed",
             )
 
-    def test_the_grants_are_decrypt_only(self):
-        """The grant is a decrypt, nothing more — the OOS service key
-        is service-managed, so there is no id to scope to, but there
-        is also nothing to manage."""
+    def test_the_read_grant_is_get_secret_value(self):
+        """`kms:Decrypt` is the action for a CMK (`key/...`), not for
+        a secret (`secret/...`) — the two are not interchangeable."""
         for name, path in self.ROLES:
             text = path.read_text()
-            for match in re.finditer(r"secret/oos\*", text):
-                window = text[max(0, match.start() - 600) : match.end() + 200]
+            for actions, resources in self._statements_touching(text, "secret/oos"):
                 self.assertIn(
-                    '"kms:Decrypt"',
-                    window,
-                    f"the {name}'s OOS service-key grant must be "
-                    "kms:Decrypt and nothing else",
+                    GET_SECRET_VALUE,
+                    actions,
+                    f"the {name}'s OOS grant {actions} on {resources} must "
+                    f"include {GET_SECRET_VALUE} — {DECRYPT} applies to "
+                    "CMKs (`key/...`), not to the KMS secrets OOS keeps "
+                    "the parameters in",
                 )
-                for verb in ("kms:CreateKey", "kms:DeleteKey", "kms:PutKey"):
-                    self.assertNotIn(
-                        verb,
-                        window,
-                        f"the {name} must not be able to manage the OOS " "service key",
-                    )
+
+    def test_no_role_decrypts_a_secret_resource(self):
+        for name, path in self.ROLES:
+            text = path.read_text()
+            for actions, resources in self._statements_touching(text, "secret/oos"):
+                self.assertNotIn(
+                    DECRYPT,
+                    actions,
+                    f"the {name} must not {DECRYPT} a secret resource "
+                    f"({resources}) — the action for a KMS secret is "
+                    f"{GET_SECRET_VALUE}",
+                )
+
+    def test_the_cmk_grant_is_decrypt_on_a_key(self):
+        """The customer CMK is a `key/...` resource, so Decrypt on it
+        is right — that is the one place Decrypt belongs."""
+        for name, path in self.ROLES:
+            text = path.read_text()
+            matching = self._statements_touching(text, ":key/")
+            self.assertTrue(
+                matching,
+                f"the {name} must be able to decrypt the customer CMK the "
+                "parameters are encrypted with",
+            )
+            decrypting = [actions for actions, _ in matching if DECRYPT in actions]
+            self.assertTrue(
+                decrypting,
+                f"the {name} holds statements on a CMK ({matching}) but "
+                f"none of them grants {DECRYPT}",
+            )
+
+    def test_the_ci_role_cannot_manage_the_oos_secrets(self):
+        """The CI role reads parameters; it does not manage them."""
+        text = BOOTSTRAP_DEPLOY.read_text()
+        for verb in ("kms:CreateSecret", "kms:DeleteSecret", "kms:UpdateSecret"):
+            self.assertNotIn(
+                verb,
+                text,
+                f"the CI deploy role must not hold {verb} — it reads the "
+                "OOS parameters, it does not manage them",
+            )
 
 
 if __name__ == "__main__":

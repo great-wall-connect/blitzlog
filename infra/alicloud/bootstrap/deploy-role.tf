@@ -163,20 +163,41 @@ resource "alicloud_ram_policy" "deploy" {
         ]
       },
       {
-        # Decrypting the OOS parameters. OOS encrypts every parameter
-        # with its OWN service key (`secret/oos...`), not (only) the
-        # CMK named on the parameter, so reading one fails with
-        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
-        # caller can decrypt that key too. It is a service-managed
-        # key, so there is no id to scope to — the `secret/oos*`
-        # prefix is.
-        Sid    = "AllowOOSParameterDecrypt"
+        # Reading an OOS encrypted parameter. OOS implements its
+        # encrypted parameter kind on top of KMS Secrets Manager:
+        # each parameter is a KMS secret named
+        # `secret/oos/<parameter path>`, and the API docs require
+        # `kms:GetSecretValue` on it. `kms:Decrypt` is the action
+        # for CMKs (`key/...`) and does NOT apply to a secret.
+        #
+        # Without this grant every read fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission`, which the
+        # deploy leg reads as "the parameter is missing or empty" —
+        # it is neither.
+        Sid    = "AllowOOSParameterRead"
+        Effect = "Allow"
+        Action = [
+          "kms:GetSecretValue",
+        ]
+        Resource = [
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/*",
+        ]
+      },
+      {
+        # The parameters are encrypted with a customer CMK as well, so
+        # reading one additionally needs `kms:Decrypt` on that key.
+        # The per-env stack creates the CMK, so this stack cannot
+        # name it — hence `key/*`. That is not a meaningful widening:
+        # this role already holds `kms:CreateKey` / `kms:DeleteKey` /
+        # `kms:CreateGrant` on `key/*`, so it can create a key and
+        # grant itself decrypt on it.
+        Sid    = "AllowKMSKeyDecrypt"
         Effect = "Allow"
         Action = [
           "kms:Decrypt",
         ]
         Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*",
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/*",
         ]
       },
       {

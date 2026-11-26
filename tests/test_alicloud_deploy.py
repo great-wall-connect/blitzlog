@@ -1545,10 +1545,23 @@ class TestAlicloudOosParameterStore(unittest.TestCase):
                 f"the RAM policies must grant {action} — the Alicloud "
                 "secret store reads and writes OOS parameters",
             )
-        self.assertNotIn(
+        # OOS implements its ENCRYPTED parameter kind on top of KMS
+        # Secrets Manager: each parameter is a KMS secret named
+        # `secret/oos/<parameter path>`, and the GetSecretParameter
+        # API requires `kms:GetSecretValue` on it. A reader without
+        # that grant gets `Kms.SecretFailed` /
+        # `Forbidden.NoPermission` — which the deploy legs read as
+        # "the parameter is missing or empty".
+        #
+        # The plain OOS parameter kind (`alicloud_oos_parameter`) has
+        # no KMS dependency at all, but the secrets here are stored
+        # encrypted, so the grant is needed.
+        self.assertIn(
             "kms:GetSecretValue",
             self.ram,
-            "the KMS secret verbs are dead on the Alicloud path — the " "store is OOS",
+            "the RAM policies must grant kms:GetSecretValue — an OOS "
+            "encrypted parameter is a KMS secret, and reading one "
+            "without the grant fails with Kms.SecretFailed",
         )
 
     def test_the_fc_role_can_read_the_published_agent_image_id(self):
