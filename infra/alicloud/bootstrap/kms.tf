@@ -20,11 +20,31 @@
 # have cost the instance: on KMS 3.0 a secret can only be created
 # inside a dedicated KMS instance, which is why the secret store is
 # the OOS Parameter Store instead.
+#
+# ONE KEY PER REGION. Alicloud allows exactly one CMK per region per
+# account ("Only one default key (CMK) can be created per region"),
+# so this stack ADOPTS the key an account already has rather than
+# creating a second one — creating one fails with
+# `Rejected.LimitExceeded` ("user create resource limit was
+# exceeded"). On an account where the key does not exist yet, the
+# apply creates it; on one where it does, the operator imports it:
+#
+#   terraform import alicloud_kms_key.secrets <key-id>
+#
+# and the stack that created it stops managing it (`terraform state
+# rm`), so the key is not destroyed underneath the parameters it
+# encrypts.
 
 resource "alicloud_kms_key" "secrets" {
   description            = "Customer master key for Blitzlog secrets"
   status                 = "Enabled"
   pending_window_in_days = 7
+  # The key encrypts every secret in the account. Deletion protection
+  # makes an accidental `terraform destroy` fail loudly at the KMS
+  # API instead of scheduling the key for deletion — and when the key
+  # goes, every parameter it encrypts becomes unreadable, a week
+  # later, when nobody is looking at the plan that caused it.
+  deletion_protection = "Enabled"
   # Rotation is operator-driven; we don't enable automatic rotation
   # because secrets have independent lifecycles (a rotation event for
   # one secret does not imply a rotation for another).

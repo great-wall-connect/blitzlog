@@ -86,6 +86,37 @@ if [ -z "$KMS_KEY_ID" ]; then
     exit 1
 fi
 
+# The key is fixed at creation, so an existing parameter created
+# under a different key has to be re-created rather than updated —
+# the update API has no key. The value is the image id (not a
+# secret), and the parameter is read only when an agent launches, so
+# the window is harmless.
+existing_key=$(aliyun oos GetSecretParameter \
+    --Name "$PARAM" \
+    --region "$ALICLOUD_REGION" 2>/dev/null |
+    python3 -c '
+import json
+import sys
+
+raw = sys.stdin.read()
+if not raw.strip():
+    # The CLI answers a missing parameter on stderr and exits
+    # non-zero, so there is nothing on stdout to parse.
+    sys.exit(0)
+try:
+    doc = json.loads(raw)
+except ValueError:
+    sys.exit(0)
+param = doc.get("Parameter") or {}
+sys.stdout.write(param.get("KeyId") or "")
+')
+if [ -n "$existing_key" ] && [ "$existing_key" != "$KMS_KEY_ID" ]; then
+    echo "Re-creating $PARAM under the current CMK (it was created under another key)"
+    aliyun oos DeleteSecretParameter \
+        --Name "$PARAM" \
+        --region "$ALICLOUD_REGION" >/dev/null
+fi
+
 # `aliyun oos CreateSecretParameter` fails when the name is taken,
 # so try CreateSecretParameter first and fall through to
 # UpdateSecretParameter (which adds a new version) — the same shape

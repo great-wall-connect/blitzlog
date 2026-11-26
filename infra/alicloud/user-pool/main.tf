@@ -16,12 +16,11 @@
 # applied locally by the operator — there is no shared state and no
 # CI involvement, the same posture as the AWS sibling.
 #
-# WHY THE PARAMETERS CARRY NO KMS KEY. OOS encrypts every parameter
-# it holds with its own key when no key is named, and the per-env
-# CMK cannot be used here: the CMK is per-env while this namespace
-# is env-independent, so a CMK-encrypted pool parameter would be
-# readable by only one of dev/prod. The same reasoning applies to
-# the Packer-published agent image id.
+# THE PARAMETERS ARE ENCRYPTED WITH THE ACCOUNT'S CMK. There is one
+# CMK per region per account (Alicloud allows no more), so it is
+# account-wide rather than per-env — and an env-independent
+# namespace can use it: dev and prod hold the same CMK, so a
+# CMK-encrypted pool parameter is readable by both.
 #
 # WHO READS WHAT. The Function Compute function reads the pool
 # (`oos:GetSecretParametersByPath` on `blitzlog/users/*`) and hands
@@ -96,13 +95,45 @@ locals {
   # leaving email empty is rejected by the precondition below).
   git_author_name_resolved  = trimspace(var.git_author_name) != "" ? trimspace(var.git_author_name) : var.owner_login
   git_author_email_resolved = trimspace(var.git_author_email) != "" ? trimspace(var.git_author_email) : "${var.owner_login}@users.noreply.github.com"
+
+  # The pool's parameters, keyed for the data source's for_each.
+  pool_secret_parameters = merge(
+    { for name in local.bot_names : "telegram-pool-${name}" => "${local.user_root}/telegram/pool/${name}" },
+    { for key in local.local_llm_keys_to_create : "local-llm-${key}" => "${local.user_root}/local-llm/${key}" },
+    {
+      "telegram-allowed-user-id" = "${local.user_root}/telegram/allowed-user-id"
+      "git-author-name"          = "${local.user_root}/git-author/name"
+      "git-author-email"         = "${local.user_root}/git-author/email"
+    },
+  )
+}
+
+# The pool's parameters, read back WITH decryption.
+#
+# A parameter's encryption key is fixed at creation, so moving one
+# onto the account's CMK means recreating it — and the provider reads
+# an OOS secret parameter back WITHOUT decryption, so terraform's
+# copy of a value is whatever was last APPLIED. A replacement writes
+# that value, which is empty for every parameter the operator filled
+# in after its creation. Reading the live value from OOS carries it
+# across instead — and it is also what makes the git-author identity
+# keep its value when the derived default changes.
+#
+# `try(...)` falls back to the variable for a parameter that does not
+# exist yet — the first apply, before the pool has any parameters.
+data "alicloud_oos_secret_parameters" "current" {
+  for_each = local.pool_secret_parameters
+
+  secret_parameter_name = each.value
+  enable_details        = true
+  with_decryption       = true
 }
 
 resource "alicloud_oos_secret_parameter" "telegram_bot_pool" {
   for_each = toset(local.bot_names)
 
   secret_parameter_name = "${local.user_root}/telegram/pool/${each.key}"
-  value                 = var.telegram_bot_tokens[each.key]
+  value                 = try(data.alicloud_oos_secret_parameters.current["telegram-pool-${each.key}"].parameters[0].value, var.telegram_bot_tokens[each.key])
   type                  = "Secret"
   key_id                = var.kms_key_id
   description           = "Telegram bot token for ${var.owner_login} pool bot: ${each.key}"
@@ -110,7 +141,7 @@ resource "alicloud_oos_secret_parameter" "telegram_bot_pool" {
 
 resource "alicloud_oos_secret_parameter" "telegram_allowed_user_id" {
   secret_parameter_name = "${local.user_root}/telegram/allowed-user-id"
-  value                 = var.telegram_allowed_user_id
+  value                 = try(data.alicloud_oos_secret_parameters.current["telegram-allowed-user-id"].parameters[0].value, var.telegram_allowed_user_id)
   type                  = "Secret"
   key_id                = var.kms_key_id
   description           = "Telegram user ID allowed to interact with ${var.owner_login}'s bots"
@@ -120,7 +151,7 @@ resource "alicloud_oos_secret_parameter" "local_llm" {
   for_each = toset(local.local_llm_keys_to_create)
 
   secret_parameter_name = "${local.user_root}/local-llm/${each.value}"
-  value                 = local.local_llm_param_values[each.value]
+  value                 = try(data.alicloud_oos_secret_parameters.current["local-llm-${each.value}"].parameters[0].value, local.local_llm_param_values[each.value])
   type                  = "Secret"
   key_id                = var.kms_key_id
   description           = "Local LLM config for ${var.owner_login}: ${each.value}"
@@ -136,30 +167,16 @@ resource "alicloud_oos_secret_parameter" "local_llm" {
 # read.
 resource "alicloud_oos_secret_parameter" "git_author_name" {
   secret_parameter_name = "${local.user_root}/git-author/name"
-  value                 = local.git_author_name_resolved
+  value                 = try(data.alicloud_oos_secret_parameters.current["git-author-name"].parameters[0].value, local.git_author_name_resolved)
   type                  = "Secret"
   key_id                = var.kms_key_id
   description           = "Git author name for ${var.owner_login}'s agent commits (issue #119)"
-
-  lifecycle {
-    # The resolved value derives from var.owner_login (or its
-    # override) — ignore upstream changes so a re-apply after
-    # owner_login edits doesn't churn the parameter when only the
-    # resolved default changed. Operators who actually want to change
-    # the value can update it with `aliyun oos UpdateSecretParameter`
-    # (the operator owns the value, not this stack).
-    ignore_changes = [value]
-  }
 }
 
 resource "alicloud_oos_secret_parameter" "git_author_email" {
   secret_parameter_name = "${local.user_root}/git-author/email"
-  value                 = local.git_author_email_resolved
+  value                 = try(data.alicloud_oos_secret_parameters.current["git-author-email"].parameters[0].value, local.git_author_email_resolved)
   type                  = "Secret"
   key_id                = var.kms_key_id
   description           = "Git author email for ${var.owner_login}'s agent commits (issue #119)"
-
-  lifecycle {
-    ignore_changes = [value]
-  }
 }

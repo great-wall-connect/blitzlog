@@ -29,7 +29,6 @@ DEV = REPO_ROOT / "infra/alicloud/dev"
 PROD = REPO_ROOT / "infra/alicloud/prod"
 RELEASE_YML = REPO_ROOT / ".github/workflows/release.yml"
 APPLY_DEV_YML = REPO_ROOT / ".github/workflows/terraform-apply-dev.yml"
-MIGRATE_SCRIPT = REPO_ROOT / "scripts/migrate_oos_parameters_to_cmk.sh"
 
 
 class TestTheCmkLivesInTheBootstrap(unittest.TestCase):
@@ -222,77 +221,85 @@ class TestTheDeployLegsUseThePublishedKeyId(unittest.TestCase):
                 f"{path.name} must hand the key id to terraform",
             )
 
-    def test_both_refuse_to_replace_a_parameter(self):
-        """A replacement re-creates a parameter with an EMPTY value —
-        the provider reads it back without decryption — so the apply
-        must stop before that happens."""
+    def test_both_refuse_to_destroy_a_kms_key(self):
+        """Every OOS parameter is encrypted with the account's CMK.
+        Destroying the key schedules its deletion, and a week later
+        the parameters it encrypts cannot be read any more."""
         for path in self.WORKFLOWS:
             text = path.read_text()
             self.assertIn(
-                "Fail if an OOS parameter would be replaced",
+                "Fail if the plan would destroy a KMS key",
                 text,
-                f"{path.name} must refuse an apply that would replace an "
-                "OOS parameter",
+                f"{path.name} must refuse an apply that would destroy a " "KMS key",
             )
             self.assertIn(
-                "migrate_oos_parameters_to_cmk.sh",
+                'select(.type == "alicloud_kms_key")',
                 text,
-                f"{path.name} must point at the migration script",
+                f"{path.name} must check for a KMS key in the plan",
             )
 
 
-class TestTheMigrationScript(unittest.TestCase):
-    """The re-key has to happen in OOS: the values only exist there,
-    and terraform cannot write them back (its copy is always empty)."""
+class TestTheRekeyIsATerraformReplacement(unittest.TestCase):
+    """A re-key is a replacement, and it must carry the value.
 
-    def test_it_exists_and_is_executable(self):
-        self.assertTrue(
-            MIGRATE_SCRIPT.exists(),
-            "the migration script must exist — the values live in OOS, "
-            "so the re-key cannot be a terraform apply",
-        )
-        self.assertTrue(
-            MIGRATE_SCRIPT.stat().st_mode & 0o111,
-            "the migration script must be executable",
-        )
+    A parameter's encryption key is fixed at creation, so moving one
+    onto another key means recreating it — and the provider reads an
+    OOS secret parameter back WITHOUT decryption, so terraform's own
+    copy of a value is always empty. A replacement whose value came
+    from the state would re-create the parameter EMPTY and wipe the
+    secret.
 
-    def test_it_is_a_dry_run_by_default(self):
-        text = MIGRATE_SCRIPT.read_text()
+    The value therefore comes from a data source that decrypts, and
+    `ignore_changes = [value]` is gone: it would pin the planned
+    value to that empty state copy.
+    """
+
+    CORE_SECRETS = REPO_ROOT / "infra/alicloud/modules/core/secrets.tf"
+    USER_POOL = REPO_ROOT / "infra/alicloud/user-pool/main.tf"
+
+    def test_the_core_module_reads_the_value_with_decryption(self):
+        text = self.CORE_SECRETS.read_text()
         self.assertIn(
-            "--apply",
+            'data "alicloud_oos_secret_parameters" "deploy"',
             text,
-            "the migration must be a dry run unless --apply is passed",
+            "the runtime's copy must read the deploy-time set with "
+            "decryption — the provider's own read cannot",
         )
-        self.assertIn(
-            "APPLY=0",
-            text,
-            "the default must be a dry run — the script deletes and "
-            "recreates parameters",
-        )
+        self.assertIn("with_decryption       = true", text)
+        self.assertIn("enable_details        = true", text)
 
-    def test_it_reads_and_rewrites_the_value(self):
-        text = MIGRATE_SCRIPT.read_text()
-        for expected in (
-            "GetSecretParameter",
-            "DeleteSecretParameter",
-            "CreateSecretParameter",
-            "--KeyId",
-        ):
-            self.assertIn(
-                expected,
-                text,
-                f"the migration script must use {expected} — a parameter "
-                "cannot be re-keyed without deleting and recreating it",
+    def test_the_user_pool_reads_its_own_value_with_decryption(self):
+        text = self.USER_POOL.read_text()
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "current"',
+            text,
+            "the pool's parameters must read their live value back — "
+            "they are not in the deploy-time set, and a re-creation "
+            "must still carry their value",
+        )
+        self.assertIn("with_decryption       = true", text)
+
+    def test_nothing_ignores_the_value(self):
+        """`ignore_changes = [value]` pins the planned value to the
+        empty state copy — which is exactly what a re-creation would
+        write."""
+        for path in (self.CORE_SECRETS, self.USER_POOL):
+            self.assertNotIn(
+                "ignore_changes = [value]",
+                path.read_text(),
+                f"{path.name} must not ignore value changes — a "
+                "re-creation would re-create the parameter empty",
             )
 
-    def test_it_verifies_the_value_survived(self):
-        text = MIGRATE_SCRIPT.read_text()
-        self.assertIn(
-            "does not read back the same value",
-            text,
-            "the migration must verify the value survived — the whole "
-            "point is that no secret is lost",
-        )
+    def test_no_migration_script_is_left_behind(self):
+        """The scripts existed because terraform could not carry a
+        value across a re-creation. Now it can, so they are gone."""
+        for name in ("migrate_oos_parameters_to_cmk.sh", "sync_oos_parameters.sh"):
+            self.assertFalse(
+                (REPO_ROOT / "scripts" / name).exists(),
+                f"scripts/{name} must be gone — the re-key is a "
+                "terraform replacement now",
+            )
 
 
 if __name__ == "__main__":

@@ -6,24 +6,23 @@
 # read the per-env stack's OWN parameters — and the CI is the one
 # that creates those, so the first deploy could never happen.
 #
-# The per-env stacks keep their own parameters (the runtime's copy,
-# under `blitzlog/<env>/github-app/id` and friends). The AWS side has
-# the same two sets: the bootstrap's are the deploy-time values, the
-# per-env ones are what the runtime reads.
+# These are the SOURCE OF TRUTH for the secrets. The per-env stack
+# keeps its own parameters — the ones the runtime reads — and they
+# follow this set (infra/alicloud/modules/core/secrets.tf reads them
+# with decryption), so a rotation reaches the agents on the next
+# apply.
 #
 # The leaf names are flat and map 1:1 onto the TF variables the
 # per-env stacks declare (`github-app-private-key` ->
 # `github_app_private_key`), so the deploy legs render them
 # mechanically instead of carrying a mapping table.
 #
-# The VALUES are operator-owned, like every other OOS parameter in
-# this deployment: the apply creates the parameters, and the real
-# value goes in afterwards with `aliyun oos UpdateSecretParameter`
-# (or `scripts/sync_oos_parameters.sh`). `ignore_changes = [value]`
-# keeps terraform from writing a value back — the provider reads an
-# OOS parameter back WITHOUT decryption, so its copy of the value is
-# always empty, and without this every apply would plan an update
-# that writes that empty value back and wipes the secret.
+# The VALUES are operator-owned: the apply creates the parameters and
+# the real value goes in afterwards with `aliyun oos
+# UpdateSecretParameter`. The parameters read their live value back
+# (see the data source below), so an apply never writes a value over
+# the one the operator set out-of-band — and an update to a parameter
+# carries the value with it.
 
 locals {
   # The deploy-time parameters, per env. The leaf names are flat
@@ -35,6 +34,7 @@ locals {
     "github-app-installation-id",
     "github-webhook-secret",
     "opencode-api-key",
+    "stt-api-url",
     "stt-api-key",
     "stt-model",
     "stt-language",
@@ -43,57 +43,103 @@ locals {
 
   deploy_envs = ["dev", "prod"]
 
+  # The value written when the operator has not supplied one. The
+  # deploy legs REFUSE a parameter that still holds it — a
+  # placeholder that reached the function would be a secret that is
+  # not a secret.
+  placeholder = "unset"
+
   # Per-leaf defaults, used when the operator's map does not carry
-  # the leaf. The secrets have no default: an absent value leaves
-  # the parameter uncreated, and the deploy leg says so ("the OOS
-  # parameter ... is missing or empty") rather than this stack
-  # failing — the operator sets the real value out-of-band.
+  # the leaf. The secrets have no default: they get the placeholder,
+  # and the operator sets them out-of-band.
   leaf_defaults = {
-    "stt-api-key"            = "placeholder-not-used-by-localhost-shim"
-    "stt-model"              = "base.en"
-    "stt-language"           = "en"
-    "stt-models-bucket-name" = ""
+    "stt-api-url"  = "http://127.0.0.1:7878/v1"
+    "stt-api-key"  = "placeholder-not-used-by-localhost-shim"
+    "stt-model"    = "base.en"
+    "stt-language" = "en"
+  }
+
+  # The defaults that depend on the env. The STT models bucket name
+  # follows the per-env derivation in
+  # infra/alicloud/modules/core/locals.tf (`stt_models_bucket`).
+  env_leaf_defaults = {
+    dev = {
+      "stt-models-bucket-name" = "blitzlog-dev-stt-models"
+    }
+    prod = {
+      "stt-models-bucket-name" = "blitzlog-prod-stt-models"
+    }
   }
 
   # The operator-supplied per-env maps. A missing key falls through
-  # to `leaf_defaults`, and a leaf with neither is empty.
+  # to `leaf_defaults`, and a leaf with neither is the placeholder.
   env_values = {
     for env in local.deploy_envs : env => {
       for leaf in local.deploy_parameter_leaves :
-      leaf => lookup({ dev = var.dev, prod = var.prod }[env], leaf, lookup(local.leaf_defaults, leaf, ""))
+      leaf => lookup(
+        { dev = var.dev, prod = var.prod }[env],
+        leaf,
+        lookup(local.leaf_defaults, leaf, lookup(local.env_leaf_defaults[env], leaf, local.placeholder)),
+      )
     }
   }
-}
 
-resource "alicloud_oos_secret_parameter" "deploy" {
-  for_each = {
+  # The parameters themselves, keyed "<env>/<leaf>" — the same keys
+  # the resource's for_each uses.
+  deploy_parameters = {
     for combo in setproduct(local.deploy_parameter_leaves, local.deploy_envs) :
     "${combo[1]}/${combo[0]}" => {
       leaf = combo[0]
       env  = combo[1]
+      name = "blitzlog/${combo[1]}/${combo[0]}"
     }
-    # Skip the leaves the operator supplied no value for — OOS
-    # rejects an empty value, and the deploy leg reports the
-    # parameter as missing with the command that sets it.
-    #
-    # `nonsensitive()` strips the sensitivity that would otherwise
-    # propagate from `local.env_values` (var.dev and var.prod are
-    # sensitive). The condition is just a bool — include or skip —
-    # so no secret is exposed by marking it non-sensitive.
-    if nonsensitive(
-      local.env_values[combo[1]][combo[0]] == null
-      || local.env_values[combo[1]][combo[0]] != ""
-    )
   }
+}
 
-  secret_parameter_name = "blitzlog/${each.value.env}/${each.value.leaf}"
-  value                 = local.env_values[each.value.env][each.value.leaf]
-  type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
-  description           = "Deploy-time value for ${each.value.leaf} (env: ${each.value.env})"
+# The deploy-time parameters, read back WITH decryption.
+#
+# The provider reads an OOS secret parameter back WITHOUT decryption,
+# so terraform's copy of a value is whatever was last APPLIED — empty
+# for a parameter the operator filled in after its creation, and
+# empty for an imported one. That matters because the provider's
+# update ALWAYS sends the value: any change to a parameter (its
+# description, say) would write that empty value back and wipe the
+# secret.
+#
+# Reading the live value here is what makes an update safe: it writes
+# the value that is actually in OOS.
+data "alicloud_oos_secret_parameters" "current" {
+  for_each = local.deploy_parameters
 
-  lifecycle {
-    # The value is operator-owned — see the file header.
-    ignore_changes = [value]
+  secret_parameter_name = each.value.name
+  enable_details        = true
+  with_decryption       = true
+}
+
+# The parameters that already exist — an account that was set up
+# before the deploy-time set existed has them (the operator creates
+# them, or copies them from the runtime's parameters). They are
+# adopted rather than created: the create would fail with "already
+# exists".
+import {
+  for_each = {
+    for key, parameter in local.deploy_parameters : key => parameter
+    if length(data.alicloud_oos_secret_parameters.current[key].parameters) > 0
   }
+  to = alicloud_oos_secret_parameter.deploy[each.key]
+  id = each.value.name
+}
+
+resource "alicloud_oos_secret_parameter" "deploy" {
+  for_each = local.deploy_parameters
+
+  secret_parameter_name = each.value.name
+  # The live value, so that an update (a description change, say)
+  # cannot write an empty value over the operator's. `try(...)` falls
+  # back to the operator's map for a parameter that does not exist
+  # yet — the first apply.
+  value       = try(data.alicloud_oos_secret_parameters.current[each.key].parameters[0].value, local.env_values[each.value.env][each.value.leaf])
+  type        = "Secret"
+  key_id      = alicloud_kms_key.secrets.id
+  description = "Deploy-time value for ${each.value.leaf} (env: ${each.value.env})"
 }

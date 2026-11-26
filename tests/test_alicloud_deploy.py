@@ -1245,15 +1245,29 @@ class TestAlicloudUserPoolStack(unittest.TestCase):
             "the pool parameters must be encrypted with the shared CMK",
         )
 
-    def test_the_git_author_values_are_operator_owned(self):
+    def test_the_git_author_values_keep_their_live_value(self):
         """Mirrors the AWS sibling: the resolved default derives from
         owner_login, so an apply must not churn the parameter when only
-        the derived default changed."""
+        the derived default changed.
+
+        The parameters read their live value back (with decryption)
+        instead of using `ignore_changes`: the value follows what is
+        in OOS, so a change to the derived default does not touch it
+        — and a parameter that has to be re-created (its encryption
+        key is fixed at creation) carries its value across rather
+        than being re-created empty.
+        """
         self.assertEqual(
             self.main_tf.count("ignore_changes = [value]"),
-            2,
-            "the two git-author parameters ignore upstream value changes — "
-            "the operator owns those values",
+            0,
+            "the pool parameters read their live value back; "
+            "`ignore_changes` would swallow the change that carries "
+            "the value across a re-creation",
+        )
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "current"',
+            self.main_tf,
+            "the pool parameters must read their live value back",
         )
 
 
@@ -1495,23 +1509,49 @@ class TestAlicloudOosParameterStore(unittest.TestCase):
                 f"the {name} parameter must be encrypted with the per-env " "CMK",
             )
 
-    def test_the_value_is_ignored_after_creation(self):
-        """The provider's read does not decrypt, so the value reads
-        back empty. Without `ignore_changes`, every plan would
-        diff and every apply would rewrite the value from the
-        tfvars — clobbering the real value the operator sets
-        out-of-band with `aliyun oos UpdateSecretParameter`."""
-        for name, body in re.findall(
+    def test_the_value_comes_from_the_deploy_time_set(self):
+        """The provider's read does not decrypt, so terraform's own
+        copy of a value is always empty. The value therefore comes
+        from the deploy-time set (read with decryption), which is
+        what makes two things work:
+
+        * a rotation reaches the runtime's copy on the next apply,
+        * a parameter can be moved onto another key — a re-creation
+          carries its value instead of being re-created empty.
+
+        `ignore_changes = [value]` would swallow exactly that: the
+        planned value would be the empty state copy, and the
+        re-creation would wipe the secret.
+        """
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "deploy"',
+            self.secrets,
+            "the parameters must read the deploy-time set with "
+            "decryption — the provider's own read cannot",
+        )
+        self.assertIn(
+            "with_decryption       = true",
+            self.secrets,
+            "the data source must decrypt — otherwise it reads the "
+            "value as empty, like the resource's own read",
+        )
+        parameters = re.findall(
             r'resource "alicloud_oos_secret_parameter" "(\w+)" \{(.*?)\n\}',
             self.secrets,
             re.DOTALL,
-        ):
+        )
+        self.assertEqual(len(parameters), 10)
+        for name, body in parameters:
             self.assertIn(
+                "data.alicloud_oos_secret_parameters.deploy[",
+                body,
+                f"the {name} parameter must take its value from the " "deploy-time set",
+            )
+            self.assertNotIn(
                 "ignore_changes = [value]",
                 body,
-                f"the {name} parameter must ignore changes to its value — "
-                "the provider cannot read it back, so Terraform would "
-                "otherwise rewrite it on every apply",
+                f"the {name} parameter must not ignore value changes — "
+                "that would make a re-creation wipe the secret",
             )
 
     def test_parameter_names_carry_no_leading_slash(self):

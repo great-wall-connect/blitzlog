@@ -381,6 +381,7 @@ jobs:
             "github-app-installation-id"
             "github-webhook-secret"
             "opencode-api-key"
+            "stt-api-url"
             "stt-api-key"
             "stt-model"
             "stt-language"
@@ -407,6 +408,13 @@ jobs:
               echo "  failure (Kms.SecretFailed) means this role" >&2
               echo "  cannot read the parameter — not that it is" >&2
               echo "  missing." >&2
+              exit 1
+            fi
+            if [ "$value" = "unset" ]; then
+              echo "FATAL: the OOS parameter ${name} still holds the placeholder." >&2
+              echo "  The bootstrap stack creates the deploy-time" >&2
+              echo "  parameters; the real value goes in afterwards:" >&2
+              echo "    aliyun oos UpdateSecretParameter --Name ${name} --Value <real> --region $ALICLOUD_REGION" >&2
               exit 1
             fi
             if [ -z "$value" ]; then
@@ -561,39 +569,38 @@ jobs:
           # readable in the GH Actions UI.
           terraform plan -no-color -input=false -out=tfplan
 
-      - name: Fail if an OOS parameter would be replaced
+      - name: Fail if the plan would destroy a KMS key
         if: env.BLITZLOG_PROVIDER == 'alicloud'
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
         env:
           BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
-          # A parameter's encryption key is fixed at creation, so
-          # moving one onto the CMK means recreating it — and the
-          # provider reads an OOS secret parameter back WITHOUT
-          # decryption, so the value in the terraform state is always
-          # EMPTY. A replacement would therefore re-create the
-          # parameter with an empty value and wipe the secret.
+          # Every OOS parameter is encrypted with the account's CMK.
+          # Destroying the key SCHEDULES its deletion (a seven-day
+          # window), and when it goes the parameters it encrypts can
+          # no longer be read — a week later, when nobody is looking
+          # at the plan that caused it.
           #
-          # The values only exist in OOS, so they are re-keyed THERE
-          # (scripts/migrate_oos_parameters_to_cmk.sh) — never by an
-          # apply. This step refuses the apply until that is done.
+          # The key is adopted, not created: it lives in the
+          # bootstrap stack's state, so a plan that destroys one means
+          # a stack that still manages it.
           terraform show -json tfplan > plan.json
-          replaced=$(jq -r '
+          destroyed=$(jq -r '
             [ .resource_changes[]?
-              | select(.type | startswith("alicloud_oos_"))
-              | select(.change.actions | length > 1)
+              | select(.type == "alicloud_kms_key")
+              | select(.change.actions | index("delete"))
               | .address
             ] | join("\n")
           ' plan.json)
-          if [ -n "$replaced" ]; then
-            echo "FATAL: these OOS parameters would be REPLACED:" >&2
-            echo "$replaced" >&2
-            echo "  The provider reads an OOS parameter back WITHOUT" >&2
-            echo "  decryption, so a replacement re-creates it with an" >&2
-            echo "  EMPTY value and wipes the secret." >&2
-            echo "  Re-key them first (the values live in OOS):" >&2
-            echo "    scripts/migrate_oos_parameters_to_cmk.sh <name> ..." >&2
+          if [ -n "$destroyed" ]; then
+            echo "FATAL: this plan would destroy a KMS key:" >&2
+            echo "$destroyed" >&2
+            echo "  The OOS parameters are encrypted with it. When the" >&2
+            echo "  key is gone they cannot be read any more." >&2
+            echo "  The key belongs to the bootstrap stack — the stack" >&2
+            echo "  that manages it should stop managing it instead:" >&2
+            echo "    terraform state rm <address>" >&2
             exit 1
           fi
 

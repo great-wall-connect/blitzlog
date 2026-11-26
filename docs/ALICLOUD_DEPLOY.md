@@ -200,19 +200,23 @@ templates you copy.
 | its id, published for the per-env stacks | the OOS parameter `blitzlog/shared/kms-key-id` (a **plain** parameter — the id is not a secret) |
 | the deploy-time parameters the CI reads | `blitzlog/<env>/<leaf>` — `github-app-id`, `github-app-private-key`, … (`secrets.tf`) |
 
-The per-env stacks need the CMK's id: they name it on the parameters
-they create and in the RAM grants that decrypt it. The CI renders it
-as `TF_VAR_kms_key_id`; a local apply copies it:
-
-```bash
-cd infra/alicloud/bootstrap && terraform output kms_key_id
-# → put it in infra/alicloud/dev/terraform.tfvars
-```
-
-The deploy-time parameters are **values the CI reads**; the per-env
-stack keeps its own parameters, which are **values the runtime
-reads**. The two sets are kept in step by
-`scripts/sync_oos_parameters.sh` — see §3.
+> **Alicloud allows one CMK per region per account.** "Only one
+> default key (CMK) can be created per region" — so the bootstrap
+> **adopts** the key an account already has rather than creating a
+> second one; creating one fails with `Rejected.LimitExceeded`
+> ("user create resource limit was exceeded"). On an account that
+> already has the key, the operator moves it:
+>
+> ```bash
+> cd infra/alicloud/dev
+> terraform state rm module.core.alicloud_kms_key.secrets   # stop managing it
+> cd ../bootstrap
+> terraform import alicloud_kms_key.secrets <key-id>       # adopt it
+> ```
+>
+> The order matters: a per-env apply before the `state rm` destroys
+> the key (a seven-day deletion window), and when it goes, every
+> parameter it encrypts becomes unreadable.
 
 ### Credentials for the local apply
 
@@ -259,41 +263,33 @@ terraform apply
 cp dev-backend.hcl.example dev-backend.hcl
 ```
 
-The apply creates the OOS parameters (GitHub App id / private key /
-installation id, webhook secret, OpenCode key, STT config) with
-placeholder values. Set the real values afterwards:
+The apply creates the OOS parameters the runtime reads (GitHub App id
+/ private key / installation id, webhook secret, OpenCode key, STT
+config). Their VALUES come from the deploy-time set (the bootstrap
+stack's parameters — see "The two parameter sets" below), so the real
+value is set there, once:
 
 ```bash
 aliyun oos UpdateSecretParameter \
-  --Name blitzlog/dev/github-app/private-key \
+  --Name blitzlog/dev/github-app-private-key \
   --Value "$(cat private-key.pem)" \
   --region cn-hongkong
 ```
 
-### Moving existing parameters onto the shared CMK
+### Moving a parameter onto another key
 
 A parameter's encryption key is fixed at creation, so moving one onto
-the shared CMK means recreating it. The terraform provider reads an
-OOS secret parameter back **without decryption**, so the value in the
-terraform state is always empty — a replacement would re-create the
-parameter with an empty value and wipe the secret.
+another key means recreating it. The terraform provider reads an OOS
+secret parameter back **without decryption**, so terraform's copy of a
+value is whatever was last *applied* — which is empty for every
+parameter the operator filled in after its creation. A plain
+replacement would therefore write that empty value back and wipe the
+secret.
 
-The values only exist in OOS, so the re-key happens in OOS:
-
-```bash
-# a dry run first: it prints what it would do
-scripts/migrate_oos_parameters_to_cmk.sh blitzlog/dev/github-app/id
-
-# then, for real (it backs every value up before deleting anything):
-scripts/migrate_oos_parameters_to_cmk.sh --apply \
-  blitzlog/dev/github-app/id \
-  blitzlog/dev/github-app/private-key \
-  ...
-```
-
-The deploy legs refuse an apply whose plan would replace an OOS
-parameter, and name the script instead — so a forgotten migration
-stops the deploy rather than wiping a secret.
+The parameters read their value from OOS with decryption instead
+(`data "alicloud_oos_secret_parameters"`), so a re-creation carries
+the **live** value across. There is no script and no operator step: a
+key change is an ordinary replacement.
 
 ### The two parameter sets
 
@@ -302,15 +298,23 @@ stops the deploy rather than wiping a secret.
 | deploy-time | `blitzlog/<env>/<leaf>` (`github-app-id`, …) | the bootstrap stack | the deploy legs (the CI) |
 | per-env | `blitzlog/<env>/github-app/id`, … | the per-env stack | the runtime (the function, the agent) |
 
-Both hold the same secrets, so a rotation has to reach both. Copy them
-across with:
+The deploy-time set is the **source of truth**: the operator edits it,
+the deploy legs read it, and the runtime's copy follows it — the
+per-env stack reads it with decryption, so a rotation reaches the
+agents on the next apply. There is nothing to keep in step by hand.
+
+The deploy-time parameters are created by the bootstrap stack with a
+placeholder (`unset`) when the operator has not supplied a value, and
+the deploy legs **refuse** a parameter that still holds it — a
+placeholder that reached the function would be a secret that is not a
+secret. Set the real value with:
 
 ```bash
-scripts/sync_oos_parameters.sh --to-deploy dev     # per-env -> deploy-time
-scripts/sync_oos_parameters.sh --to-runtime dev    # deploy-time -> per-env
+aliyun oos UpdateSecretParameter \
+  --Name blitzlog/dev/github-app-private-key \
+  --Value "$(cat private-key.pem)" \
+  --region cn-hongkong
 ```
-
-Both are dry runs unless `--apply` is passed.
 
 ### Who can read what
 
@@ -627,9 +631,10 @@ on the instance (SSH in, or read it after the run).
 | `NoSuchBucket` / bucket not found | The bucket name is `gwc-infra-tf-state` (hyphenated). `gwc-infra-tfstate` does not exist. |
 | `RegionId is empty` | `ALICLOUD_REGION` is not set and the CLI has no configured region. |
 | The OIDC step produces no credentials | `vars.ALICLOUD_ACCOUNT_ID` unset, or the OIDC provider was never registered in the RAM console (§1a). |
-| The OOS render step fails on a missing parameter | The bootstrap stack has not been applied (it creates the deploy-time parameters), or the parameter still holds its placeholder value. |
+| The OOS render step fails on a missing parameter | The bootstrap stack has not been applied (it creates the deploy-time parameters). |
+| The OOS render step fails: "the OOS parameter ... still holds the placeholder" | The deploy-time parameter was created with the `unset` placeholder — the operator has not filled in the real value yet (§3). |
 | `Kms.SecretFailed` / "Forbidden.NoPermission … secret/oos/… is not allowed" on an OOS read | The caller cannot read the parameter's KMS secret. An OOS encrypted parameter is a KMS secret, so reading it takes `kms:GetSecretValue` on `secret/oos/<path>` — `kms:Decrypt` on `secret/oos*` does nothing (Decrypt is the action for a CMK). The deploy role's grant comes from the bootstrap stack; re-apply it. |
-| The deploy refuses to apply: "these OOS parameters would be REPLACED" | A parameter's encryption key is fixed at creation, so moving one onto the shared CMK means recreating it — and the provider reads the value back empty, so a replacement would wipe the secret. Re-key it in OOS with `scripts/migrate_oos_parameters_to_cmk.sh --apply <name>` (see §3). |
+| The deploy refuses to apply: "this plan would destroy a KMS key" | Every OOS parameter is encrypted with the account's CMK, and destroying the key schedules its deletion — when it goes, the parameters cannot be read. The key belongs to the bootstrap stack: the stack that still manages it should stop managing it (`terraform state rm`), not destroy it. |
 | `ServiceUnOpen` / "Your Gateway service has not been opened." | The API Gateway product is not open. Run the bootstrap apply (`infra/alicloud/bootstrap`) — it opens it (`services.tf`). |
 | `ServiceNotEnable` / "Service not open" | The MNS (Simple Message Queue) product is not open. Activate it from the MNS console — see §1c. The bootstrap apply only creates the subscription. |
 | `InvalidAppName` / `InvalidGroupName` on the API Gateway resources | The names contain a hyphen. API Gateway names accept letters, digits and underscores only. |

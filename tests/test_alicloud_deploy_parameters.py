@@ -10,6 +10,10 @@ The invariant that matters: the deploy legs read exactly the
 parameters the bootstrap creates. A leaf added to one and not the
 other shows up as a deploy that reads a parameter nobody creates (or
 creates a parameter nobody reads).
+
+The deploy-time set is also the SOURCE OF TRUTH for the secrets: the
+per-env stack's parameters read their value back from it (with
+decryption), so a rotation reaches the runtime on the next apply.
 """
 
 import re
@@ -62,21 +66,58 @@ class TestTheDeployTimeParameterSet(unittest.TestCase):
 
     def test_the_deploy_time_parameters_are_encrypted(self):
         self.assertIn(
-            "key_id                = alicloud_kms_key.secrets.id",
+            "key_id      = alicloud_kms_key.secrets.id",
             self.bootstrap,
             "the deploy-time parameters must be encrypted with the " "shared CMK",
         )
 
-    def test_the_deploy_time_values_are_operator_owned(self):
+    def test_the_deploy_time_parameters_read_their_live_value(self):
         """The provider reads an OOS parameter back without decryption,
-        so its copy of the value is always empty. Without
-        `ignore_changes` every apply would plan an update that writes
-        that empty value back and wipes the secret."""
+        so terraform's copy of a value is whatever was last applied —
+        empty for a parameter the operator filled in after its
+        creation. The provider's update always sends the value, so an
+        update would write that empty value back and wipe the secret.
+
+        Reading the live value is what makes an update safe: it
+        writes the value that is actually in OOS."""
         self.assertIn(
+            'data "alicloud_oos_secret_parameters" "current"',
+            self.bootstrap,
+            "the deploy-time parameters must read their live value back",
+        )
+        self.assertIn("with_decryption       = true", self.bootstrap)
+        self.assertNotIn(
             "ignore_changes = [value]",
             self.bootstrap,
-            "the deploy-time values are operator-owned — an apply must "
-            "not rewrite them",
+            "the deploy-time parameters must not ignore value changes — "
+            "that would pin the planned value to the last applied one, "
+            "which is empty for a value the operator set out-of-band",
+        )
+
+    def test_the_existing_parameters_are_adopted(self):
+        """An account that already has the deploy-time parameters
+        (the operator created them) must have them adopted, not
+        created — the create would fail with "already exists"."""
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "current"',
+            self.bootstrap,
+            "the bootstrap must look up the parameters that already " "exist",
+        )
+        self.assertIn(
+            "import {",
+            self.bootstrap,
+            "the existing parameters must be adopted with an import "
+            "block — creating them would fail",
+        )
+
+    def test_a_parameter_the_operator_has_not_set_is_a_placeholder(self):
+        """The bootstrap creates every deploy-time parameter, so the
+        deploy legs find them; the ones nobody has filled in hold a
+        placeholder the deploy legs refuse."""
+        self.assertIn(
+            'placeholder = "unset"',
+            self.bootstrap,
+            "the placeholder must be a value no secret can take",
         )
 
     def test_both_deploy_legs_read_the_same_leaves(self):
