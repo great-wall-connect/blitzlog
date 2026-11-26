@@ -962,6 +962,13 @@ jobs:
         id: bake-network
         env:
           ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          # `vars.*` is NOT an environment variable in Actions — each
+          # one the script reads has to be mapped in here, or the
+          # script sees an empty value and reports the variable as
+          # "not set" even though it is.
+          ALICLOUD_VPC_ID: ${{ vars.ALICLOUD_VPC_ID }}
+          ALICLOUD_VSWITCH_ID: ${{ vars.ALICLOUD_VSWITCH_ID }}
+          ALICLOUD_EIP_ID: ${{ vars.ALICLOUD_EIP_ID }}
         run: |
           set -euo pipefail
           if [ -z "${ALICLOUD_VPC_ID:-}" ]; then
@@ -1332,6 +1339,38 @@ jobs:
             echo "ALICLOUD_SECRET_KEY=${ALIYUN_ACCESS_KEY_SECRET}"
             echo "ALICLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
           } >> "$GITHUB_ENV"
+
+          # The aliyun CLI does NOT read the ALIBABA_CLOUD_*
+          # environment variables for authentication — it needs a
+          # profile file, and for STS credentials that profile must be
+          # in "StsToken" mode (an "AK" profile drops the token and the
+          # API rejects the request with MissingSecurityToken). The
+          # step below reads the OOS parameters with the CLI, so
+          # without this profile every read fails and the step reports
+          # the parameter as "missing or empty" — which it is not.
+          mkdir -p "$HOME/.aliyun"
+          ALIYUN_ACCESS_KEY_ID="$ALIYUN_ACCESS_KEY_ID" \
+          ALIYUN_ACCESS_KEY_SECRET="$ALIYUN_ACCESS_KEY_SECRET" \
+          ALIYUN_SECURITY_TOKEN="$ALIYUN_SECURITY_TOKEN" \
+          ALICLOUD_REGION="${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}" \
+          python3 - <<'PY'
+          import json
+          import os
+          profile = {
+              "name": "default",
+              "mode": "StsToken",
+              "access_key_id": os.environ["ALIYUN_ACCESS_KEY_ID"],
+              "access_key_secret": os.environ["ALIYUN_ACCESS_KEY_SECRET"],
+              "sts_token": os.environ["ALIYUN_SECURITY_TOKEN"],
+              "region_id": os.environ["ALICLOUD_REGION"],
+              "output_format": "json",
+              "language": "en",
+          }
+          path = os.path.expanduser("~/.aliyun/config.json")
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump({"current": "default", "profiles": [profile], "meta_path": ""}, fh)
+          os.chmod(path, 0o600)
+          PY
 
       # Fetch per-env deploy config + secrets from SSM Parameter
       # Store. The deploy role (infra/aws/bootstrap/deploy-role.tf)
