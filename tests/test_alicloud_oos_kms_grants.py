@@ -132,6 +132,34 @@ class TestAlicloudOosReadersCanDecryptTheServiceKey(unittest.TestCase):
                 f"none of them grants {DECRYPT}",
             )
 
+    def test_the_ci_role_can_list_the_parameters(self):
+        """The per-env stack reads its values through a data source,
+        and the RAM table for `oos:ListSecretParameters` authorizes
+        the action against the whole namespace — the list is not
+        authorized against the name it is filtered by.
+
+        Without the grant the plan fails with "User has no permission
+        to do the action: (ListSecretParameters)"."""
+        text = BOOTSTRAP_DEPLOY.read_text()
+        listing = [
+            (actions, resources)
+            for actions, resources in _statements(text)
+            if "oos:ListSecretParameters" in actions
+        ]
+        self.assertTrue(
+            listing,
+            "the CI deploy role must be able to list the OOS "
+            "parameters — the per-env stack reads them through a data "
+            "source",
+        )
+        for actions, resources in listing:
+            self.assertTrue(
+                any(resource.endswith("secretparameter/*") for resource in resources),
+                f"the list grant must cover the namespace "
+                f"({resources}) — RAM authorizes it against the whole "
+                "namespace, not against the name the list is filtered by",
+            )
+
     def test_the_ci_role_cannot_manage_the_oos_secrets(self):
         """The CI role reads parameters; it does not manage them."""
         text = BOOTSTRAP_DEPLOY.read_text()

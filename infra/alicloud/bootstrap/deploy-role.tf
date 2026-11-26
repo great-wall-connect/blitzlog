@@ -138,11 +138,30 @@ resource "alicloud_ram_policy" "deploy" {
           "oos:DeleteSecretParameter",
           "oos:GetSecretParameter",
           "oos:GetSecretParametersByPath",
-          "oos:ListSecretParameters",
           "oos:ListSecretParameterVersions",
         ]
         Resource = [
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/*",
+        ]
+      },
+      {
+        # Listing the parameters is authorized against the whole
+        # namespace, not against the name the list is filtered by
+        # (the RAM table for `oos:ListSecretParameters` names
+        # `secretparameter/*`), so the grant cannot be narrowed to
+        # `blitzlog/*` the way the other verbs are.
+        #
+        # A list answers with metadata only — names, descriptions and
+        # the key each parameter is encrypted with. The VALUES still
+        # need `oos:GetSecretParameter` (scoped to `blitzlog/*`) and
+        # `kms:GetSecretValue` (scoped to the one CMK).
+        Sid    = "AllowOOSParameterList"
+        Effect = "Allow"
+        Action = [
+          "oos:ListSecretParameters",
+        ]
+        Resource = [
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/*",
         ]
       },
       {
