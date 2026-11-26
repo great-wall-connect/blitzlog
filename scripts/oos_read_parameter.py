@@ -60,10 +60,13 @@ def main() -> int:
         return 1
 
     key_id = param.get("KeyId") or ""
-    print(
-        f"    KeyId: {key_id or 'none (the OOS default service CMK)'}",
-        file=sys.stderr,
-    )
+    # A PLAIN parameter ("Type": "String") is not KMS-encrypted and
+    # has no key to name; only an encrypted one does.
+    if key_id or param.get("Type") != "String":
+        print(
+            f"    KeyId: {key_id or 'none (the OOS default service CMK)'}",
+            file=sys.stderr,
+        )
     sys.stdout.write(param.get("Value") or "")
     return 0
 

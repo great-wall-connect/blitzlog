@@ -454,6 +454,27 @@ jobs:
             } >> "$GITHUB_ENV"
           done
 
+          # The CMK that encrypts the OOS parameters is owned by the
+          # bootstrap stack, which publishes its id as a PLAIN OOS
+          # parameter. Reading it here (rather than hard-coding the
+          # id) is what keeps the grant honest: a key that is
+          # recreated would otherwise leave every reader pointing at
+          # a key that no longer exists.
+          if ! kms_key_id=$(aliyun oos GetParameter \
+            --Name "blitzlog/shared/kms-key-id" \
+            --region "$ALICLOUD_REGION" \
+            | python3 scripts/oos_read_parameter.py); then
+            echo "FATAL: the OOS parameter blitzlog/shared/kms-key-id could not be read." >&2
+            exit 1
+          fi
+          if [ -z "$kms_key_id" ]; then
+            echo "FATAL: blitzlog/shared/kms-key-id is empty." >&2
+            echo "  Run 'cd infra/alicloud/bootstrap && terraform apply' first —" >&2
+            echo "  the bootstrap stack owns the CMK and publishes its id." >&2
+            exit 1
+          fi
+          echo "TF_VAR_kms_key_id=${kms_key_id}" >> "$GITHUB_ENV"
+
           # The OSS bucket names are not secrets — they are plain
           # TF variables the operator configures. They come from the
           # repo variables so the runner does not need a tfvars file.
@@ -562,6 +583,42 @@ jobs:
           # between plan and apply). -no-color keeps the log
           # readable in the GH Actions UI.
           terraform plan -no-color -input=false -out=tfplan
+
+      - name: Fail if an OOS parameter would be replaced
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+        run: |
+          set -euo pipefail
+          # A parameter's encryption key is fixed at creation, so
+          # moving one onto the CMK means recreating it — and the
+          # provider reads an OOS secret parameter back WITHOUT
+          # decryption, so the value in the terraform state is always
+          # EMPTY. A replacement would therefore re-create the
+          # parameter with an empty value and wipe the secret.
+          #
+          # The values only exist in OOS, so they are re-keyed THERE
+          # (scripts/migrate_oos_parameters_to_cmk.sh) — never by an
+          # apply. This step refuses the apply until that is done.
+          terraform show -json tfplan > plan.json
+          replaced=$(jq -r '
+            [ .resource_changes[]?
+              | select(.type | startswith("alicloud_oos_"))
+              | select(.change.actions | length > 1)
+              | .address
+            ] | join("\n")
+          ' plan.json)
+          if [ -n "$replaced" ]; then
+            echo "FATAL: these OOS parameters would be REPLACED:" >&2
+            echo "$replaced" >&2
+            echo "  The provider reads an OOS parameter back WITHOUT" >&2
+            echo "  decryption, so a replacement re-creates it with an" >&2
+            echo "  EMPTY value and wipes the secret." >&2
+            echo "  Re-key them first (the values live in OOS):" >&2
+            echo "    scripts/migrate_oos_parameters_to_cmk.sh <name> ..." >&2
+            exit 1
+          fi
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v7

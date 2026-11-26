@@ -225,7 +225,7 @@ resource "alicloud_fcv3_function" "handler" {
     # one parameter itself — the per-issue ephemeral GitHub token —
     # so it needs the key id at runtime (lambda/_env.py's
     # `_aliyun_kms_key_id()`).
-    ALIYUN_KMS_KEY_ID = alicloud_kms_key.secrets.id
+    ALIYUN_KMS_KEY_ID = var.kms_key_id
   }
 
   depends_on = [

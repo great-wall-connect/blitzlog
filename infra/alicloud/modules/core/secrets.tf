@@ -42,7 +42,7 @@ resource "alicloud_oos_secret_parameter" "github_app_id" {
   secret_parameter_name = local.oos_github_app_id_name
   value                 = var.github_app_id
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "GitHub App ID (env: ${var.environment})"
 
   lifecycle {
@@ -54,7 +54,7 @@ resource "alicloud_oos_secret_parameter" "github_app_private_key" {
   secret_parameter_name = local.oos_github_app_private_key_name
   value                 = var.github_app_private_key
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "GitHub App private key (base64 encoded, env: ${var.environment})"
 
   lifecycle {
@@ -66,7 +66,7 @@ resource "alicloud_oos_secret_parameter" "github_app_installation_id" {
   secret_parameter_name = local.oos_github_app_installation_name
   value                 = var.github_app_installation_id
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "GitHub App installation ID (env: ${var.environment})"
 
   lifecycle {
@@ -78,7 +78,7 @@ resource "alicloud_oos_secret_parameter" "github_webhook_secret" {
   secret_parameter_name = local.oos_github_webhook_secret_name
   value                 = var.github_webhook_secret
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "GitHub webhook HMAC secret (env: ${var.environment})"
 
   lifecycle {
@@ -90,7 +90,7 @@ resource "alicloud_oos_secret_parameter" "opencode_api_key" {
   secret_parameter_name = local.oos_opencode_api_key_name
   value                 = var.opencode_api_key
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "OpenCode inference provider API key (env: ${var.environment})"
 
   lifecycle {
@@ -102,7 +102,7 @@ resource "alicloud_oos_secret_parameter" "stt_api_url" {
   secret_parameter_name = local.oos_stt_api_url_name
   value                 = var.stt_api_url
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "Whisper-compatible STT endpoint exposed by whisper-stt-shim on the EC2 instance (env: ${var.environment})"
 
   lifecycle {
@@ -114,7 +114,7 @@ resource "alicloud_oos_secret_parameter" "stt_api_key" {
   secret_parameter_name = local.oos_stt_api_key_name
   value                 = var.stt_api_key
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "API key passed through to the STT provider (env: ${var.environment})"
 
   lifecycle {
@@ -126,7 +126,7 @@ resource "alicloud_oos_secret_parameter" "stt_model" {
   secret_parameter_name = local.oos_stt_model_name
   value                 = var.stt_model
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "whisper.cpp model name (e.g. base.en, tiny.en, small.en) (env: ${var.environment})"
 
   lifecycle {
@@ -138,7 +138,7 @@ resource "alicloud_oos_secret_parameter" "stt_language" {
   secret_parameter_name = local.oos_stt_language_name
   value                 = var.stt_language
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "Whisper language hint passed to whisper-cli (empty = auto-detect) (env: ${var.environment})"
 
   lifecycle {
@@ -150,7 +150,7 @@ resource "alicloud_oos_secret_parameter" "stt_models_bucket" {
   secret_parameter_name = local.oos_stt_models_bucket_name
   value                 = data.alicloud_oss_buckets.stt_models.buckets[0].name
   type                  = "Secret"
-  key_id                = alicloud_kms_key.secrets.id
+  key_id                = var.kms_key_id
   description           = "OSS bucket hosting whisper.cpp model files for ECS boot-time download (env: ${var.environment})"
 
   lifecycle {

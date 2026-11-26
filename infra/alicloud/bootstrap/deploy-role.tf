@@ -146,20 +146,37 @@ resource "alicloud_ram_policy" "deploy" {
         ]
       },
       {
+        # The published id of the CMK (`blitzlog/shared/kms-key-id`) is
+        # a PLAIN OOS parameter — the key id is not a secret, and it
+        # is read with `oos:GetParameter` rather than
+        # `oos:GetSecretParameter`.
+        Sid    = "AllowSharedParameterRead"
+        Effect = "Allow"
+        Action = [
+          "oos:GetParameter",
+        ]
+        Resource = [
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:parameter/blitzlog/shared/*",
+        ]
+      },
+      {
         # The CMK that encrypts the OOS parameters. Default master
         # keys are free of charge — KMS bills for *instances*, and
         # this deployment does not buy one.
-        Sid    = "AllowKMSKeyManagement"
+        #
+        # The key is created by THIS stack, so it can be named: the
+        # grant is on the one key, not on `key/*`. The key-management
+        # verbs (CreateKey / DeleteKey / CreateGrant) are gone with
+        # it — the per-env stacks create no keys, and a CI credential
+        # that can rotate or delete any key in the account is a
+        # blast radius nobody needs.
+        Sid    = "AllowKMSKeyDecrypt"
         Effect = "Allow"
         Action = [
-          "kms:CreateKey",
-          "kms:DeleteKey",
-          "kms:DescribeKey",
-          "kms:CreateGrant",
-          "kms:ListGrants",
+          "kms:Decrypt",
         ]
         Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/*",
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}",
         ]
       },
       {
@@ -181,23 +198,6 @@ resource "alicloud_ram_policy" "deploy" {
         ]
         Resource = [
           "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/*",
-        ]
-      },
-      {
-        # The parameters are encrypted with a customer CMK as well, so
-        # reading one additionally needs `kms:Decrypt` on that key.
-        # The per-env stack creates the CMK, so this stack cannot
-        # name it — hence `key/*`. That is not a meaningful widening:
-        # this role already holds `kms:CreateKey` / `kms:DeleteKey` /
-        # `kms:CreateGrant` on `key/*`, so it can create a key and
-        # grant itself decrypt on it.
-        Sid    = "AllowKMSKeyDecrypt"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-        ]
-        Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/*",
         ]
       },
       {

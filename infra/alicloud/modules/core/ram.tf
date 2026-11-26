@@ -250,7 +250,7 @@ resource "alicloud_ram_policy" "lambda_policy" {
         # `oos:TLSVersion`, the API prose mentions a KMS action), so
         # the grant is here: narrowly scoped to the one CMK, and
         # harmless if OOS decrypts with its own credentials.
-        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}"
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${var.kms_key_id}"
       },
       {
         Effect = "Allow"
@@ -451,7 +451,7 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
         ]
         # Same reasoning as the FC role's grant: the parameters are
         # encrypted with the per-env CMK.
-        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}"
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${var.kms_key_id}"
       },
       {
         Effect = "Allow"

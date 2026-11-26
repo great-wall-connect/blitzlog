@@ -9,6 +9,11 @@ variable "owner_login" {
   type        = string
 }
 
+variable "kms_key_id" {
+  description = "ID of the customer master key that encrypts the OOS parameters. The key is owned by the bootstrap stack — copy it from 'cd infra/alicloud/bootstrap && terraform output kms_key_id'."
+  type        = string
+}
+
 variable "git_author_name" {
   description = "Git author name every agent run on this pool uses for its commits (ECS runtime + GHA worker). Defaults to var.owner_login when unset. The default is the auditable operator identity for the pool — overrides should be rare. To attribute commits to a bot (e.g. for the canonical [skip ci] release-bot carve-out), set this to the bot's name and set git_author_email to the matching <login>@users.noreply.github.com form. Empty disables the audit-trail identity entirely (commits fall back to root@<hostname> on ECS / runner hostname on GHA)."
   type        = string

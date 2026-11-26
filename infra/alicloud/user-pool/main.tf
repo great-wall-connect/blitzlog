@@ -104,6 +104,7 @@ resource "alicloud_oos_secret_parameter" "telegram_bot_pool" {
   secret_parameter_name = "${local.user_root}/telegram/pool/${each.key}"
   value                 = var.telegram_bot_tokens[each.key]
   type                  = "Secret"
+  key_id                = var.kms_key_id
   description           = "Telegram bot token for ${var.owner_login} pool bot: ${each.key}"
 }
 
@@ -111,6 +112,7 @@ resource "alicloud_oos_secret_parameter" "telegram_allowed_user_id" {
   secret_parameter_name = "${local.user_root}/telegram/allowed-user-id"
   value                 = var.telegram_allowed_user_id
   type                  = "Secret"
+  key_id                = var.kms_key_id
   description           = "Telegram user ID allowed to interact with ${var.owner_login}'s bots"
 }
 
@@ -120,6 +122,7 @@ resource "alicloud_oos_secret_parameter" "local_llm" {
   secret_parameter_name = "${local.user_root}/local-llm/${each.value}"
   value                 = local.local_llm_param_values[each.value]
   type                  = "Secret"
+  key_id                = var.kms_key_id
   description           = "Local LLM config for ${var.owner_login}: ${each.value}"
 }
 
@@ -135,6 +138,7 @@ resource "alicloud_oos_secret_parameter" "git_author_name" {
   secret_parameter_name = "${local.user_root}/git-author/name"
   value                 = local.git_author_name_resolved
   type                  = "Secret"
+  key_id                = var.kms_key_id
   description           = "Git author name for ${var.owner_login}'s agent commits (issue #119)"
 
   lifecycle {
@@ -152,6 +156,7 @@ resource "alicloud_oos_secret_parameter" "git_author_email" {
   secret_parameter_name = "${local.user_root}/git-author/email"
   value                 = local.git_author_email_resolved
   type                  = "Secret"
+  key_id                = var.kms_key_id
   description           = "Git author email for ${var.owner_login}'s agent commits (issue #119)"
 
   lifecycle {

@@ -1218,16 +1218,19 @@ class TestAlicloudUserPoolStack(unittest.TestCase):
             "the user-pool parameters must not be env-prefixed",
         )
 
-    def test_no_kms_key_is_named(self):
-        """The per-env CMK cannot encrypt the pool: the namespace is
-        env-independent, so a CMK-encrypted parameter would be
-        readable by only one of dev/prod. OOS encrypts every parameter
-        with its own key when no key is named."""
-        self.assertNotIn(
-            "key_id",
+    def test_the_pool_parameters_use_the_shared_cmk(self):
+        """One CMK encrypts every parameter in the account.
+
+        The pool namespace is env-independent, which used to rule out
+        a CMK-encrypted parameter while the CMK was per-env (only one
+        of dev/prod could have read it). The key is account-wide now,
+        so the pool is encrypted with it like everything else — and
+        the readers already decrypt it.
+        """
+        self.assertIn(
+            "key_id                = var.kms_key_id",
             self.main_tf,
-            "the pool parameters must not name a KMS key — the per-env CMK "
-            "cannot encrypt an env-independent namespace",
+            "the pool parameters must be encrypted with the shared CMK",
         )
 
     def test_the_git_author_values_are_operator_owned(self):
@@ -1475,7 +1478,7 @@ class TestAlicloudOosParameterStore(unittest.TestCase):
                 "clear",
             )
             self.assertIn(
-                "key_id                = alicloud_kms_key.secrets.id",
+                "key_id                = var.kms_key_id",
                 body,
                 f"the {name} parameter must be encrypted with the per-env " "CMK",
             )
