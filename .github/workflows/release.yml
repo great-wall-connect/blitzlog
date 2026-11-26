@@ -1687,7 +1687,7 @@ jobs:
             -backend-config="region=${ALICLOUD_REGION}"
           terraform plan -no-color -input=false -out=tfplan 2>&1 | tee plan.log
           "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
-          terraform apply -no-color -input=false -auto-approve tfplan
+          terraform apply -no-color -input=false tfplan
 
       - name: terraform init
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
