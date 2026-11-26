@@ -89,8 +89,10 @@ resource "alicloud_ram_policy" "deploy" {
           "fc:UpdateFunctionTrigger",
           "fc:GetFunctionTrigger",
           "fc:ListFunctionTriggers",
-          # The provider reads a trigger when it refreshes one.
+          # The provider reads a trigger when it refreshes one, and
+          # updates it when the function's code changes.
           "fc:GetTrigger",
+          "fc:UpdateTrigger",
           "apigateway:CreateApi",
           "apigateway:DeleteApi",
           "apigateway:ModifyApi",
