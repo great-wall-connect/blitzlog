@@ -163,6 +163,23 @@ resource "alicloud_ram_policy" "deploy" {
         ]
       },
       {
+        # Decrypting the OOS parameters. OOS encrypts every parameter
+        # with its OWN service key (`secret/oos...`), not (only) the
+        # CMK named on the parameter, so reading one fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
+        # caller can decrypt that key too. It is a service-managed
+        # key, so there is no id to scope to — the `secret/oos*`
+        # prefix is.
+        Sid    = "AllowOOSParameterDecrypt"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+        ]
+        Resource = [
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*",
+        ]
+      },
+      {
         # The OSS buckets + the function-code object the core module
         # writes (`alicloud_oss_bucket_object.fc_code`).
         Sid    = "AllowOSSManagement"

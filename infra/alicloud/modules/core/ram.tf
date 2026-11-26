@@ -255,6 +255,20 @@ resource "alicloud_ram_policy" "lambda_policy" {
       {
         Effect = "Allow"
         Action = [
+          "kms:Decrypt",
+        ]
+        # OOS encrypts every parameter with its OWN service key
+        # (`secret/oos...`), not (only) the CMK named on the
+        # parameter, so reading one fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
+        # caller can decrypt that key too. It is a service-managed
+        # key, so there is no id to scope to — the `secret/oos*`
+        # prefix is.
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "oss:GetObject",
         ]
         # The FC function fetches its own code zip from OSS at cold
@@ -430,6 +444,20 @@ resource "alicloud_ram_policy" "ecs_agent_policy" {
         # Same reasoning as the FC role's grant: the parameters are
         # encrypted with the per-env CMK.
         Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+        ]
+        # OOS encrypts every parameter with its OWN service key
+        # (`secret/oos...`), not (only) the CMK named on the
+        # parameter, so reading one fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission` unless the
+        # caller can decrypt that key too. It is a service-managed
+        # key, so there is no id to scope to — the `secret/oos*`
+        # prefix is.
+        Resource = "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos*"
       },
       {
         Effect = "Allow"
