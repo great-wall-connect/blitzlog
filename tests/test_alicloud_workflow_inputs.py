@@ -170,5 +170,38 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
                 )
 
 
+class TestAlicloudCliKnowsTheOosProduct(unittest.TestCase):
+    """The `oos` product post-dates the CLI 3.0.x line.
+
+    `aliyun oos GetSecretParameter` against CLI 3.0.6 answers
+    "ERROR: 'oos' is not a valid command or product" — and the deploy
+    legs swallowed the CLI's stderr, so the missing parameter it then
+    reported was not missing at all.
+    """
+
+    # Every place that installs the aliyun CLI for the Alicloud path.
+    SOURCES = (
+        RELEASE_YML,
+        APPLY_DEV_YML,
+        REPO_ROOT / "infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh",
+        REPO_ROOT / "lambda/scripts/alicloud/_common.py",
+    )
+
+    def test_no_source_installs_a_cli_without_the_oos_product(self):
+        for path in self.SOURCES:
+            text = path.read_text()
+            for version in re.findall(
+                r"aliyun-cli-linux-([0-9]+\.[0-9]+\.[0-9]+)", text
+            ):
+                major, minor, patch = (int(p) for p in version.split("."))
+                self.assertGreaterEqual(
+                    (major, minor, patch),
+                    (3, 5, 0),
+                    f"{path.name} installs aliyun CLI {version}, which has no "
+                    "`oos` product — every `aliyun oos ...` call fails with "
+                    "'not a valid command or product'",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

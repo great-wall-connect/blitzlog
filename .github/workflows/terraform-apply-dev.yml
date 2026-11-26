@@ -364,7 +364,7 @@ jobs:
           if ! command -v aliyun >/dev/null 2>&1; then
             cd /tmp
             curl -fsSL -o aliyun-cli.tgz \
-              https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.6-amd64.tgz
+              https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
             tar -xzf aliyun-cli.tgz
             sudo mv aliyun /usr/local/bin/aliyun
             sudo chmod +x /usr/local/bin/aliyun
@@ -400,7 +400,7 @@ jobs:
             value=$(aliyun oos GetSecretParameter \
               --Name "$name" \
               --WithDecryption true \
-              --region "$ALICLOUD_REGION" 2>/dev/null \
+              --region "$ALICLOUD_REGION" \
               | python3 -c 'import sys,json; print(json.load(sys.stdin)["Parameter"]["Value"], end="")' 2>/dev/null || true)
             if [ -z "$value" ]; then
               echo "FATAL: the OOS parameter ${name} is missing or empty." >&2

@@ -764,7 +764,7 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
             "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
         )
         self.assertIn(
-            "aliyun-cli-linux-3.0.6-amd64.tgz",
+            "aliyun-cli-linux-3.5.4-amd64.tgz",
             self.system,
             "the amd64 aliyun CLI tarball must be selected on x86 hosts",
         )
