@@ -201,10 +201,15 @@ resource "alicloud_ram_policy" "packer_build" {
           "oos:UpdateSecretParameter",
           "oos:GetSecretParameter",
           "oos:DeleteSecretParameter",
+          # The published id of the CMK the parameters are encrypted
+          # with — a PLAIN OOS parameter, so the verb is
+          # `oos:GetParameter` (infra/alicloud/bootstrap/kms.tf).
+          "oos:GetParameter",
         ]
         Resource = [
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/dev/agent-ami-id-ecs-ubuntu",
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/prod/agent-ami-id-ecs-ubuntu",
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:parameter/blitzlog/shared/kms-key-id",
         ]
       },
       {

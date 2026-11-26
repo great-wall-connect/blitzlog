@@ -573,6 +573,25 @@ class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
             "the OOS parameter name must not carry a leading slash",
         )
 
+    def test_publish_encrypts_with_the_shared_cmk(self):
+        """The published image id must sit under the account's CMK.
+
+        Without a key it lands on OOS's default service key, and the
+        readers would need a grant on that key instead of the CMK
+        they already have — a grant that only exists for the keys the
+        deployment knows about.
+        """
+        self.assertIn(
+            "blitzlog/shared/kms-key-id",
+            self.publish,
+            "the publish script must read the CMK id the bootstrap " "stack publishes",
+        )
+        self.assertIn(
+            '--KeyId "$KMS_KEY_ID"',
+            self.publish,
+            "the published parameter must be encrypted with the shared " "CMK",
+        )
+
     def test_publish_does_not_write_to_ssm(self):
         self.assertNotIn(
             "aws ssm put-parameter",
