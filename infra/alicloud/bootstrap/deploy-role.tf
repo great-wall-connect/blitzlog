@@ -293,6 +293,9 @@ resource "alicloud_ram_policy" "deploy" {
           "ram:GetRole",
           "ram:ListRoles",
           "ram:CreatePolicy",
+          # The provider creates a new policy version when it updates
+          # a policy — the RAM policy cap is 5 versions per policy.
+          "ram:CreatePolicyVersion",
           "ram:DeletePolicy",
           "ram:UpdatePolicy",
           "ram:GetPolicy",
