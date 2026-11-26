@@ -1489,7 +1489,7 @@ jobs:
 
           # No leading slash: OOS parameter names are
           # `blitzlog/<env>/...` (see
-          # infra/alicloud/modules/core/locals.tf).
+          # infra/alicloud/bootstrap/secrets.tf).
           OOS_ROOT="blitzlog/${BLITZLOG_ENV}"
 
           # The `aliyun` CLI is not installed on the runner by
@@ -1506,32 +1506,24 @@ jobs:
             rm -f aliyun-cli.tgz
           fi
 
-          # The secret names the core module provisions, mapped to
-          # the TF variable each one feeds. The AWS-side list is the
-          # same set of TF variables; see the SSM step above.
-          #   github-app/id               -> github_app_id
-          #   github-app/private-key      -> github_app_private_key
-          #   github-app/installation-id  -> github_app_installation_id
-          #   github-webhook/secret       -> github_webhook_secret
-          #   opencode/api-key            -> opencode_api_key
-          #   stt/api-key                 -> stt_api_key
-          #   stt/model                   -> stt_model
-          #   stt/language                -> stt_language
-          #   stt/models-bucket           -> stt_models_bucket_name
-          declare -a OOS_PARAMS=(
-            "github-app/id"
-            "github-app/private-key"
-            "github-app/installation-id"
-            "github-webhook/secret"
-            "opencode/api-key"
-            "stt/api-key"
-            "stt/model"
-            "stt/language"
-            "stt/models-bucket"
+          # The deploy-time parameters, created by the bootstrap stack
+          # (infra/alicloud/bootstrap/secrets.tf). The leaf names map
+          # 1:1 onto the per-env stacks' TF variables — hyphens
+          # become underscores — so no mapping table is needed here.
+          declare -a OOS_LEAVES=(
+            "github-app-id"
+            "github-app-private-key"
+            "github-app-installation-id"
+            "github-webhook-secret"
+            "opencode-api-key"
+            "stt-api-key"
+            "stt-model"
+            "stt-language"
+            "stt-models-bucket-name"
           )
 
-          for secret in "${OOS_PARAMS[@]}"; do
-            name="${OOS_ROOT}/${secret}"
+          for leaf in "${OOS_LEAVES[@]}"; do
+            name="${OOS_ROOT}/${leaf}"
             # The CLI answers an API error with a JSON document on
             # stdout and a ZERO exit code, so its output cannot be
             # trusted to be a successful response — a caller that
@@ -1554,33 +1546,18 @@ jobs:
             fi
             if [ -z "$value" ]; then
               echo "FATAL: the OOS parameter ${name} is missing or empty." >&2
-              echo "  Run 'cd infra/alicloud/dev && terraform apply' first to" >&2
-              echo "  create the parameter, then set its real value with:" >&2
+              echo "  The deploy-time parameters are created by the" >&2
+              echo "  bootstrap stack:" >&2
+              echo "    cd infra/alicloud/bootstrap && terraform apply" >&2
+              echo "  then set the real value with:" >&2
               echo "    aliyun oos UpdateSecretParameter --Name ${name} --Value <real> --region $ALICLOUD_REGION" >&2
+              echo "  or copy the whole set across with:" >&2
+              echo "    scripts/sync_oos_parameters.sh --to-deploy ${BLITZLOG_ENV}" >&2
               exit 1
             fi
-            # The leaf name maps to the TF variable: the last
-            # path segment with hyphens replaced by underscores,
-            # EXCEPT for the two whose TF variable name differs from
-            # the leaf (`github-app/id` -> github_app_id,
-            # `github-app/private-key` -> github_app_private_key,
-            # `github-app/installation-id` -> github_app_installation_id,
-            # `github-webhook/secret` -> github_webhook_secret,
-            # `opencode/api-key` -> opencode_api_key,
-            # `stt/api-key` -> stt_api_key,
-            # `stt/models-bucket` -> stt_models_bucket_name).
-            case "$secret" in
-              github-app/id)              var=github_app_id ;;
-              github-app/private-key)     var=github_app_private_key ;;
-              github-app/installation-id) var=github_app_installation_id ;;
-              github-webhook/secret)      var=github_webhook_secret ;;
-              opencode/api-key)           var=opencode_api_key ;;
-              stt/api-key)                var=stt_api_key ;;
-              stt/model)                  var=stt_model ;;
-              stt/language)               var=stt_language ;;
-              stt/models-bucket)          var=stt_models_bucket_name ;;
-              *) echo "FATAL: unhandled OOS parameter ${secret}" >&2; exit 1 ;;
-            esac
+            # The leaf name IS the TF variable name, with hyphens
+            # replaced by underscores.
+            var="${leaf//-/_}"
             # Heredoc form so multi-line PEM private keys survive.
             {
               echo "TF_VAR_${var}<<EOF"

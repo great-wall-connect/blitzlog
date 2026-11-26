@@ -11,3 +11,34 @@ alicloud_region = "cn-hongkong"
 # Globally unique OSS bucket names (same constraint as S3).
 agent_logs_bucket_name = "blitzlog-bootstrap-agent-logs"
 stt_models_bucket_name = "blitzlog-bootstrap-stt-models"
+
+# The deploy-time values the CI reads, per env. The leaf names are the
+# bootstrap's OOS leaves (infra/alicloud/bootstrap/secrets.tf) and map
+# 1:1 onto the per-env stacks' TF variables:
+#
+#   github-app-private-key -> github_app_private_key
+#
+# AWS analogue: infra/aws/bootstrap/terraform.{dev,prod}.auto.tfvars.example.
+#
+# A leaf left out is not created: the deploy leg reports it as
+# missing and says how to set it. On an account that already holds
+# the values (they live in the per-env stacks' parameters), copy them
+# across instead of typing them here:
+#
+#   scripts/sync_oos_parameters.sh --to-deploy dev
+#
+dev = {
+  # "github-app-id"              = ""
+  # "github-app-private-key"     = ""
+  # "github-app-installation-id" = ""
+  # "github-webhook-secret"      = ""
+  # "opencode-api-key"           = ""
+}
+
+prod = {
+  # "github-app-id"              = ""
+  # "github-app-private-key"     = ""
+  # "github-app-installation-id" = ""
+  # "github-webhook-secret"      = ""
+  # "opencode-api-key"           = ""
+}

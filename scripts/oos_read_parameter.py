@@ -40,6 +40,15 @@ def _describe_error(doc: dict) -> str:
 
 def main() -> int:
     raw = sys.stdin.read()
+    if not raw.strip():
+        # The CLI answers an API error on stderr and exits non-zero,
+        # so there is nothing on stdout to parse — its own error is
+        # already in the log.
+        print(
+            "the aliyun CLI returned no output — its error is above",
+            file=sys.stderr,
+        )
+        return 1
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:

@@ -83,6 +83,11 @@ if ! command -v "$ALICLOUD_CLI" >/dev/null 2>&1; then
 fi
 
 WORK_DIR="$(mktemp -d)"
+# The values are backed up OUTSIDE the work directory: the script
+# deletes a parameter before recreating it, and a crash in between
+# must not take the only copy of a secret with it.
+BACKUP_DIR="${BLITZLOG_BACKUP_DIR:-$WORK_DIR/backups}"
+mkdir -p "$BACKUP_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # The value of a parameter can be a multi-line PEM, so it is written
@@ -99,7 +104,16 @@ import json
 import sys
 
 path = sys.argv[1]
-doc = json.load(sys.stdin)
+raw = sys.stdin.read()
+if not raw.strip():
+    # The CLI answers an API error on stderr and exits non-zero, so
+    # there is nothing on stdout to parse — its own error is already
+    # in the log.
+    sys.exit("the aliyun CLI returned no output — its error is above")
+try:
+    doc = json.loads(raw)
+except ValueError as exc:
+    sys.exit("the aliyun CLI did not return JSON: %s" % exc)
 param = doc.get("Parameter")
 if param is None:
     code = doc.get("error_code") or doc.get("ErrorCode") or "unknown"
@@ -122,7 +136,16 @@ CMK_ID="$("$ALICLOUD_CLI" oos GetParameter \
 import json
 import sys
 
-doc = json.load(sys.stdin)
+raw = sys.stdin.read()
+if not raw.strip():
+    # The CLI answers an API error on stderr and exits non-zero, so
+    # there is nothing on stdout to parse — its own error is already
+    # in the log.
+    sys.exit("the aliyun CLI returned no output — its error is above")
+try:
+    doc = json.loads(raw)
+except ValueError as exc:
+    sys.exit("the aliyun CLI did not return JSON: %s" % exc)
 param = doc.get("Parameter")
 if param is None:
     code = doc.get("error_code") or doc.get("ErrorCode") or "unknown"
@@ -162,6 +185,12 @@ for name in "${NAMES[@]}"; do
     if [ "$APPLY" -eq 0 ]; then
         continue
     fi
+
+    # Back the value up before touching the parameter.
+    backup="$BACKUP_DIR/${name//\//_}"
+    cp "$value_file" "$backup"
+    chmod 600 "$backup"
+    echo "    backed up to $backup"
 
     # The value goes through the shell so it can be multi-line; a
     # trailing newline is dropped (it carries no meaning for a PEM

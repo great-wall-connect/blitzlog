@@ -541,18 +541,19 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
         )
 
     def test_oos_step_reads_the_parameter_paths(self):
-        """The OOS parameter paths mirror the SSM paths, so the
-        mapping from leaf name to TF variable is the same."""
+        """The deploy-time parameters are the bootstrap's, under
+        `blitzlog/<env>/<leaf>` — the same leaf names the AWS side
+        uses for its SSM parameters."""
         for secret in (
-            "github-app/id",
-            "github-app/private-key",
-            "github-app/installation-id",
-            "github-webhook/secret",
-            "opencode/api-key",
-            "stt/api-key",
-            "stt/model",
-            "stt/language",
-            "stt/models-bucket",
+            "github-app-id",
+            "github-app-private-key",
+            "github-app-installation-id",
+            "github-webhook-secret",
+            "opencode-api-key",
+            "stt-api-key",
+            "stt-model",
+            "stt-language",
+            "stt-models-bucket-name",
         ):
             self.assertIn(
                 f'"{secret}"',
@@ -563,7 +564,12 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
     def test_oos_step_covers_every_required_secret_variable(self):
         """Each secret maps to a TF variable the stack declares. A
         missing mapping means the plan prompts for a value that CI
-        cannot supply."""
+        cannot supply.
+
+        The leaf name IS the variable name with hyphens replaced by
+        underscores, so the mapping is mechanical — a leaf that does
+        not map onto a declared variable would be a plan that prompts.
+        """
         for var in (
             "github_app_id",
             "github_app_private_key",
@@ -576,10 +582,16 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
             "stt_models_bucket_name",
         ):
             self.assertIn(
-                f"var={var}",
+                var.replace("_", "-"),
                 self.text,
-                f"the OOS render step must map a parameter to {var}",
+                f"the OOS render step must read the parameter behind {var}",
             )
+        self.assertIn(
+            'var="${leaf//-/_}"',
+            self.text,
+            "the leaf name must map onto the TF variable mechanically — "
+            "a mapping table is one more thing to keep in step",
+        )
 
     def test_plan_does_not_hard_fail_on_a_missing_tfvars_file(self):
         """The pre-#125 Alicloud plan FATAL'd when the tfvars file
