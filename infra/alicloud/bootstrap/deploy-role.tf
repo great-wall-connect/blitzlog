@@ -101,6 +101,9 @@ resource "alicloud_ram_policy" "deploy" {
           "apigateway:DeleteApp",
           "apigateway:ModifyApp",
           "apigateway:DescribeApps",
+          # The bootstrap stack opens the API Gateway product — the
+          # provider's data source activates it when it is read.
+          "apigateway:OpenApiGatewayService",
           "mns:CreateQueue",
           "mns:DeleteQueue",
           "mns:ModifyQueue",
@@ -123,6 +126,10 @@ resource "alicloud_ram_policy" "deploy" {
           # refresh.
           "ecs:DescribeSecurityGroupAttribute",
           "ecs:DescribeRegions",
+          # The bootstrap stack creates the MNS subscription (the
+          # service itself is opened from the console).
+          "bssopenapi:CreateInstance",
+          "bssopenapi:QueryInstance",
           "ecs:CreateSecurityGroup",
           "ecs:DeleteSecurityGroup",
           "ecs:AuthorizeSecurityGroupIngress",

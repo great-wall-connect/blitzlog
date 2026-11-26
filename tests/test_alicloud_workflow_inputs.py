@@ -203,24 +203,6 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
                 f"{path.name} must apply the bootstrap stack against its " "own state",
             )
 
-    def test_a_failed_plan_explains_its_ram_denials(self):
-        """A RAM denial names the ACTION but not the resource the
-        check ran against — that is in a base64 blob the error never
-        mentions, and it is the fact a grant is scoped against."""
-        for path in self.WORKFLOWS:
-            text = path.read_text()
-            self.assertIn(
-                "Explain the RAM denials",
-                text,
-                f"{path.name} must explain a RAM denial — the action "
-                "alone does not say which resource failed",
-            )
-            self.assertIn(
-                "decode_ram_diagnostics.sh",
-                text,
-                f"{path.name} must decode the denial",
-            )
-
     def test_the_kms_key_guard_is_a_shared_script(self):
         """Both legs share one guard, so the rule cannot drift."""
         for path in self.WORKFLOWS:
@@ -234,6 +216,20 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
             (REPO_ROOT / "scripts" / "guard_kms_key_destruction.sh").exists(),
             "the guard must exist as a script both legs run",
         )
+
+    def test_the_render_steps_mask_the_values(self):
+        """Actions prints every step's environment — including the
+        values a step inherited from $GITHUB_ENV — so a secret
+        written there lands in the log of every later step, in the
+        clear. The values are masked as they are read."""
+        for path in self.WORKFLOWS:
+            text = path.read_text()
+            self.assertIn(
+                "::add-mask::",
+                text,
+                f"{path.name} must mask the values it reads — the "
+                "environment a step inherits is printed in the log",
+            )
 
     def test_the_reader_is_addressed_by_an_absolute_path(self):
         """A step that `cd`s anywhere makes a relative path resolve

@@ -240,6 +240,15 @@ jobs:
             "TF_VAR_" + ($leaf | gsub("-";"_")) + "<<EOF\n" + .Value + "\nEOF"
           ' /tmp/ssm-params.json >> "$GITHUB_ENV"
 
+          # Mask the values: Actions prints every step's environment —
+          # including the values a step inherited from $GITHUB_ENV —
+          # so a secret written there lands in the log of every later
+          # step, in the clear.
+          jq -r '.Parameters[].Value' /tmp/ssm-params.json |
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::$line"
+            done
+
       # --- Alicloud leg -----------------------------------------------------
       # Issue #126: the Alicloud dev stack is applied by the same
       # workflow when vars.BLITZLOG_PROVIDER selects it. The steps are
@@ -436,6 +445,13 @@ jobs:
             # The leaf name IS the TF variable name, with hyphens
             # replaced by underscores.
             var="${leaf//-/_}"
+            # Mask the value: Actions prints every step's
+            # environment — including the values a step inherited from
+            # $GITHUB_ENV — so a secret written there lands in the
+            # log of every later step, in the clear.
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::$line"
+            done <<< "$value"
             # Heredoc form so multi-line PEM private keys survive.
             {
               echo "TF_VAR_${var}<<EOF"
@@ -611,18 +627,6 @@ jobs:
         run: |
           set -euo pipefail
           "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
-
-      - name: Explain the RAM denials
-        if: failure() && env.BLITZLOG_PROVIDER == 'alicloud'
-        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
-        run: |
-          set -euo pipefail
-          # A RAM denial names the ACTION but not the resource the
-          # check ran against — that lives in a base64 blob the
-          # error never mentions. Decoding it is the difference
-          # between "the grant looks right" and knowing why it is
-          # not.
-          "$GITHUB_WORKSPACE/scripts/decode_ram_diagnostics.sh" plan.log || true
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v7

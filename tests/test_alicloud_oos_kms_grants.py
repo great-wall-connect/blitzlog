@@ -167,9 +167,7 @@ class TestAlicloudOosReadersCanDecryptTheServiceKey(unittest.TestCase):
 
         The resource the check ran against is in the API's
         `AccessDeniedDetail.EncodedDiagnosticMessage`; `ram
-        DecodeDiagnosticMessage` decodes it, and
-        scripts/decode_ram_diagnostics.sh does that for a failed
-        plan.
+        DecodeDiagnosticMessage` decodes it.
         """
         text = BOOTSTRAP_DEPLOY.read_text()
         for action, resource in (
