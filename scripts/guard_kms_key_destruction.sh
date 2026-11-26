@@ -25,7 +25,18 @@ if [ ! -f "$PLAN" ]; then
     exit 1
 fi
 
-terraform show -json "$PLAN" > /tmp/blitzlog-plan.json
+# `terraform show -json` loads the provider's schema, which it finds
+# next to the plan — so the check runs where the stack was
+# initialised, whatever directory the caller is in.
+PLAN_DIR="$(cd "$(dirname "$PLAN")" && pwd)"
+cd "$PLAN_DIR"
+
+if ! terraform show -json "$(basename "$PLAN")" > /tmp/blitzlog-plan.json; then
+    echo "guard_kms_key_destruction: could not read ${PLAN}." >&2
+    echo "  The plan has to be read where the stack was initialised —" >&2
+    echo "  terraform show loads the provider's schema." >&2
+    exit 1
+fi
 
 destroyed="$(jq -r '
   [ .resource_changes[]?
