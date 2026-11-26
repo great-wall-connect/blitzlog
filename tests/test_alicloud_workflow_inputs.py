@@ -90,6 +90,8 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
         }
     )
 
+    WORKFLOWS = (RELEASE_YML, APPLY_DEV_YML)
+
     @classmethod
     def setUpClass(cls):
         cls.workflows = {
@@ -178,6 +180,59 @@ class TestAlicloudWorkflowStepsGetTheirInputs(unittest.TestCase):
             problems,
             [],
             "a workflow step's script does not parse:\n  " + "\n  ".join(problems),
+        )
+
+    def test_the_ci_applies_the_bootstrap_stack(self):
+        """The bootstrap stack owns the CI's OWN RAM policies.
+
+        Without the CI applying it, every change to the grants the CI
+        needs is a round-trip through the operator: the CI fails on a
+        permission that only the stack granting it can fix, and only
+        the operator can apply that stack."""
+        for path in self.WORKFLOWS:
+            text = path.read_text()
+            self.assertIn(
+                "Apply the bootstrap stack",
+                text,
+                f"{path.name} must apply the bootstrap stack — it owns "
+                "the CI's own permissions",
+            )
+            self.assertIn(
+                "blitzlog/bootstrap.tfstate",
+                text,
+                f"{path.name} must apply the bootstrap stack against its " "own state",
+            )
+
+    def test_a_failed_plan_explains_its_ram_denials(self):
+        """A RAM denial names the ACTION but not the resource the
+        check ran against — that is in a base64 blob the error never
+        mentions, and it is the fact a grant is scoped against."""
+        for path in self.WORKFLOWS:
+            text = path.read_text()
+            self.assertIn(
+                "Explain the RAM denials",
+                text,
+                f"{path.name} must explain a RAM denial — the action "
+                "alone does not say which resource failed",
+            )
+            self.assertIn(
+                "decode_ram_diagnostics.sh",
+                text,
+                f"{path.name} must decode the denial",
+            )
+
+    def test_the_kms_key_guard_is_a_shared_script(self):
+        """Both legs share one guard, so the rule cannot drift."""
+        for path in self.WORKFLOWS:
+            text = path.read_text()
+            self.assertIn(
+                "guard_kms_key_destruction.sh",
+                text,
+                f"{path.name} must run the shared KMS-key guard",
+            )
+        self.assertTrue(
+            (REPO_ROOT / "scripts" / "guard_kms_key_destruction.sh").exists(),
+            "the guard must exist as a script both legs run",
         )
 
     def test_the_reader_is_addressed_by_an_absolute_path(self):

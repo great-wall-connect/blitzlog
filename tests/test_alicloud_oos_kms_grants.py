@@ -160,6 +160,38 @@ class TestAlicloudOosReadersCanDecryptTheServiceKey(unittest.TestCase):
                 "namespace, not against the name the list is filtered by",
             )
 
+    def test_the_ci_role_can_read_what_the_provider_refreshes(self):
+        """The provider reads a resource's attributes and its tags on
+        every refresh — so a plan needs those verbs, and each one
+        failed the deploy until it was granted.
+
+        The resource the check ran against is in the API's
+        `AccessDeniedDetail.EncodedDiagnosticMessage`; `ram
+        DecodeDiagnosticMessage` decodes it, and
+        scripts/decode_ram_diagnostics.sh does that for a failed
+        plan.
+        """
+        text = BOOTSTRAP_DEPLOY.read_text()
+        for action, resource in (
+            ("oos:ListTagResources", "secretparameter/blitzlog/*"),
+            ("ram:ListTagResources", None),
+            ("mns:GetQueueAttributes", None),
+            ("ecs:DescribeSecurityGroupAttribute", None),
+            ("oos:ListSecretParameters", "secretparameter/*"),
+        ):
+            self.assertIn(
+                action,
+                text,
+                f"the CI deploy role must hold {action} — the provider "
+                "reads it on every refresh, and the plan fails without it",
+            )
+            if resource is not None:
+                self.assertIn(
+                    resource,
+                    text,
+                    f"{action} must be scoped to {resource}",
+                )
+
     def test_the_ci_role_cannot_manage_the_oos_secrets(self):
         """The CI role reads parameters; it does not manage them."""
         text = BOOTSTRAP_DEPLOY.read_text()

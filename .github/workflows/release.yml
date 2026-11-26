@@ -1663,6 +1663,32 @@ jobs:
       # resolve to `env:/blitzlog/dev.tfstate` — an object that does
       # not exist. `prefix=` (empty) pins the object path to the key
       # itself, which is the same layout the S3 backend uses.
+      - name: Apply the bootstrap stack
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        working-directory: infra/alicloud/bootstrap
+        env:
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tf-state' }}
+        run: |
+          set -euo pipefail
+          # The bootstrap stack owns the CI's OWN RAM policies — so the
+          # CI applies it. Without that, every change to the grants
+          # the CI needs is a round-trip through the operator: the CI
+          # would fail on a permission that only the stack granting it
+          # can fix, and only the operator could apply that stack.
+          #
+          # The stack holds the shared VPC, the shared buckets and
+          # the CMK; an apply does not change them (the plan is empty
+          # for them), so this is the policies and the key's own
+          # metadata.
+          terraform init -input=false \
+            -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
+            -backend-config="key=blitzlog/bootstrap.tfstate" \
+            -backend-config="region=${ALICLOUD_REGION}"
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee plan.log
+          "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
+          terraform apply -no-color -input=false -auto-approve tfplan
+
       - name: terraform init
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
         env:
@@ -1727,42 +1753,26 @@ jobs:
           # supplied every variable. (A local `terraform.tfvars` is
           # auto-loaded by Terraform from the stack directory, so no
           # -var-file flag is needed on either path.)
-          terraform plan -no-color -input=false -out=tfplan
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee plan.log
 
       - name: Fail if the plan would destroy a KMS key
         if: env.BLITZLOG_PROVIDER == 'alicloud'
         working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
-        env:
-          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
         run: |
           set -euo pipefail
-          # Every OOS parameter is encrypted with the account's CMK.
-          # Destroying the key SCHEDULES its deletion (a seven-day
-          # window), and when it goes the parameters it encrypts can
-          # no longer be read — a week later, when nobody is looking
-          # at the plan that caused it.
-          #
-          # The key is adopted, not created: it lives in the
-          # bootstrap stack's state, so a plan that destroys one means
-          # a stack that still manages it.
-          terraform show -json tfplan > plan.json
-          destroyed=$(jq -r '
-            [ .resource_changes[]?
-              | select(.type == "alicloud_kms_key")
-              | select(.change.actions | index("delete"))
-              | .address
-            ] | join("\n")
-          ' plan.json)
-          if [ -n "$destroyed" ]; then
-            echo "FATAL: this plan would destroy a KMS key:" >&2
-            echo "$destroyed" >&2
-            echo "  The OOS parameters are encrypted with it. When the" >&2
-            echo "  key is gone they cannot be read any more." >&2
-            echo "  The key belongs to the bootstrap stack — the stack" >&2
-            echo "  that manages it should stop managing it instead:" >&2
-            echo "    terraform state rm <address>" >&2
-            exit 1
-          fi
+          "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
+
+      - name: Explain the RAM denials
+        if: failure() && env.BLITZLOG_PROVIDER == 'alicloud'
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/${{ env.BLITZLOG_ENV }}
+        run: |
+          set -euo pipefail
+          # A RAM denial names the ACTION but not the resource the
+          # check ran against — that lives in a base64 blob the
+          # error never mentions. Decoding it is the difference
+          # between "the grant looks right" and knowing why it is
+          # not.
+          "$GITHUB_WORKSPACE/scripts/decode_ram_diagnostics.sh" plan.log || true
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v7

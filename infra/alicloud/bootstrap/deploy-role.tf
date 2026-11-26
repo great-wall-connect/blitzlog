@@ -106,6 +106,8 @@ resource "alicloud_ram_policy" "deploy" {
           "mns:ModifyQueue",
           "mns:DescribeQueue",
           "mns:ListQueue",
+          # The provider reads the queue's attributes on refresh.
+          "mns:GetQueueAttributes",
           "vpc:CreateVpc",
           "vpc:DeleteVpc",
           "vpc:ModifyVpc",
@@ -117,6 +119,9 @@ resource "alicloud_ram_policy" "deploy" {
           "ecs:DescribeInstances",
           "ecs:DescribeImages",
           "ecs:DescribeSecurityGroups",
+          # The provider reads the security group's attributes on
+          # refresh.
+          "ecs:DescribeSecurityGroupAttribute",
           "ecs:DescribeRegions",
           "ecs:CreateSecurityGroup",
           "ecs:DeleteSecurityGroup",
@@ -139,6 +144,8 @@ resource "alicloud_ram_policy" "deploy" {
           "oos:GetSecretParameter",
           "oos:GetSecretParametersByPath",
           "oos:ListSecretParameterVersions",
+          # The provider reads a parameter's tags on every refresh.
+          "oos:ListTagResources",
         ]
         Resource = [
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/*",
@@ -193,6 +200,13 @@ resource "alicloud_ram_policy" "deploy" {
         Effect = "Allow"
         Action = [
           "kms:Decrypt",
+          # The bootstrap stack owns the key, and the CI applies that
+          # stack — so the CI needs the verbs its in-place changes
+          # use. Without them the deploy leg could not apply the
+          # stack that grants it its own permissions.
+          "kms:UpdateKeyDescription",
+          "kms:SetDeletionProtection",
+          "kms:DescribeKey",
         ]
         Resource = [
           "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}",
@@ -272,6 +286,11 @@ resource "alicloud_ram_policy" "deploy" {
           "ram:DetachPolicy",
           "ram:ListAttachedRolePolicies",
           "ram:PassRole",
+          # The provider reads a role's tags on every refresh.
+          "ram:ListTagResources",
+          # The decode helper turns a RAM denial into the resource
+          # the check ran against.
+          "ram:DecodeDiagnosticMessage",
         ]
         Resource = ["*"]
       },

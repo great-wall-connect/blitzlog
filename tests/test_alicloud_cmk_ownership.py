@@ -224,7 +224,10 @@ class TestTheDeployLegsUseThePublishedKeyId(unittest.TestCase):
     def test_both_refuse_to_destroy_a_kms_key(self):
         """Every OOS parameter is encrypted with the account's CMK.
         Destroying the key schedules its deletion, and a week later
-        the parameters it encrypts cannot be read any more."""
+        the parameters it encrypts cannot be read any more.
+
+        The rule lives in one script both legs run, so it cannot
+        drift."""
         for path in self.WORKFLOWS:
             text = path.read_text()
             self.assertIn(
@@ -233,10 +236,17 @@ class TestTheDeployLegsUseThePublishedKeyId(unittest.TestCase):
                 f"{path.name} must refuse an apply that would destroy a " "KMS key",
             )
             self.assertIn(
-                'select(.type == "alicloud_kms_key")',
+                "guard_kms_key_destruction.sh",
                 text,
-                f"{path.name} must check for a KMS key in the plan",
+                f"{path.name} must run the shared guard",
             )
+        guard = REPO_ROOT / "scripts" / "guard_kms_key_destruction.sh"
+        self.assertTrue(guard.exists(), "the shared guard must exist")
+        self.assertIn(
+            'select(.type == "alicloud_kms_key")',
+            guard.read_text(),
+            "the guard must look for a KMS key in the plan",
+        )
 
 
 class TestTheRekeyIsATerraformReplacement(unittest.TestCase):
