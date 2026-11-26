@@ -292,6 +292,9 @@ resource "alicloud_ram_policy" "deploy" {
           "ram:AttachPolicy",
           "ram:DetachPolicy",
           "ram:ListAttachedRolePolicies",
+          # The provider reads the policies attached to a role when it
+          # refreshes one.
+          "ram:ListPoliciesForRole",
           "ram:PassRole",
           # The provider reads a role's tags on every refresh.
           "ram:ListTagResources",
