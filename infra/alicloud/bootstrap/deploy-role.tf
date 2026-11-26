@@ -100,6 +100,7 @@ resource "alicloud_ram_policy" "deploy" {
           "apigateway:DescribeApiGroup",
           "apigateway:DescribeApi",
           "apigateway:DescribeApp",
+          "apigateway:DescribeDeployedApi",
           "apigateway:CreateApiGroup",
           "apigateway:DeleteApiGroup",
           "apigateway:ModifyApiGroup",
