@@ -95,6 +95,11 @@ resource "alicloud_ram_policy" "deploy" {
           "apigateway:DeleteApi",
           "apigateway:ModifyApi",
           "apigateway:DescribeApis",
+          # The provider reads a single group / API / app when it
+          # refreshes one — the plural verbs are not enough.
+          "apigateway:DescribeApiGroup",
+          "apigateway:DescribeApi",
+          "apigateway:DescribeApp",
           "apigateway:CreateApiGroup",
           "apigateway:DeleteApiGroup",
           "apigateway:ModifyApiGroup",
