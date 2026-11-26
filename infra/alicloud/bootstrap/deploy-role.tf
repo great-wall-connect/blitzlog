@@ -96,6 +96,9 @@ resource "alicloud_ram_policy" "deploy" {
           "apigateway:CreateApi",
           "apigateway:DeleteApi",
           "apigateway:ModifyApi",
+          # Deploying an API is what publishes it to the gateway.
+          "apigateway:DeployApi",
+          "apigateway:UndeployApi",
           "apigateway:DescribeApis",
           # The provider reads a single group / API / app when it
           # refreshes one — the plural verbs are not enough.
