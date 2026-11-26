@@ -559,7 +559,12 @@ jobs:
             -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
             -backend-config="key=blitzlog/bootstrap.tfstate" \
             -backend-config="region=${ALICLOUD_REGION}"
-          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee plan.log
+          # -refresh=false: the bootstrap stack's resources (the
+          # shared VPC, the buckets, the key) are not what the CI
+          # changes, and refreshing them would need a read verb for
+          # every tag API they carry. The plan is built on the state,
+          # which the operator's apply keeps current.
+          terraform plan -no-color -input=false -refresh=false -out=tfplan 2>&1 | tee plan.log
           "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
           terraform apply -no-color -input=false tfplan
 
