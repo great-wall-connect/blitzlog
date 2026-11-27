@@ -858,10 +858,14 @@ jobs:
 
           # The `aliyun` CLI is not installed on the runner by
           # default, and the step that resolves the bake network and
-          # the source image calls it. Install the same pinned build
-          # the baked host image uses
-          # (infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh) so
-          # the two paths cannot drift.
+          # the source image calls it.
+          #
+          # The ARM64 build: this job runs on an arm64 runner (the
+          # baked image is arm64-only), so the arm64 tarball — the
+          # same one the baked host image installs
+          # (infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh) —
+          # or the CLI cannot execute here at all ("Exec format
+          # error").
           #
           # The install runs in a subshell: a `cd` here would change
           # the step's working directory.
@@ -869,7 +873,7 @@ jobs:
             (
               cd /tmp
               curl -fsSL -o aliyun-cli.tgz \
-                https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
+                https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-arm64.tgz
               tar -xzf aliyun-cli.tgz
               sudo mv aliyun /usr/local/bin/aliyun
               sudo chmod +x /usr/local/bin/aliyun

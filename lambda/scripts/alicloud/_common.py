@@ -224,7 +224,7 @@ if ! command -v aliyun >/dev/null 2>&1; then
     cd /tmp
     case "$(uname -m)" in
         x86_64) CLI_TGZ="aliyun-cli-linux-3.5.4-amd64.tgz" ;;
-        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-latest-arm64.tgz" ;;
+        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-3.5.4-arm64.tgz" ;;
         *)
             log "ERROR: unsupported architecture $(uname -m)"
             exit 1

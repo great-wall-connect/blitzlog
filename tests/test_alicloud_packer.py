@@ -761,10 +761,10 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
     "exec format error" — and the bake's own steps fail that way,
     so the bake never completes.
 
-    Aliyun publishes no versioned arm64 aliyun CLI tarball (only the
-    floating `latest-arm64`), and the ossutil 2.x binaries are
-    published as per-arch zips whose version is read from an
-    upstream version file.
+    The ossutil 2.x binaries are published as per-arch zips whose
+    version is read from an upstream version file; the aliyun CLI
+    tarballs are published per arch too, and both are pinned so the
+    two paths cannot drift.
     """
 
     @classmethod
@@ -778,7 +778,7 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
             "the aliyun CLI install must select the tarball by " "architecture",
         )
         self.assertIn(
-            "aliyun-cli-linux-latest-arm64.tgz",
+            "aliyun-cli-linux-3.5.4-arm64.tgz",
             self.system,
             "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
         )
