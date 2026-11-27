@@ -64,17 +64,16 @@ class TestAlicloudAssistedUserData(unittest.TestCase):
         )
 
     def test_aliyun_cli_install_block_is_arch_aware(self):
-        """The aliyun CLI is also per-arch, and Aliyun publishes no
-        versioned arm64 tarball — only the floating `latest-arm64`.
-        """
+        """The aliyun CLI is per-arch, and both tarballs are pinned to
+        the same version so the paths cannot drift."""
         ud = self._render()
         self.assertIn(
-            "aliyun-cli-linux-latest-arm64.tgz",
+            "aliyun-cli-linux-3.5.4-arm64.tgz",
             ud,
             "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
         )
         self.assertIn(
-            "aliyun-cli-linux-3.0.6-amd64.tgz",
+            "aliyun-cli-linux-3.5.4-amd64.tgz",
             ud,
             "the amd64 aliyun CLI tarball must be selected on x86 hosts",
         )

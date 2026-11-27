@@ -25,3 +25,17 @@ variable "vswitch_zone_ids" {
   type        = list(string)
   default     = ["cn-hongkong-b", "cn-hongkong-c", "cn-hongkong-d"]
 }
+
+variable "dev" {
+  description = "Dev deploy-time values, keyed by the bootstrap's OOS leaf name (e.g. \"github-app-private-key\"). A leaf the operator leaves out is not created — the deploy leg then reports it as missing and says how to set it. The real values usually go in out-of-band (the parameters are operator-owned); this map is for a fresh account, where the apply is what creates them."
+  type        = map(string)
+  sensitive   = true
+  default     = {}
+}
+
+variable "prod" {
+  description = "Prod deploy-time values, keyed by the bootstrap's OOS leaf name. Same shape as `var.dev`."
+  type        = map(string)
+  sensitive   = true
+  default     = {}
+}

@@ -53,6 +53,9 @@ jobs:
       cancel-in-progress: false
     env:
       BLITZLOG_ENV: dev
+      # Issue #126: BLITZLOG_PROVIDER selects the per-cloud tree, the
+      # same way the release workflow's deploy job does.
+      BLITZLOG_PROVIDER: ${{ vars.BLITZLOG_PROVIDER || 'aws' }}
       # Issue #191: the state key moved to the shared
       # `blitzlog/<env>.tfstate` layout (same key on both clouds).
       STATE_KEY: blitzlog/dev.tfstate
@@ -103,6 +106,13 @@ jobs:
       # so the build never depends on `ensurepip._bundled`. See the
       # lambda.tf `local-exec` comment block for the rationale.
       - name: Pre-build Lambda bundle
+        env:
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+          # Issue #125: the per-cloud requirements file. The AWS
+          # bundle must NOT ship the alibaba SDKs and the Alicloud
+          # bundle must NOT ship boto3's AWS-only extras.
+          LAMBDA_REQUIREMENTS_FILE: ${{ env.BLITZLOG_PROVIDER == 'alicloud' && 'requirements-alicloud.txt' || 'requirements-aws.txt' }}
+          BUILD_DIR: ${{ env.BLITZLOG_PROVIDER == 'alicloud' && 'infra/alicloud/modules/core/build' || 'infra/aws/modules/core/build' }}
         run: |
           set -euo pipefail
           PYTHON_BIN=""
@@ -116,22 +126,24 @@ jobs:
             echo "FATAL: Python 3.12 not found. Install via 'mise install' or 'apt install python3.12'." >&2
             exit 1
           fi
-          BUILD_DIR=infra/aws/modules/core/build
-          rm -rf "$BUILD_DIR" infra/aws/modules/core/.build-venv
+          MODULE_DIR="infra/${BLITZLOG_PROVIDER}/modules/core"
+          BUILD_DIR="${MODULE_DIR}/build"
+          VENV_DIR="${MODULE_DIR}/.build-venv"
+          rm -rf "$BUILD_DIR" "$VENV_DIR"
           mkdir -p "$BUILD_DIR"
           cp -r lambda "$BUILD_DIR"/
           mkdir -p "$BUILD_DIR/lambda/packages/whisper-stt-shim"
           cp packages/whisper-stt-shim/server.py "$BUILD_DIR/lambda/packages/whisper-stt-shim/"
-          "$PYTHON_BIN" -m venv --without-pip infra/aws/modules/core/.build-venv
-          curl -sS https://bootstrap.pypa.io/get-pip.py | infra/aws/modules/core/.build-venv/bin/python3
-          # ${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} lets a future
-          # alicloud terraform-apply-dev job flip this to
-          # requirements-alicloud.txt without touching the script body.
-          # The alibaba SDKs (oss2, alibabacloud_kms20160120,
-          # alibabacloud_ecs20140526) belong to requirements-alicloud.txt
-          # and are NOT shipped to the AWS deploy.
-          infra/aws/modules/core/.build-venv/bin/pip install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
-          rm -rf infra/aws/modules/core/.build-venv
+          "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
+          curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3"
+          # ${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt} lets the
+          # Alicloud job flip this to requirements-alicloud.txt without
+          # touching the script body. The alibaba SDKs (oss2,
+          # alibabacloud_oos20190601, alibabacloud_ecs20140526) belong
+          # to requirements-alicloud.txt and are NOT shipped to the AWS
+          # deploy.
+          "$VENV_DIR/bin/pip" install --no-cache-dir -r "lambda/${LAMBDA_REQUIREMENTS_FILE:-requirements-aws.txt}" -t "$BUILD_DIR"
+          rm -rf "$VENV_DIR"
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v4
@@ -139,6 +151,7 @@ jobs:
           terraform_version: 1.17.1
 
       - name: Configure AWS credentials (OIDC) for terraform
+        if: env.BLITZLOG_PROVIDER == 'aws'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           # OIDC into the role provisioned by infra/aws/bootstrap/
@@ -172,6 +185,7 @@ jobs:
       # "GitHub App auth failed" deep inside the Lambda at
       # runtime.
       - name: Render TF_VAR_* env from SSM
+        if: env.BLITZLOG_PROVIDER == 'aws'
         env:
           BLITZLOG_ENV: dev
         run: |
@@ -226,6 +240,311 @@ jobs:
             "TF_VAR_" + ($leaf | gsub("-";"_")) + "<<EOF\n" + .Value + "\nEOF"
           ' /tmp/ssm-params.json >> "$GITHUB_ENV"
 
+          # Mask the values: Actions prints every step's environment —
+          # including the values a step inherited from $GITHUB_ENV —
+          # so a secret written there lands in the log of every later
+          # step, in the clear.
+          jq -r '.Parameters[].Value' /tmp/ssm-params.json |
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::$line"
+            done
+
+      # --- Alicloud leg -----------------------------------------------------
+      # Issue #126: the Alicloud dev stack is applied by the same
+      # workflow when vars.BLITZLOG_PROVIDER selects it. The steps are
+      # the ones the release workflow's deploy job runs (so the two
+      # paths cannot drift), minus the parts that need the release
+      # job's outputs.
+      - name: Configure Alicloud credentials (OIDC) for terraform
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        id: aliyun-credentials
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:oidc-provider/blitzlog
+          role-to-assume: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:role/blitzlog-deploy-role
+          audience: sts.aliyuncs.com
+      - name: Export Alicloud credentials for the provider and the OSS backend
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-id }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ steps.aliyun-credentials.outputs.aliyun-access-key-secret }}
+          ALIYUN_SECURITY_TOKEN: ${{ steps.aliyun-credentials.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ALIYUN_ACCESS_KEY_ID:-}" ]; then
+            echo "FATAL: the Alicloud OIDC step produced no credentials." >&2
+            echo "  Check that vars.ALICLOUD_ACCOUNT_ID is set and that the" >&2
+            echo "  Alicloud OIDC provider + blitzlog-deploy-role exist." >&2
+            exit 1
+          fi
+          {
+            echo "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALIBABA_CLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+            echo "ALICLOUD_ACCESS_KEY=${ALIYUN_ACCESS_KEY_ID}"
+            echo "ALICLOUD_SECRET_KEY=${ALIYUN_ACCESS_KEY_SECRET}"
+            echo "ALICLOUD_SECURITY_TOKEN=${ALIYUN_SECURITY_TOKEN}"
+          } >> "$GITHUB_ENV"
+
+          # The aliyun CLI does NOT read the ALIBABA_CLOUD_*
+          # environment variables for authentication — it needs a
+          # profile file, and for STS credentials that profile must be
+          # in "StsToken" mode (an "AK" profile drops the token and the
+          # API rejects the request with MissingSecurityToken). The
+          # step below reads the OOS parameters with the CLI, so
+          # without this profile every read fails and the step reports
+          # the parameter as "missing or empty" — which it is not.
+          mkdir -p "$HOME/.aliyun"
+          ALIYUN_ACCESS_KEY_ID="$ALIYUN_ACCESS_KEY_ID" \
+          ALIYUN_ACCESS_KEY_SECRET="$ALIYUN_ACCESS_KEY_SECRET" \
+          ALIYUN_SECURITY_TOKEN="$ALIYUN_SECURITY_TOKEN" \
+          ALICLOUD_REGION="${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}" \
+          python3 - <<'PY'
+          import json
+          import os
+          profile = {
+              "name": "default",
+              "mode": "StsToken",
+              "access_key_id": os.environ["ALIYUN_ACCESS_KEY_ID"],
+              "access_key_secret": os.environ["ALIYUN_ACCESS_KEY_SECRET"],
+              "sts_token": os.environ["ALIYUN_SECURITY_TOKEN"],
+              "region_id": os.environ["ALICLOUD_REGION"],
+              "output_format": "json",
+              "language": "en",
+          }
+          path = os.path.expanduser("~/.aliyun/config.json")
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump({"current": "default", "profiles": [profile], "meta_path": ""}, fh)
+          os.chmod(path, 0o600)
+          PY
+
+      # Fetch per-env deploy config + secrets from SSM Parameter
+      # Store. The deploy role (infra/aws/bootstrap/deploy-role.tf)
+      # has `ssm:GetParametersByPath` on /blitzlog/<env>/*, so the
+      # OIDC session can read these. We fetch the entire env
+      # subtree in one round trip (cheaper + atomic) and map
+      # each parameter's leaf name to a TF_VAR_<name> env var
+      # (hyphens -> underscores).
+      #
+      # The values are written to GITHUB_ENV using the heredoc
+      # form so multi-line PEM private keys survive intact. The
+      # values never touch the runner's filesystem, and they
+      # never enter the GH Actions secret context (so PRs from
+      # forks on this public repo can't read them).
+      #
+      # Placeholder detection: every parameter was provisioned
+      # by infra/aws/bootstrap/secrets.tf with
+      # value=PLACEHOLDER_SET_VIA_AWS_CLI; the bootstrap
+      # `lifecycle.ignore_changes=[value]` keeps the operator's
+      # real value intact across subsequent applies. The sanity
+      # check below fails fast if any value still equals the
+      # placeholder, so a misconfigured operator gets a clear
+      # one-time-setup error rather than a confusing
+      # "GitHub App auth failed" deep inside the Lambda at
+      # runtime.
+      #
+      # Issue #126/#125: this step is AWS-only. The Alicloud path
+      # gets its TF_VAR_* from the KMS Secrets Manager fetch below,
+      # which is the direct analogue of this step — the Alicloud
+      # `SecretStore` implementation IS KMS, and the secret paths
+      # are byte-for-byte identical to the SSM paths
+      # (/blitzlog/<env>/<service>/<name>), so the same
+      # leaf-name → TF_VAR_<name> mapping works unchanged.
+      - name: Render TF_VAR_* env from OOS
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        env:
+          BLITZLOG_ENV: ${{ env.BLITZLOG_ENV }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          # The shared agent network (see the note further down).
+          ALICLOUD_VPC_ID: ${{ vars.ALICLOUD_VPC_ID }}
+          ALICLOUD_VSWITCH_IDS: ${{ vars.ALICLOUD_VSWITCH_IDS }}
+        run: |
+          set -euo pipefail
+
+          # No leading slash: OOS parameter names are
+          # `blitzlog/<env>/...` (see
+          # infra/alicloud/bootstrap/secrets.tf).
+          OOS_ROOT="blitzlog/${BLITZLOG_ENV}"
+
+          # The `aliyun` CLI is not installed on the runner by
+          # default. Install the same pinned build the baked host
+          # image uses (infra/alicloud/packer/scripts-ecs-ubuntu/
+          # 01-system.sh) so the two paths cannot drift.
+          # The install runs in a subshell: a `cd` here would change the
+          # step's working directory, and the repo script the step runs
+          # below is addressed by an absolute path.
+          if ! command -v aliyun >/dev/null 2>&1; then
+            (
+              cd /tmp
+              curl -fsSL -o aliyun-cli.tgz \
+                https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
+              tar -xzf aliyun-cli.tgz
+              sudo mv aliyun /usr/local/bin/aliyun
+              sudo chmod +x /usr/local/bin/aliyun
+              rm -f aliyun-cli.tgz
+            )
+          fi
+
+          # The deploy-time parameters, created by the bootstrap stack
+          # (infra/alicloud/bootstrap/secrets.tf). The leaf names map
+          # 1:1 onto the per-env stacks' TF variables — hyphens
+          # become underscores — so no mapping table is needed here.
+          declare -a OOS_LEAVES=(
+            "github-app-id"
+            "github-app-private-key"
+            "github-app-installation-id"
+            "github-webhook-secret"
+            "opencode-api-key"
+            "stt-api-url"
+            "stt-api-key"
+            "stt-model"
+            "stt-language"
+            "stt-models-bucket-name"
+          )
+
+          for leaf in "${OOS_LEAVES[@]}"; do
+            name="${OOS_ROOT}/${leaf}"
+            # The CLI answers an API error with a JSON document on
+            # stdout and a ZERO exit code, so its output cannot be
+            # trusted to be a successful response — a caller that
+            # only looks for `Parameter.Value` reads "the parameter
+            # is missing" when the truth is "you may not read it".
+            # scripts/oos_read_parameter.py parses the response, says
+            # what failed, and logs the CMK the parameter is
+            # encrypted with (the only place it is visible).
+            if ! value=$(aliyun oos GetSecretParameter \
+              --Name "$name" \
+              --WithDecryption true \
+              --region "$ALICLOUD_REGION" \
+              | python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"); then
+              echo "FATAL: the OOS parameter ${name} could not be read." >&2
+              echo "  The error above is OOS's own. A permission" >&2
+              echo "  failure (Kms.SecretFailed) means this role" >&2
+              echo "  cannot read the parameter — not that it is" >&2
+              echo "  missing." >&2
+              exit 1
+            fi
+            if [ "$value" = "unset" ]; then
+              echo "FATAL: the OOS parameter ${name} still holds the placeholder." >&2
+              echo "  The bootstrap stack creates the deploy-time" >&2
+              echo "  parameters; the real value goes in afterwards:" >&2
+              echo "    aliyun oos UpdateSecretParameter --Name ${name} --Value <real> --region $ALICLOUD_REGION" >&2
+              exit 1
+            fi
+            if [ -z "$value" ]; then
+              echo "FATAL: the OOS parameter ${name} is missing or empty." >&2
+              echo "  The deploy-time parameters are created by the" >&2
+              echo "  bootstrap stack:" >&2
+              echo "    cd infra/alicloud/bootstrap && terraform apply" >&2
+              echo "  then set the real value with:" >&2
+              echo "    aliyun oos UpdateSecretParameter --Name ${name} --Value <real> --region $ALICLOUD_REGION" >&2
+              echo "  or copy the whole set across with:" >&2
+              echo "    scripts/sync_oos_parameters.sh --to-deploy ${BLITZLOG_ENV}" >&2
+              exit 1
+            fi
+            # The leaf name IS the TF variable name, with hyphens
+            # replaced by underscores.
+            var="${leaf//-/_}"
+            # Mask the value: Actions prints every step's
+            # environment — including the values a step inherited from
+            # $GITHUB_ENV — so a secret written there lands in the
+            # log of every later step, in the clear.
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::$line"
+            done <<< "$value"
+            # Heredoc form so multi-line PEM private keys survive.
+            {
+              echo "TF_VAR_${var}<<EOF"
+              echo "$value"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          done
+
+          # The CMK that encrypts the OOS parameters is owned by the
+          # bootstrap stack, which publishes its id as a PLAIN OOS
+          # parameter. Reading it here (rather than hard-coding the
+          # id) is what keeps the grant honest: a key that is
+          # recreated would otherwise leave every reader pointing at
+          # a key that no longer exists.
+          if ! kms_key_id=$(aliyun oos GetParameter \
+            --Name "blitzlog/shared/kms-key-id" \
+            --region "$ALICLOUD_REGION" \
+            | python3 "$GITHUB_WORKSPACE/scripts/oos_read_parameter.py"); then
+            echo "FATAL: the OOS parameter blitzlog/shared/kms-key-id could not be read." >&2
+            exit 1
+          fi
+          if [ -z "$kms_key_id" ]; then
+            echo "FATAL: blitzlog/shared/kms-key-id is empty." >&2
+            echo "  Run 'cd infra/alicloud/bootstrap && terraform apply' first —" >&2
+            echo "  the bootstrap stack owns the CMK and publishes its id." >&2
+            exit 1
+          fi
+          echo "TF_VAR_kms_key_id=${kms_key_id}" >> "$GITHUB_ENV"
+
+          # The OSS bucket names are not secrets — they are plain
+          # TF variables the operator configures. They come from the
+          # repo variables so the runner does not need a tfvars file.
+          echo "TF_VAR_agent_logs_bucket_name=${ALICLOUD_AGENT_LOGS_BUCKET:-gwc-blitzlog-agent-logs}" >> "$GITHUB_ENV"
+          echo "TF_VAR_alicloud_region=${ALICLOUD_REGION}" >> "$GITHUB_ENV"
+          # The shared agent network. Alicloud has NO default VPC per
+          # region, so the VPC + VSwitches are created by the
+          # bootstrap stack (infra/alicloud/bootstrap/network.tf) and
+          # the operator copies its outputs into these repo
+          # variables:
+          #
+          #   cd infra/alicloud/bootstrap && terraform output vpc_id
+          #   cd infra/alicloud/bootstrap && terraform output vswitch_ids
+          #
+          # Both are REQUIRED by the per-env stacks — an ECS launch
+          # needs a VSwitch, and the launch fails without one.
+          if [ -z "${ALICLOUD_VPC_ID:-}" ] || [ -z "${ALICLOUD_VSWITCH_IDS:-}" ]; then
+            echo "FATAL: ALICLOUD_VPC_ID and ALICLOUD_VSWITCH_IDS must be set." >&2
+            echo "  The Alicloud bootstrap stack owns the agent VPC + VSwitches." >&2
+            echo "  Get them with:" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output vpc_id" >&2
+            echo "    cd infra/alicloud/bootstrap && terraform output vswitch_ids" >&2
+            echo "  then set them as repo variables:" >&2
+            echo "    gh variable set ALICLOUD_VPC_ID --body <vpc-id>" >&2
+            echo "    gh variable set ALICLOUD_VSWITCH_IDS --body '<id1>,<id2>'" >&2
+            exit 1
+          fi
+          echo "TF_VAR_vpc_id=${ALICLOUD_VPC_ID}" >> "$GITHUB_ENV"
+          echo "TF_VAR_vswitch_ids=[\"${ALICLOUD_VSWITCH_IDS//,/\",\"}\"]" >> "$GITHUB_ENV"
+
+      # Backend config is passed inline so no `*.hcl` file is
+      # materialized on the runner. The bucket comes from the
+      # repo variable TF_BACKEND_BUCKET (with a default of
+      # `gwc-infra-tf-state` so the standard install needs no
+      # operator action; the variable exists for non-default
+      # state buckets), the key is per-env
+      # (blitzlog/<env>.tfstate), the region is hard-coded
+      # ap-east-1 (matches the bootstrap role's trust policy).
+      #
+      # Issue #126: when BLITZLOG_PROVIDER=alicloud, the backend
+      # switches from AWS S3 to Alicloud OSS. The state bucket
+      # name comes from vars.TF_BACKEND_BUCKET_OSS.
+      #
+      # Issue #125: the Alicloud defaults were corrected to the
+      # REAL bucket + region. The state bucket `gwc-infra-tf-state`
+      # (hyphen) lives in cn-hongkong — the previous default
+      # (`gwc-infra-tfstate`, no hyphen, cn-hangzhou) named a
+      # bucket that does not exist in a region that is not the
+      # bucket's, which fails with "Authorization header is
+      # invalid" rather than a clear "no such bucket". An OSS
+      # bucket name is globally unique but its REGION is not, so
+      # the region must match the bucket's.
+      #
+      # The Alicloud credentials come from the "Configure
+      # Alicloud credentials" step above, which exports both the
+      # ALIBABA_CLOUD_* (provider) and ALICLOUD_* (backend) env
+      # var names.
+      #
+      # Issue #191: the OSS backend prepends its `prefix` (default
+      # `env:`) to the key, so `key=blitzlog/dev.tfstate` would
+      # resolve to `env:/blitzlog/dev.tfstate` — an object that does
+      # not exist. `prefix=` (empty) pins the object path to the key
+      # itself, which is the same layout the S3 backend uses.
+
       # Backend config is passed inline so no `*.hcl` file is
       # materialized on the runner. The bucket comes from the
       # repo variable TF_BACKEND_BUCKET (with a default of
@@ -234,37 +553,86 @@ jobs:
       # state buckets), the key is `blitzlog/dev.tfstate`
       # to match infra/aws/prod/main.tf's backend handoff, the region
       # is hard-coded ap-east-1.
-      - name: terraform init
-        working-directory: infra/aws/dev
+      - name: Apply the bootstrap stack
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        working-directory: infra/alicloud/bootstrap
         env:
-          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tf-state' }}
         run: |
           set -euo pipefail
+          # The bootstrap stack owns the CI's OWN RAM policies — so the
+          # CI applies it. Without that, every change to the grants
+          # the CI needs is a round-trip through the operator: the CI
+          # would fail on a permission that only the stack granting it
+          # can fix, and only the operator could apply that stack.
+          #
+          # The stack holds the shared VPC, the shared buckets and
+          # the CMK; an apply does not change them (the plan is empty
+          # for them), so this is the policies and the key's own
+          # metadata.
           terraform init -input=false \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${{ env.STATE_KEY }}" \
-            -backend-config="region=ap-east-1"
+            -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
+            -backend-config="key=blitzlog/bootstrap.tfstate" \
+            -backend-config="region=${ALICLOUD_REGION}"
+          # -refresh=false: the bootstrap stack's resources (the
+          # shared VPC, the buckets, the key) are not what the CI
+          # changes, and refreshing them would need a read verb for
+          # every tag API they carry. The plan is built on the state,
+          # which the operator's apply keeps current.
+          terraform plan -no-color -input=false -refresh=false -out=tfplan 2>&1 | tee plan.log
+          "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
+          terraform apply -no-color -input=false tfplan
+
+      - name: terraform init
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET || 'gwc-infra-tf-state' }}
+          TF_BACKEND_BUCKET_OSS: ${{ vars.TF_BACKEND_BUCKET_OSS || 'gwc-infra-tf-state' }}
+          ALICLOUD_REGION: ${{ vars.ALICLOUD_REGION || 'cn-hongkong' }}
+          BLITZLOG_PROVIDER: ${{ env.BLITZLOG_PROVIDER }}
+        run: |
+          set -euo pipefail
+          if [ "${BLITZLOG_PROVIDER}" = "alicloud" ]; then
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET_OSS}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="prefix=" \
+              -backend-config="region=${ALICLOUD_REGION}"
+          else
+            terraform init -input=false \
+              -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+              -backend-config="key=${{ env.STATE_KEY }}" \
+              -backend-config="region=ap-east-1"
+          fi
 
       - name: terraform validate
-        working-directory: infra/aws/dev
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
         run: terraform validate -no-color
 
       - name: terraform plan
         id: plan
-        working-directory: infra/aws/dev
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
         run: |
           set -euo pipefail
           # -out=tfplan serialises the plan to a file so the
           # apply step consumes the exact same plan (no drift
           # between plan and apply). -no-color keeps the log
           # readable in the GH Actions UI.
-          terraform plan -no-color -input=false -out=tfplan
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee plan.log
+
+      - name: Fail if the plan would destroy a KMS key
+        if: env.BLITZLOG_PROVIDER == 'alicloud'
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/scripts/guard_kms_key_destruction.sh" tfplan
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v7
         with:
           name: tfplan-dev
-          path: infra/aws/dev/tfplan
+          path: infra/${{ env.BLITZLOG_PROVIDER }}/dev/tfplan
           # 14-day retention matches the release.yml deploy
           # path; the plan is a snapshot, not a long-lived
           # artifact.
@@ -272,7 +640,7 @@ jobs:
 
       - name: terraform apply
         id: apply
-        working-directory: infra/aws/dev
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
         # Always consumes the plan from the previous step; never
         # re-plans in-band. Keeps plan↔apply symmetric so a
         # reviewer looking at the artifact can be sure the apply
@@ -281,7 +649,7 @@ jobs:
 
       - name: Capture terraform output
         if: steps.apply.outcome == 'success'
-        working-directory: infra/aws/dev
+        working-directory: infra/${{ env.BLITZLOG_PROVIDER }}/dev
         # `webhook_url` is the only output the operator needs
         # after a successful apply (it's the URL the GitHub App
         # webhook should target). Capture the full -json output

@@ -28,15 +28,33 @@ resource "alicloud_ram_role" "deploy" {
         # OIDC provider's client id (sts.aliyuncs.com).
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.oidc_provider_name}"]
         }
         Action = "sts:AssumeRole"
+        # Alicloud's RAM does NOT use the AWS condition keys for an
+        # OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
+        # `oidc:sub`, not under `oidc:token.actions.githubusercontent.com:*`.
+        # With the AWS key names the service populates nothing under them,
+        # so the conditions can never be satisfied and every assume is
+        # denied with `NoPermissionType: ImplicitDeny`.
+        #
+        # The subject needs the same globbing the AWS side uses:
+        # GitHub embeds the numeric owner and repo ids in it
+        # (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`), so
+        # `repo:owner/repo:*` matches nothing. The `*` after each
+        # name covers the ids.
         Condition = {
           StringEquals = {
-            "oidc:token.actions.githubusercontent.com:aud" = "sts.aliyuncs.com"
+            "oidc:aud" = "sts.aliyuncs.com"
+            "oidc:iss" = "https://token.actions.githubusercontent.com"
           }
           StringLike = {
-            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}*:ref:refs/heads/*"
+            # The same glob the AWS side uses, and for the same reason:
+            # GitHub embeds the numeric owner and repo ids in the
+            # subject (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`),
+            # so a literal `repo:owner/repo:*` matches nothing. The `*`
+            # after each name covers the ids.
+            "oidc:sub" = "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
           }
         }
       },
@@ -71,10 +89,23 @@ resource "alicloud_ram_policy" "deploy" {
           "fc:UpdateFunctionTrigger",
           "fc:GetFunctionTrigger",
           "fc:ListFunctionTriggers",
+          # The provider reads a trigger when it refreshes one, and
+          # updates it when the function's code changes.
+          "fc:GetTrigger",
+          "fc:UpdateTrigger",
           "apigateway:CreateApi",
           "apigateway:DeleteApi",
           "apigateway:ModifyApi",
+          # Deploying an API is what publishes it to the gateway.
+          "apigateway:DeployApi",
+          "apigateway:UndeployApi",
           "apigateway:DescribeApis",
+          # The provider reads a single group / API / app when it
+          # refreshes one — the plural verbs are not enough.
+          "apigateway:DescribeApiGroup",
+          "apigateway:DescribeApi",
+          "apigateway:DescribeApp",
+          "apigateway:DescribeDeployedApi",
           "apigateway:CreateApiGroup",
           "apigateway:DeleteApiGroup",
           "apigateway:ModifyApiGroup",
@@ -83,11 +114,16 @@ resource "alicloud_ram_policy" "deploy" {
           "apigateway:DeleteApp",
           "apigateway:ModifyApp",
           "apigateway:DescribeApps",
+          # The bootstrap stack opens the API Gateway product — the
+          # provider's data source activates it when it is read.
+          "apigateway:OpenApiGatewayService",
           "mns:CreateQueue",
           "mns:DeleteQueue",
           "mns:ModifyQueue",
           "mns:DescribeQueue",
           "mns:ListQueue",
+          # The provider reads the queue's attributes on refresh.
+          "mns:GetQueueAttributes",
           "vpc:CreateVpc",
           "vpc:DeleteVpc",
           "vpc:ModifyVpc",
@@ -99,7 +135,14 @@ resource "alicloud_ram_policy" "deploy" {
           "ecs:DescribeInstances",
           "ecs:DescribeImages",
           "ecs:DescribeSecurityGroups",
+          # The provider reads the security group's attributes on
+          # refresh.
+          "ecs:DescribeSecurityGroupAttribute",
           "ecs:DescribeRegions",
+          # The bootstrap stack creates the MNS subscription (the
+          # service itself is opened from the console).
+          "bssopenapi:CreateInstance",
+          "bssopenapi:QueryInstance",
           "ecs:CreateSecurityGroup",
           "ecs:DeleteSecurityGroup",
           "ecs:AuthorizeSecurityGroupIngress",
@@ -120,28 +163,94 @@ resource "alicloud_ram_policy" "deploy" {
           "oos:DeleteSecretParameter",
           "oos:GetSecretParameter",
           "oos:GetSecretParametersByPath",
-          "oos:ListSecretParameters",
           "oos:ListSecretParameterVersions",
+          # The provider reads a parameter's tags on every refresh.
+          "oos:ListTagResources",
         ]
         Resource = [
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/*",
         ]
       },
       {
+        # Listing the parameters is authorized against the whole
+        # namespace, not against the name the list is filtered by
+        # (the RAM table for `oos:ListSecretParameters` names
+        # `secretparameter/*`), so the grant cannot be narrowed to
+        # `blitzlog/*` the way the other verbs are.
+        #
+        # A list answers with metadata only — names, descriptions and
+        # the key each parameter is encrypted with. The VALUES still
+        # need `oos:GetSecretParameter` (scoped to `blitzlog/*`) and
+        # `kms:GetSecretValue` (scoped to the one CMK).
+        Sid    = "AllowOOSParameterList"
+        Effect = "Allow"
+        Action = [
+          "oos:ListSecretParameters",
+        ]
+        Resource = [
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/*",
+        ]
+      },
+      {
+        # The published id of the CMK (`blitzlog/shared/kms-key-id`) is
+        # a PLAIN OOS parameter — the key id is not a secret, and it
+        # is read with `oos:GetParameter` rather than
+        # `oos:GetSecretParameter`.
+        Sid    = "AllowSharedParameterRead"
+        Effect = "Allow"
+        Action = [
+          "oos:GetParameter",
+        ]
+        Resource = [
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:parameter/blitzlog/shared/*",
+        ]
+      },
+      {
         # The CMK that encrypts the OOS parameters. Default master
         # keys are free of charge — KMS bills for *instances*, and
         # this deployment does not buy one.
-        Sid    = "AllowKMSKeyManagement"
+        #
+        # The key is created by THIS stack, so it can be named: the
+        # grant is on the one key, not on `key/*`. The key-management
+        # verbs (CreateKey / DeleteKey / CreateGrant) are gone with
+        # it — the per-env stacks create no keys, and a CI credential
+        # that can rotate or delete any key in the account is a
+        # blast radius nobody needs.
+        Sid    = "AllowKMSKeyDecrypt"
         Effect = "Allow"
         Action = [
-          "kms:CreateKey",
-          "kms:DeleteKey",
+          "kms:Decrypt",
+          # The bootstrap stack owns the key, and the CI applies that
+          # stack — so the CI needs the verbs its in-place changes
+          # use. Without them the deploy leg could not apply the
+          # stack that grants it its own permissions.
+          "kms:UpdateKeyDescription",
+          "kms:SetDeletionProtection",
           "kms:DescribeKey",
-          "kms:CreateGrant",
-          "kms:ListGrants",
         ]
         Resource = [
-          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/*",
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:key/${alicloud_kms_key.secrets.id}",
+        ]
+      },
+      {
+        # Reading an OOS encrypted parameter. OOS implements its
+        # encrypted parameter kind on top of KMS Secrets Manager:
+        # each parameter is a KMS secret named
+        # `secret/oos/<parameter path>`, and the API docs require
+        # `kms:GetSecretValue` on it. `kms:Decrypt` is the action
+        # for CMKs (`key/...`) and does NOT apply to a secret.
+        #
+        # Without this grant every read fails with
+        # `Kms.SecretFailed` / `Forbidden.NoPermission`, which the
+        # deploy leg reads as "the parameter is missing or empty" —
+        # it is neither.
+        Sid    = "AllowOOSParameterRead"
+        Effect = "Allow"
+        Action = [
+          "kms:GetSecretValue",
+        ]
+        Resource = [
+          "acs:kms:${var.alicloud_region}:${data.alicloud_account.current.id}:secret/oos/blitzlog/*",
         ]
       },
       {
@@ -189,6 +298,9 @@ resource "alicloud_ram_policy" "deploy" {
           "ram:GetRole",
           "ram:ListRoles",
           "ram:CreatePolicy",
+          # The provider creates a new policy version when it updates
+          # a policy — the RAM policy cap is 5 versions per policy.
+          "ram:CreatePolicyVersion",
           "ram:DeletePolicy",
           "ram:UpdatePolicy",
           "ram:GetPolicy",
@@ -196,7 +308,15 @@ resource "alicloud_ram_policy" "deploy" {
           "ram:AttachPolicy",
           "ram:DetachPolicy",
           "ram:ListAttachedRolePolicies",
+          # The provider reads the policies attached to a role when it
+          # refreshes one.
+          "ram:ListPoliciesForRole",
           "ram:PassRole",
+          # The provider reads a role's tags on every refresh.
+          "ram:ListTagResources",
+          # The decode helper turns a RAM denial into the resource
+          # the check ran against.
+          "ram:DecodeDiagnosticMessage",
         ]
         Resource = ["*"]
       },

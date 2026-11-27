@@ -26,6 +26,28 @@ locals {
   oos_stt_language_name            = "${local.oos_root}/stt/language"
   oos_stt_models_bucket_name       = "${local.oos_root}/stt/models-bucket"
 
+  # The deploy-time parameters, keyed by the leaf the deploy legs
+  # read, with the parameter's name as the value.
+  #
+  # These are the SOURCE OF TRUTH for the secrets: the bootstrap
+  # stack owns them (infra/alicloud/bootstrap/secrets.tf), the deploy
+  # legs read them to render the TF variables, and the runtime's copy
+  # (the parameters in secrets.tf) follows them — so a rotation
+  # reaches the agents on the next apply, and a parameter can be
+  # moved onto another key without losing its value.
+  deploy_secret_parameters = {
+    "github-app-id"              = "${local.oos_root}/github-app-id"
+    "github-app-private-key"     = "${local.oos_root}/github-app-private-key"
+    "github-app-installation-id" = "${local.oos_root}/github-app-installation-id"
+    "github-webhook-secret"      = "${local.oos_root}/github-webhook-secret"
+    "opencode-api-key"           = "${local.oos_root}/opencode-api-key"
+    "stt-api-url"                = "${local.oos_root}/stt-api-url"
+    "stt-api-key"                = "${local.oos_root}/stt-api-key"
+    "stt-model"                  = "${local.oos_root}/stt-model"
+    "stt-language"               = "${local.oos_root}/stt-language"
+    "stt-models-bucket-name"     = "${local.oos_root}/stt-models-bucket-name"
+  }
+
   # The per-issue ephemeral GitHub token the Lambda writes at launch
   # time. Env-scoped, no leading slash for the same ARN reason as
   # `oos_root` above.

@@ -60,15 +60,15 @@ sudo apt-get install -y --no-install-recommends docker-ce docker-ce-cli containe
 #
 # The build instance's arch follows the instance type the caller
 # chose, so the tarball is selected from `uname -m` rather than
-# assumed. Aliyun publishes no versioned arm64 tarball (only
+# assumed. Aliyun publishes a versioned arm64 tarball too (only
 # `aliyun-cli-linux-latest-arm64.tgz`), so the arm64 branch uses the
 # floating "latest" name.
 if ! command -v aliyun >/dev/null 2>&1; then
     echo "Installing aliyun CLI..."
     cd /tmp
     case "$(uname -m)" in
-        x86_64) CLI_TGZ="aliyun-cli-linux-3.0.6-amd64.tgz" ;;
-        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-latest-arm64.tgz" ;;
+        x86_64) CLI_TGZ="aliyun-cli-linux-3.5.4-amd64.tgz" ;;
+        aarch64 | arm64) CLI_TGZ="aliyun-cli-linux-3.5.4-arm64.tgz" ;;
         *)
             echo "ERROR: unsupported architecture $(uname -m)" >&2
             exit 1

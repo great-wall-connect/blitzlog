@@ -387,30 +387,56 @@ class TestAlicloudOidcSubjectIsNotDoubled(unittest.TestCase):
             )
 
     def test_the_subject_matches_the_real_claim(self):
+        """Alicloud's RAM does not use the AWS condition keys for an
+        OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
+        `oidc:sub`. With the AWS key names
+        (`oidc:token.actions.githubusercontent.com:*`) the service
+        populates nothing under them, so the conditions can never be
+        satisfied and every assume is denied with
+        `NoPermissionType: ImplicitDeny`."""
         for name, text in (("packer", self.packer), ("deploy", self.deploy)):
             self.assertIn(
-                '"oidc:token.actions.githubusercontent.com:sub" = '
-                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+                '"oidc:sub" = "repo:great-wall-connect*/blitzlog*' ':ref:refs/heads/*"',
                 text,
-                f"the {name} role's sub condition must be "
-                '"repo:${local.github_repo}*:ref:refs/heads/*"',
+                f"the {name} role's sub condition must use Alicloud's "
+                '"oidc:sub" key and a wildcard that covers the numeric '
+                "owner/repo ids GitHub embeds in the subject",
+            )
+            self.assertIn(
+                '"oidc:aud" = "sts.aliyuncs.com"',
+                text,
+                f"the {name} role's audience condition must use "
+                'Alicloud\'s "oidc:aud" key — the claim is a plain '
+                "string",
+            )
+            self.assertNotIn(
+                '"oidc:token.actions.githubusercontent.com:aud"',
+                text,
+                f"the {name} role must not use the AWS condition keys — "
+                "Alicloud's STS never populates them, so the conditions "
+                "can never match",
             )
 
     def test_the_oidc_provider_arn_matches_the_workflow(self):
         """The role's Federated principal and the workflow's
-        `oidc-provider-arn` must name the SAME provider — the Alicloud
-        OIDC provider for a GitHub repo is registered under
-        `<org>/<repo>`."""
+        `oidc-provider-arn` must name the SAME provider.
+
+        The provider ARN's last segment is the IdP NAME from the RAM
+        console ("blitzlog"), NOT an `<org>/<repo>` path: Alicloud's
+        IdP-name field takes no slash, so the provider cannot be
+        registered as "great-wall-connect/blitzlog". Naming a
+        provider that does not exist fails the OIDC step with
+        "No such OIDC Provider registered"."""
         for name, text in (("packer", self.packer), ("deploy", self.deploy)):
             self.assertIn(
-                "oidc-provider/${local.github_repo}",
+                "oidc-provider/${local.oidc_provider_name}",
                 text,
-                f"the {name} role's Federated principal must be "
-                "oidc-provider/<owner>/<repo>",
+                f"the {name} role's Federated principal must name the "
+                "provider by its IdP name",
             )
         self.assertIn(
             "oidc-provider-arn: acs:ram::${{ vars.ALICLOUD_ACCOUNT_ID }}:"
-            "oidc-provider/great-wall-connect/blitzlog",
+            "oidc-provider/blitzlog",
             self.workflow,
             "the workflow's oidc-provider-arn must match the trust "
             "policy's Federated principal",
@@ -441,9 +467,10 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
     def test_role_has_an_oidc_trust_policy(self):
         self.assertIn('resource "alicloud_ram_role" "deploy"', self.text)
         self.assertIn(
-            "oidc:token.actions.githubusercontent.com:aud",
+            '"oidc:aud"',
             self.text,
-            "the trust policy must condition on the OIDC audience",
+            "the trust policy must condition on the OIDC audience "
+            "(Alicloud's key, not the AWS one)",
         )
         self.assertIn(
             "sts.aliyuncs.com",
@@ -451,10 +478,11 @@ class TestAlicloudDeployRoleExists(unittest.TestCase):
             "the trust policy's audience must be sts.aliyuncs.com",
         )
         self.assertIn(
-            "repo:${local.github_repo}*:ref:refs/heads/*",
+            '"oidc:sub" = "repo:great-wall-connect*/blitzlog*' ':ref:refs/heads/*"',
             self.text,
-            "the trust policy must match the same branch wildcard as the "
-            "packer role",
+            "the trust policy must match the same subject wildcard as the "
+            "packer role (GitHub embeds the numeric owner/repo ids in "
+            "the subject, so the wildcard has to cover them)",
         )
 
     def test_role_grants_the_resources_the_apply_manages(self):
@@ -513,18 +541,19 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
         )
 
     def test_oos_step_reads_the_parameter_paths(self):
-        """The OOS parameter paths mirror the SSM paths, so the
-        mapping from leaf name to TF variable is the same."""
+        """The deploy-time parameters are the bootstrap's, under
+        `blitzlog/<env>/<leaf>` — the same leaf names the AWS side
+        uses for its SSM parameters."""
         for secret in (
-            "github-app/id",
-            "github-app/private-key",
-            "github-app/installation-id",
-            "github-webhook/secret",
-            "opencode/api-key",
-            "stt/api-key",
-            "stt/model",
-            "stt/language",
-            "stt/models-bucket",
+            "github-app-id",
+            "github-app-private-key",
+            "github-app-installation-id",
+            "github-webhook-secret",
+            "opencode-api-key",
+            "stt-api-key",
+            "stt-model",
+            "stt-language",
+            "stt-models-bucket-name",
         ):
             self.assertIn(
                 f'"{secret}"',
@@ -535,7 +564,12 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
     def test_oos_step_covers_every_required_secret_variable(self):
         """Each secret maps to a TF variable the stack declares. A
         missing mapping means the plan prompts for a value that CI
-        cannot supply."""
+        cannot supply.
+
+        The leaf name IS the variable name with hyphens replaced by
+        underscores, so the mapping is mechanical — a leaf that does
+        not map onto a declared variable would be a plan that prompts.
+        """
         for var in (
             "github_app_id",
             "github_app_private_key",
@@ -548,10 +582,16 @@ class TestAlicloudOosSecretFetchReplacesTfvars(unittest.TestCase):
             "stt_models_bucket_name",
         ):
             self.assertIn(
-                f"var={var}",
+                var.replace("_", "-"),
                 self.text,
-                f"the OOS render step must map a parameter to {var}",
+                f"the OOS render step must read the parameter behind {var}",
             )
+        self.assertIn(
+            'var="${leaf//-/_}"',
+            self.text,
+            "the leaf name must map onto the TF variable mechanically — "
+            "a mapping table is one more thing to keep in step",
+        )
 
     def test_plan_does_not_hard_fail_on_a_missing_tfvars_file(self):
         """The pre-#125 Alicloud plan FATAL'd when the tfvars file
@@ -1190,27 +1230,44 @@ class TestAlicloudUserPoolStack(unittest.TestCase):
             "the user-pool parameters must not be env-prefixed",
         )
 
-    def test_no_kms_key_is_named(self):
-        """The per-env CMK cannot encrypt the pool: the namespace is
-        env-independent, so a CMK-encrypted parameter would be
-        readable by only one of dev/prod. OOS encrypts every parameter
-        with its own key when no key is named."""
-        self.assertNotIn(
-            "key_id",
+    def test_the_pool_parameters_use_the_shared_cmk(self):
+        """One CMK encrypts every parameter in the account.
+
+        The pool namespace is env-independent, which used to rule out
+        a CMK-encrypted parameter while the CMK was per-env (only one
+        of dev/prod could have read it). The key is account-wide now,
+        so the pool is encrypted with it like everything else — and
+        the readers already decrypt it.
+        """
+        self.assertIn(
+            "key_id                = var.kms_key_id",
             self.main_tf,
-            "the pool parameters must not name a KMS key — the per-env CMK "
-            "cannot encrypt an env-independent namespace",
+            "the pool parameters must be encrypted with the shared CMK",
         )
 
-    def test_the_git_author_values_are_operator_owned(self):
+    def test_the_git_author_values_keep_their_live_value(self):
         """Mirrors the AWS sibling: the resolved default derives from
         owner_login, so an apply must not churn the parameter when only
-        the derived default changed."""
+        the derived default changed.
+
+        The parameters read their live value back (with decryption)
+        instead of using `ignore_changes`: the value follows what is
+        in OOS, so a change to the derived default does not touch it
+        — and a parameter that has to be re-created (its encryption
+        key is fixed at creation) carries its value across rather
+        than being re-created empty.
+        """
         self.assertEqual(
             self.main_tf.count("ignore_changes = [value]"),
-            2,
-            "the two git-author parameters ignore upstream value changes — "
-            "the operator owns those values",
+            0,
+            "the pool parameters read their live value back; "
+            "`ignore_changes` would swallow the change that carries "
+            "the value across a re-creation",
+        )
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "current"',
+            self.main_tf,
+            "the pool parameters must read their live value back",
         )
 
 
@@ -1447,28 +1504,54 @@ class TestAlicloudOosParameterStore(unittest.TestCase):
                 "clear",
             )
             self.assertIn(
-                "key_id                = alicloud_kms_key.secrets.id",
+                "key_id                = var.kms_key_id",
                 body,
                 f"the {name} parameter must be encrypted with the per-env " "CMK",
             )
 
-    def test_the_value_is_ignored_after_creation(self):
-        """The provider's read does not decrypt, so the value reads
-        back empty. Without `ignore_changes`, every plan would
-        diff and every apply would rewrite the value from the
-        tfvars — clobbering the real value the operator sets
-        out-of-band with `aliyun oos UpdateSecretParameter`."""
-        for name, body in re.findall(
+    def test_the_value_comes_from_the_deploy_time_set(self):
+        """The provider's read does not decrypt, so terraform's own
+        copy of a value is always empty. The value therefore comes
+        from the deploy-time set (read with decryption), which is
+        what makes two things work:
+
+        * a rotation reaches the runtime's copy on the next apply,
+        * a parameter can be moved onto another key — a re-creation
+          carries its value instead of being re-created empty.
+
+        `ignore_changes = [value]` would swallow exactly that: the
+        planned value would be the empty state copy, and the
+        re-creation would wipe the secret.
+        """
+        self.assertIn(
+            'data "alicloud_oos_secret_parameters" "deploy"',
+            self.secrets,
+            "the parameters must read the deploy-time set with "
+            "decryption — the provider's own read cannot",
+        )
+        self.assertIn(
+            "with_decryption       = true",
+            self.secrets,
+            "the data source must decrypt — otherwise it reads the "
+            "value as empty, like the resource's own read",
+        )
+        parameters = re.findall(
             r'resource "alicloud_oos_secret_parameter" "(\w+)" \{(.*?)\n\}',
             self.secrets,
             re.DOTALL,
-        ):
+        )
+        self.assertEqual(len(parameters), 10)
+        for name, body in parameters:
             self.assertIn(
+                "data.alicloud_oos_secret_parameters.deploy[",
+                body,
+                f"the {name} parameter must take its value from the " "deploy-time set",
+            )
+            self.assertNotIn(
                 "ignore_changes = [value]",
                 body,
-                f"the {name} parameter must ignore changes to its value — "
-                "the provider cannot read it back, so Terraform would "
-                "otherwise rewrite it on every apply",
+                f"the {name} parameter must not ignore value changes — "
+                "that would make a re-creation wipe the secret",
             )
 
     def test_parameter_names_carry_no_leading_slash(self):
@@ -1517,10 +1600,23 @@ class TestAlicloudOosParameterStore(unittest.TestCase):
                 f"the RAM policies must grant {action} — the Alicloud "
                 "secret store reads and writes OOS parameters",
             )
-        self.assertNotIn(
+        # OOS implements its ENCRYPTED parameter kind on top of KMS
+        # Secrets Manager: each parameter is a KMS secret named
+        # `secret/oos/<parameter path>`, and the GetSecretParameter
+        # API requires `kms:GetSecretValue` on it. A reader without
+        # that grant gets `Kms.SecretFailed` /
+        # `Forbidden.NoPermission` — which the deploy legs read as
+        # "the parameter is missing or empty".
+        #
+        # The plain OOS parameter kind (`alicloud_oos_parameter`) has
+        # no KMS dependency at all, but the secrets here are stored
+        # encrypted, so the grant is needed.
+        self.assertIn(
             "kms:GetSecretValue",
             self.ram,
-            "the KMS secret verbs are dead on the Alicloud path — the " "store is OOS",
+            "the RAM policies must grant kms:GetSecretValue — an OOS "
+            "encrypted parameter is a KMS secret, and reading one "
+            "without the grant fails with Kms.SecretFailed",
         )
 
     def test_the_fc_role_can_read_the_published_agent_image_id(self):

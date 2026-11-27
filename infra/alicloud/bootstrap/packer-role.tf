@@ -23,11 +23,21 @@
 # shared by this file and the bucket ARNs there.
 
 locals {
-  # The GitHub repo, as "owner/repo". The OIDC provider is registered
-  # under that path and the `sub` claim matches on it, so it must NOT
-  # be prefixed with the org again — that would produce a subject
-  # matching nothing.
+  # The GitHub repo, as "owner/repo". The `sub` claim matches on it,
+  # so it must NOT be prefixed with the org again — that would produce
+  # a subject matching nothing.
   github_repo = "great-wall-connect/blitzlog"
+
+  # The RAM OIDC provider's NAME — the last segment of the provider
+  # ARN (`acs:ram::<account-id>:oidc-provider/<name>`). It is the
+  # IdP name in the RAM console, and Alicloud's name field takes no
+  # slash, so this is NOT `local.github_repo`: the provider is
+  # registered as "blitzlog", not as "great-wall-connect/blitzlog".
+  # The STS OIDC token request names the provider by ARN, and the
+  # trust policies below name it the same way — the three must agree
+  # or the request is rejected with "No such OIDC Provider
+  # registered".
+  oidc_provider_name = "blitzlog"
 
   # The `alicloud_oss_bucket` resource has no `arn` attribute (the
   # data source in the core module does, but the bootstrap stack owns
@@ -54,15 +64,33 @@ resource "alicloud_ram_role" "packer_build" {
       {
         Effect = "Allow"
         Principal = {
-          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.github_repo}"]
+          Federated = ["acs:ram::${data.alicloud_account.current.id}:oidc-provider/${local.oidc_provider_name}"]
         }
         Action = "sts:AssumeRole"
+        # Alicloud's RAM does NOT use the AWS condition keys for an
+        # OIDC token — the claims live under `oidc:aud` / `oidc:iss` /
+        # `oidc:sub`, not under `oidc:token.actions.githubusercontent.com:*`.
+        # With the AWS key names the service populates nothing under them,
+        # so the conditions can never be satisfied and every assume is
+        # denied with `NoPermissionType: ImplicitDeny`.
+        #
+        # The subject needs the same globbing the AWS side uses:
+        # GitHub embeds the numeric owner and repo ids in it
+        # (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`), so
+        # `repo:owner/repo:*` matches nothing. The `*` after each
+        # name covers the ids.
         Condition = {
           StringEquals = {
-            "oidc:token.actions.githubusercontent.com:aud" = "sts.aliyuncs.com"
+            "oidc:aud" = "sts.aliyuncs.com"
+            "oidc:iss" = "https://token.actions.githubusercontent.com"
           }
           StringLike = {
-            "oidc:token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}*:ref:refs/heads/*"
+            # The same glob the AWS side uses, and for the same reason:
+            # GitHub embeds the numeric owner and repo ids in the
+            # subject (`repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`),
+            # so a literal `repo:owner/repo:*` matches nothing. The `*`
+            # after each name covers the ids.
+            "oidc:sub" = "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
           }
         }
       },
@@ -173,10 +201,15 @@ resource "alicloud_ram_policy" "packer_build" {
           "oos:UpdateSecretParameter",
           "oos:GetSecretParameter",
           "oos:DeleteSecretParameter",
+          # The published id of the CMK the parameters are encrypted
+          # with — a PLAIN OOS parameter, so the verb is
+          # `oos:GetParameter` (infra/alicloud/bootstrap/kms.tf).
+          "oos:GetParameter",
         ]
         Resource = [
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/dev/agent-ami-id-ecs-ubuntu",
           "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:secretparameter/blitzlog/prod/agent-ami-id-ecs-ubuntu",
+          "acs:oos:${var.alicloud_region}:${data.alicloud_account.current.id}:parameter/blitzlog/shared/kms-key-id",
         ]
       },
       {

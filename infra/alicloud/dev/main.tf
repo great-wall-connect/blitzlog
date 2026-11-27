@@ -51,6 +51,10 @@ module "core" {
   vswitch_ids       = var.vswitch_ids
   ssh_allowed_cidrs = var.ssh_allowed_cidrs
 
+  # The CMK that encrypts the OOS parameters. Owned by the bootstrap
+  # stack; see the variable's description.
+  kms_key_id = var.kms_key_id
+
   github_app_id              = var.github_app_id
   github_app_private_key     = var.github_app_private_key
   github_app_installation_id = var.github_app_installation_id

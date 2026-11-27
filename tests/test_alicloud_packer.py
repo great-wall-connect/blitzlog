@@ -573,6 +573,25 @@ class TestAlicloudBakeAndPublishScripts(unittest.TestCase):
             "the OOS parameter name must not carry a leading slash",
         )
 
+    def test_publish_encrypts_with_the_shared_cmk(self):
+        """The published image id must sit under the account's CMK.
+
+        Without a key it lands on OOS's default service key, and the
+        readers would need a grant on that key instead of the CMK
+        they already have — a grant that only exists for the keys the
+        deployment knows about.
+        """
+        self.assertIn(
+            "blitzlog/shared/kms-key-id",
+            self.publish,
+            "the publish script must read the CMK id the bootstrap " "stack publishes",
+        )
+        self.assertIn(
+            '--KeyId "$KMS_KEY_ID"',
+            self.publish,
+            "the published parameter must be encrypted with the shared " "CMK",
+        )
+
     def test_publish_does_not_write_to_ssm(self):
         self.assertNotIn(
             "aws ssm put-parameter",
@@ -742,10 +761,10 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
     "exec format error" — and the bake's own steps fail that way,
     so the bake never completes.
 
-    Aliyun publishes no versioned arm64 aliyun CLI tarball (only the
-    floating `latest-arm64`), and the ossutil 2.x binaries are
-    published as per-arch zips whose version is read from an
-    upstream version file.
+    The ossutil 2.x binaries are published as per-arch zips whose
+    version is read from an upstream version file; the aliyun CLI
+    tarballs are published per arch too, and both are pinned so the
+    two paths cannot drift.
     """
 
     @classmethod
@@ -759,12 +778,12 @@ class TestAlicloudSystemInstallIsArchAware(unittest.TestCase):
             "the aliyun CLI install must select the tarball by " "architecture",
         )
         self.assertIn(
-            "aliyun-cli-linux-latest-arm64.tgz",
+            "aliyun-cli-linux-3.5.4-arm64.tgz",
             self.system,
             "the arm64 aliyun CLI tarball must be selected on arm64 hosts",
         )
         self.assertIn(
-            "aliyun-cli-linux-3.0.6-amd64.tgz",
+            "aliyun-cli-linux-3.5.4-amd64.tgz",
             self.system,
             "the amd64 aliyun CLI tarball must be selected on x86 hosts",
         )

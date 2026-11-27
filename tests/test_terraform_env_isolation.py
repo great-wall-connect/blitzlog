@@ -594,7 +594,6 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "apigateway.tf": "infra/aws/modules/core/apigateway.tf",
             "oss.tf": "infra/aws/modules/core/storage.tf",
             "mns.tf": "infra/aws/modules/core/alerting.tf",
-            "kms.tf": "infra/aws/modules/core/iam.tf",
             "variables.tf": "infra/aws/modules/core/variables.tf",
             "outputs.tf": "infra/aws/modules/core/outputs.tf",
             "locals.tf": "infra/aws/modules/core/locals.tf",
@@ -614,6 +613,27 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
                 f"{filename} must reference its AWS analogue ({aws_analogue}) "
                 f"in the top-of-file comment block, so a reader knows the mapping.",
             )
+
+    def test_the_cmk_lives_in_the_bootstrap_stack(self):
+        """The CMK that encrypts the OOS parameters is owned by the
+        bootstrap stack.
+
+        It cannot live in the per-env module: the CI deploy role is
+        created by the bootstrap, and a role cannot be granted access
+        to a key that does not exist yet — so a CMK created by the
+        per-env stack could only ever be reached through a wildcard
+        grant on `key/*`.
+        """
+        path = self.ALICLOUD_BOOTSTRAP / "kms.tf"
+        self.assertTrue(
+            path.exists(),
+            f"{path} must exist — the bootstrap stack owns the CMK",
+        )
+        self.assertIn(
+            'resource "alicloud_kms_key" "secrets"',
+            path.read_text(),
+            "the bootstrap stack must create the CMK",
+        )
 
     def test_alicloud_dev_prod_have_no_count_gated_module(self):
         """The per-cloud directory layout removes the need for
@@ -1070,8 +1090,8 @@ class TestAlicloudProviderDispatch(unittest.TestCase):
             "ecs.tf must set security_group_name on alicloud_security_group",
         )
 
-        # kms.tf: key_state -> status
-        kms = code_lines(module_dir / "kms.tf")
+        # kms.tf: key_state -> status (the bootstrap owns the CMK)
+        kms = code_lines(self.ALICLOUD_BOOTSTRAP / "kms.tf")
         self.assertNotIn(
             'key_state              = "Enabled"',
             "\n".join(kms),

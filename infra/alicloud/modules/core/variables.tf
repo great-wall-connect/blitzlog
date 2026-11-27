@@ -111,6 +111,11 @@ variable "stt_api_key" {
   default     = "placeholder-not-used-by-localhost-shim"
 }
 
+variable "kms_key_id" {
+  description = "ID of the customer master key that encrypts the OOS parameters. The key is owned by the bootstrap stack (infra/alicloud/bootstrap) — the CI reads the id from the `blitzlog/shared/kms-key-id` OOS parameter; a local apply copies it from `cd infra/alicloud/bootstrap && terraform output kms_key_id`."
+  type        = string
+}
+
 variable "stt_model" {
   description = "Whisper model name (e.g. base.en, tiny.en, small.en). AWS analogue: same name."
   type        = string

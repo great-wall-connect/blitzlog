@@ -51,13 +51,60 @@ OIDC identity provider:**
 | Thumbprint | `06d927fecd0a84aeba28aad1d808139470fe95c3` |
 
 The resulting ARN is
-`acs:ram::<account-id>:oidc-provider/great-wall-connect/blitzlog` —
-note the `<org>/<repo>` path, which is how Alicloud names a GitHub
-OIDC provider. The workflow hard-codes that shape.
+`acs:ram::<account-id>:oidc-provider/blitzlog` — the last segment is
+the **IdP name** from the console, NOT an `<org>/<repo>` path:
+Alicloud's IdP-name field takes no slash, so the provider cannot be
+registered as "great-wall-connect/blitzlog". The workflow hard-codes
+that shape, and the bootstrap's trust policies name the provider the
+same way — the three must agree, or the OIDC step fails with "No
+such OIDC Provider registered".
 
 The client id MUST be `sts.aliyuncs.com`: it is the `aud` claim the
 workflow requests and the value the role's trust policy conditions
 on.
+
+**The trust policy's condition keys are Alicloud's, not AWS's.**
+Alicloud's RAM exposes the token's claims as `oidc:aud` / `oidc:iss`
+/ `oidc:sub` — NOT as `oidc:token.actions.githubusercontent.com:*`,
+which is what the AWS side uses:
+
+```json
+"Condition": {
+    "StringEquals": {
+        "oidc:aud": "sts.aliyuncs.com",
+        "oidc:iss": "https://token.actions.githubusercontent.com"
+    },
+    "StringLike": {
+        "oidc:sub": "repo:great-wall-connect*/blitzlog*:ref:refs/heads/*"
+    }
+}
+```
+
+Three traps in that block:
+
+- With the AWS key names the service populates nothing under them, so
+  the conditions can never be satisfied and every assume is denied with
+  `AuthenticationFail.NoPermission` / `NoPermissionType: ImplicitDeny`
+  — a policy that looks right and never matches.
+- The subject is **not** `repo:<owner>/<repo>:<ref>`. GitHub embeds the
+  numeric ids:
+  `repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>`, so the wildcard
+  has to cover them (`great-wall-connect*/blitzlog*`) — which is why
+  the AWS-side policy looks the way it does.
+- The audience and issuer are plain strings, and the `aud` value must
+  be the provider's client id (`sts.aliyuncs.com`), not the token's
+  default audience.
+
+The token's actual claims (printed from a workflow) are:
+
+```json
+{
+  "aud": "sts.aliyuncs.com",
+  "iss": "https://token.actions.githubusercontent.com",
+  "ref": "refs/heads/<branch>",
+  "sub": "repo:great-wall-connect@203322663/blitzlog@1336839410:ref:refs/heads/<branch>"
+}
+```
 
 ### 1b. The account id
 
@@ -106,9 +153,16 @@ cd infra/alicloud/bootstrap && terraform output vswitch_ids
 ## 2. Bootstrap
 
 Creates the shared OSS buckets (agent-logs, STT models), the two CI
-roles (the Packer build role and the deploy role), and the **shared
-agent VPC + VSwitches** (`network.tf`). The per-env KMS CMK lives in
-the per-env stack (`modules/core/kms.tf`).
+roles (the Packer build role and the deploy role), the **KMS CMK that
+encrypts the OOS parameters** (`kms.tf`), and the **shared agent VPC +
+VSwitches** (`network.tf`).
+
+The CMK lives here rather than in the per-env stack for two reasons:
+there is one key for the whole account, and — the practical one — the
+deploy role is created here, so it can be granted `kms:Decrypt` on
+that one key. A role cannot be granted access to a key that does not
+exist yet, so a CMK created by the per-env stack could only ever be
+reached through a wildcard grant on `key/*`.
 
 It also **opens two account-level services** (`services.tf`), which
 the per-env stacks need before they can create anything:
@@ -137,6 +191,32 @@ The state bucket (`gwc-infra-tf-state`) and its region
 `*-backend.hcl` files are **gitignored** (`.gitignore`:
 `infra/**/*-backend.hcl`) — the committed `.example` files are the
 templates you copy.
+
+### What the bootstrap apply leaves behind
+
+| What | Where |
+|---|---|
+| the CMK that encrypts the parameters | the bootstrap's `alicloud_kms_key.secrets` |
+| its id, published for the per-env stacks | the OOS parameter `blitzlog/shared/kms-key-id` (a **plain** parameter — the id is not a secret) |
+| the deploy-time parameters the CI reads | `blitzlog/<env>/<leaf>` — `github-app-id`, `github-app-private-key`, … (`secrets.tf`) |
+
+> **Alicloud allows one CMK per region per account.** "Only one
+> default key (CMK) can be created per region" — so the bootstrap
+> **adopts** the key an account already has rather than creating a
+> second one; creating one fails with `Rejected.LimitExceeded`
+> ("user create resource limit was exceeded"). On an account that
+> already has the key, the operator moves it:
+>
+> ```bash
+> cd infra/alicloud/dev
+> terraform state rm module.core.alicloud_kms_key.secrets   # stop managing it
+> cd ../bootstrap
+> terraform import alicloud_kms_key.secrets <key-id>       # adopt it
+> ```
+>
+> The order matters: a per-env apply before the `state rm` destroys
+> the key (a seven-day deletion window), and when it goes, every
+> parameter it encrypts becomes unreadable.
 
 ### Credentials for the local apply
 
@@ -169,7 +249,9 @@ The profile name must match the `profile` key in the backend config.
 ```bash
 cd infra/alicloud/dev
 cp terraform.tfvars.example terraform.tfvars   # gitignored
-# fill in the GitHub App credentials, the API key, the bucket names
+# fill in the GitHub App credentials, the API key, the bucket names,
+# and the CMK's id from the bootstrap:
+#   cd infra/alicloud/bootstrap && terraform output kms_key_id
 terraform init -backend-config=dev-backend.hcl
 terraform apply
 ```
@@ -181,16 +263,73 @@ terraform apply
 cp dev-backend.hcl.example dev-backend.hcl
 ```
 
-The apply creates the OOS parameters (GitHub App id / private key /
-installation id, webhook secret, OpenCode key, STT config) with
-placeholder values. Set the real values afterwards:
+The apply creates the OOS parameters the runtime reads (GitHub App id
+/ private key / installation id, webhook secret, OpenCode key, STT
+config). Their VALUES come from the deploy-time set (the bootstrap
+stack's parameters — see "The two parameter sets" below), so the real
+value is set there, once:
 
 ```bash
 aliyun oos UpdateSecretParameter \
-  --Name blitzlog/dev/github-app/private-key \
+  --Name blitzlog/dev/github-app-private-key \
   --Value "$(cat private-key.pem)" \
   --region cn-hongkong
 ```
+
+### Moving a parameter onto another key
+
+A parameter's encryption key is fixed at creation, so moving one onto
+another key means recreating it. The terraform provider reads an OOS
+secret parameter back **without decryption**, so terraform's copy of a
+value is whatever was last *applied* — which is empty for every
+parameter the operator filled in after its creation. A plain
+replacement would therefore write that empty value back and wipe the
+secret.
+
+The parameters read their value from OOS with decryption instead
+(`data "alicloud_oos_secret_parameters"`), so a re-creation carries
+the **live** value across. There is no script and no operator step: a
+key change is an ordinary replacement.
+
+### The two parameter sets
+
+| Set | Names | Owner | Read by |
+|---|---|---|---|
+| deploy-time | `blitzlog/<env>/<leaf>` (`github-app-id`, …) | the bootstrap stack | the deploy legs (the CI) |
+| per-env | `blitzlog/<env>/github-app/id`, … | the per-env stack | the runtime (the function, the agent) |
+
+The deploy-time set is the **source of truth**: the operator edits it,
+the deploy legs read it, and the runtime's copy follows it — the
+per-env stack reads it with decryption, so a rotation reaches the
+agents on the next apply. There is nothing to keep in step by hand.
+
+The deploy-time parameters are created by the bootstrap stack with a
+placeholder (`unset`) when the operator has not supplied a value, and
+the deploy legs **refuse** a parameter that still holds it — a
+placeholder that reached the function would be a secret that is not a
+secret. Set the real value with:
+
+```bash
+aliyun oos UpdateSecretParameter \
+  --Name blitzlog/dev/github-app-private-key \
+  --Value "$(cat private-key.pem)" \
+  --region cn-hongkong
+```
+
+### Who can read what
+
+Reading an OOS encrypted parameter takes **two** KMS permissions: the
+parameter is a KMS *secret* named `secret/oos/<parameter path>`, so
+the reader needs `kms:GetSecretValue` on that secret, and — when the
+parameter is encrypted with a customer CMK — `kms:Decrypt` on the
+key. `kms:Decrypt` on `secret/oos*` does nothing: Decrypt is the
+action for a CMK (`key/...`), not for a secret.
+
+| Role | Grants |
+|---|---|
+| the CI deploy role | `kms:GetSecretValue` on `secret/oos/blitzlog/*`, `kms:Decrypt` on the one CMK, `oos:GetParameter` on the published key id |
+| the FC execution role | the same, scoped to its env plus `blitzlog/users/*` |
+| the ECS agent role | the same, scoped to its env plus `blitzlog/users/*` |
 
 The parameter names carry no leading slash — that is how OOS names
 them, and the RAM grants in `infra/alicloud/modules/core/ram.tf`
@@ -341,7 +480,7 @@ packer init agent-ecs-ubuntu.pkr.hcl
 # The plugin reads the access key from ALICLOUD_ACCESS_KEY /
 # ALICLOUD_SECRET_KEY and the STS token from SECURITY_TOKEN (not
 # ALICLOUD_SECURITY_TOKEN), so export all three.
-source ../../scripts/aliyun-env.sh
+source ../../../scripts/aliyun-env.sh
 export SECURITY_TOKEN="$ALICLOUD_SECURITY_TOKEN"
 
 packer build -force \
@@ -351,7 +490,7 @@ packer build -force \
   -var vpc_id=vpc-j6csy1qafim6vio53korm \
   -var vswitch_id=vsw-j6cnyi1xrg6gbi3zc5ddg \
   -var zone_id=cn-hongkong-b \
-  -var eip_id=eip-j6cba1fvruw554vebdt43 \
+  -var eip_id="$(cd ../../bootstrap && terraform output -raw packer_eip_id)" \
   -var github_token="$(grep -oP 'GITHUB_TOKEN=\K\S+' ../../aws/packer/.env)" \
   agent-ecs-ubuntu.pkr.hcl
 ```
@@ -492,12 +631,16 @@ on the instance (SSH in, or read it after the run).
 | `NoSuchBucket` / bucket not found | The bucket name is `gwc-infra-tf-state` (hyphenated). `gwc-infra-tfstate` does not exist. |
 | `RegionId is empty` | `ALICLOUD_REGION` is not set and the CLI has no configured region. |
 | The OIDC step produces no credentials | `vars.ALICLOUD_ACCOUNT_ID` unset, or the OIDC provider was never registered in the RAM console (§1a). |
-| The OOS render step fails on a missing parameter | The dev/prod stack has not been applied, or the parameter still holds its placeholder value. |
+| The OOS render step fails on a missing parameter | The bootstrap stack has not been applied (it creates the deploy-time parameters). |
+| The OOS render step fails: "the OOS parameter ... still holds the placeholder" | The deploy-time parameter was created with the `unset` placeholder — the operator has not filled in the real value yet (§3). |
+| `Kms.SecretFailed` / "Forbidden.NoPermission … secret/oos/… is not allowed" on an OOS read | The caller cannot read the parameter's KMS secret. An OOS encrypted parameter is a KMS secret, so reading it takes `kms:GetSecretValue` on `secret/oos/<path>` — `kms:Decrypt` on `secret/oos*` does nothing (Decrypt is the action for a CMK). The deploy role's grant comes from the bootstrap stack; re-apply it. |
+| The deploy refuses to apply: "this plan would destroy a KMS key" | Every OOS parameter is encrypted with the account's CMK, and destroying the key schedules its deletion — when it goes, the parameters cannot be read. The key belongs to the bootstrap stack: the stack that still manages it should stop managing it (`terraform state rm`), not destroy it. |
 | `ServiceUnOpen` / "Your Gateway service has not been opened." | The API Gateway product is not open. Run the bootstrap apply (`infra/alicloud/bootstrap`) — it opens it (`services.tf`). |
 | `ServiceNotEnable` / "Service not open" | The MNS (Simple Message Queue) product is not open. Activate it from the MNS console — see §1c. The bootstrap apply only creates the subscription. |
 | `InvalidAppName` / `InvalidGroupName` on the API Gateway resources | The names contain a hyphen. API Gateway names accept letters, digits and underscores only. |
 | `packer init` cannot download the alicloud plugin | The `github.com/hashicorp/alicloud` Packer plugin is not reachable from the runner. |
-| `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0 (see Known limitations). |
+| `Forbidden.RiskControl` on the bake's "Creating instance" | The account cannot purchase ECS instances — no payment method is bound and the balance is 0. It is an account-side approval (payment method + a support ticket), not a repo change; this account cleared it, a fresh one has not. |
+| `AuthenticationFail.NoPermission` / "No such OIDC Provider registered" on the bake job | The RAM OIDC provider was never registered in the Alicloud account — it is a console step (§1a), and the bootstrap's trust policies reference it. Register it before the CI bake can assume the packer role. |
 | `MissingSecurityToken` from the `aliyun` CLI | The CLI does not read the `ALIBABA_CLOUD_*` environment variables for authentication. It needs a profile file in `StsToken` mode (the CI job writes one; locally `aliyun configure --profile default` does). |
 | `InvalidInstanceType.NotSupported` / "not supported by the image architecture" | An x86 instance type with an ARM64 source image (or the reverse). The agent image is ARM64-only, so both the bake instance type and the runtime spot types must be ARM64 (`ecs.g8y.*`). |
 | `EIP_CAN_NOT_ASSOCIATE_WITH_PUBLIC_IP` on the bake's "Error associating EIP" | The build instance already had an ECS-managed public IP ("natpublicip") — the template asks ECS for one, and Alicloud will not replace it with an EIP. The instance must get its public address from the EIP alone: leave `internet_charge_type` / `internet_max_bandwidth_out` unset and pass `-var eip_id=...`. |
@@ -528,22 +671,16 @@ on the instance (SSH in, or read it after the run).
   above). The source image is the newest ARM64 Ubuntu 26.04 in
   the region (the agent container image is ARM64-only, so an x86
   source image would refuse to boot it).
-- **ECS instance creation is blocked on this account.**
-  `RunInstances` / `CreateInstance` fail with
+- **ECS purchases need an account-side approval.** This account
+  was initially blocked: `RunInstances` / `CreateInstance` failed with
   `Forbidden.RiskControl` — *"This operation is forbidden by Aliyun
   RiskControl system."* Aliyun's own error-code documentation
   (`GetErrorCodeSolutions` for `Forbidden.RiskControl` on Ecs) says
   this means *"您的账户出现异常，详情请联系客服 … 账号存在交易安全
-  问题"* and that it is cleared only by **opening a support ticket**
-  with the account holder's ID / business licence.
-
-  It is an account-level block on ECS purchases, not a template or
-  configuration problem. It reproduces identically for every instance
-  type, image, zone, charge type and security group, while the free
-  resources the bake needs (VPC, VSwitch, security group, key pair)
-  are created without complaint. The underlying cause is visible in
-  the billing API: the account has **no payment method bound** and
-  **no balance** —
+  问题"* and that it is cleared by **binding a payment method** and
+  **opening a support ticket** with the account holder's ID /
+  business licence. The underlying cause is visible in the billing
+  API:
 
   ```
   aliyun bssopenapi QueryPrepaidCards --endpoint business.ap-southeast-1.aliyuncs.com
@@ -552,16 +689,12 @@ on the instance (SSH in, or read it after the run).
     → {"AvailableAmount":"0.00","CreditAmount":"0.00","AvailableCashAmount":"0.00"}
   ```
 
-  So the fix is on the account, not in the repo: bind a payment
-  method (or top up the balance) in the billing console, and
-  separately open the support ticket the error documentation asks
-  for. Note the balance query needs the **international** billing
-  endpoint (`business.ap-southeast-1.aliyuncs.com`) — the domestic
+  (The balance query needs the **international** billing endpoint
+  (`business.ap-southeast-1.aliyuncs.com`) — the domestic
   `business.aliyuncs.com` rejects an international account with
-  `NotApplicable: the caller site matches the API domain regionId`.
+  `NotApplicable: the caller site matches the API domain regionId`.)
 
-  Until then the bake cannot complete, and neither can the runtime
-  agent instances (the FC function launches the same way). Everything
-  else in the pipeline — the Packer template, the build scripts, the
-  RAM policies and the OOS publish step — is verified working up to
-  the point of instance creation.
+  The approval took a few days and has since come through: the bake
+  creates its build instance and the runtime agent instances launch.
+  A **fresh** account still has to clear this before either can run
+  — it is an account-side gate, not a repo change.
