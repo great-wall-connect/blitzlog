@@ -480,7 +480,7 @@ packer init agent-ecs-ubuntu.pkr.hcl
 # The plugin reads the access key from ALICLOUD_ACCESS_KEY /
 # ALICLOUD_SECRET_KEY and the STS token from SECURITY_TOKEN (not
 # ALICLOUD_SECURITY_TOKEN), so export all three.
-source ../../scripts/aliyun-env.sh
+source ../../../scripts/aliyun-env.sh
 export SECURITY_TOKEN="$ALICLOUD_SECURITY_TOKEN"
 
 packer build -force \
@@ -490,7 +490,7 @@ packer build -force \
   -var vpc_id=vpc-j6csy1qafim6vio53korm \
   -var vswitch_id=vsw-j6cnyi1xrg6gbi3zc5ddg \
   -var zone_id=cn-hongkong-b \
-  -var eip_id=eip-j6cba1fvruw554vebdt43 \
+  -var eip_id="$(cd ../../bootstrap && terraform output -raw packer_eip_id)" \
   -var github_token="$(grep -oP 'GITHUB_TOKEN=\K\S+' ../../aws/packer/.env)" \
   agent-ecs-ubuntu.pkr.hcl
 ```

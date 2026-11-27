@@ -25,6 +25,31 @@ class TestGetGithubAppToken(unittest.TestCase):
     @patch("auth.jwt.encode", return_value="fake.jwt.token")
     @patch("auth.requests.post")
     @patch("auth.get_ssm_param")
+    def test_decodes_a_private_key_whose_base64_padding_was_stripped(
+        self, mock_ssm, mock_post, mock_jwt_encode
+    ):
+        """A PEM pasted through a shell loses its trailing "=" — and
+        `b64decode` rejects a length that is not a multiple of four
+        ("Incorrect padding"). The key in the store is stored that
+        way, so the token minting has to cope with it."""
+        padded = base64.b64encode(b"fake-key").decode()
+        mock_ssm.side_effect = lambda name, with_decryption=True: {
+            "github-app/id": "12345",
+            "github-app/private-key": padded.rstrip("="),
+            "github-app/installation-id": "67890",
+        }[name]
+        mock_post.return_value.ok = True
+        mock_post.return_value.json.return_value = {"token": "ghp_abc123"}
+        mock_post.return_value.raise_for_status = MagicMock()
+
+        self.assertEqual(get_github_app_token("owner/repo"), "ghp_abc123")
+        # The key reached the JWT signing intact.
+        signed = mock_jwt_encode.call_args.args[1]
+        self.assertEqual(signed, "fake-key")
+
+    @patch("auth.jwt.encode", return_value="fake.jwt.token")
+    @patch("auth.requests.post")
+    @patch("auth.get_ssm_param")
     def test_posts_repo_scoped_body_for_long_lived_token(
         self, mock_ssm, mock_post, mock_jwt_encode
     ):

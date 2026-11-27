@@ -85,7 +85,14 @@ def get_ssm_param(name: str, with_decryption: bool = True) -> str:
 def get_github_app_token(repo: str) -> str:
     app_id = get_ssm_param("github-app/id", with_decryption=False)
     private_key_b64 = get_ssm_param("github-app/private-key")
-    private_key = base64.b64decode(private_key_b64).decode()
+    # The stored value is base64 WITHOUT its trailing padding often
+    # enough — a PEM pasted through a shell loses the "=" characters,
+    # and `b64decode` rejects a length that is not a multiple of
+    # four ("Incorrect padding"). Restore the padding before
+    # decoding.
+    private_key = base64.b64decode(
+        private_key_b64 + "=" * (-len(private_key_b64) % 4)
+    ).decode()
     installation_id = get_ssm_param("github-app/installation-id", with_decryption=False)
 
     now = datetime.now(UTC)
