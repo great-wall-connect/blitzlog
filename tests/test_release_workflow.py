@@ -1750,5 +1750,19 @@ class TestAlicloudPackerJob(unittest.TestCase):
         self.assertIn("blitzlog-packer-build-role", str(creds.get("with", {})))
 
 
+class TestAlicloudBakeInstallsTheCli(unittest.TestCase):
+    """The bake job calls the aliyun CLI to resolve the network and
+    the source image — the runner does not have it by default."""
+
+    def test_the_bake_job_installs_the_cli(self):
+        text = RELEASE_YML.read_text()
+        self.assertIn(
+            "aliyun-cli-linux-3.5.4-amd64.tgz",
+            text,
+            "the Alicloud bake must install the aliyun CLI — the "
+            "resolve step calls it and the runner does not have it",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

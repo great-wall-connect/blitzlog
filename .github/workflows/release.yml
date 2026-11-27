@@ -855,6 +855,27 @@ jobs:
             echo "  Alicloud OIDC provider + blitzlog-packer-build-role exist." >&2
             exit 1
           fi
+
+          # The `aliyun` CLI is not installed on the runner by
+          # default, and the step that resolves the bake network and
+          # the source image calls it. Install the same pinned build
+          # the baked host image uses
+          # (infra/alicloud/packer/scripts-ecs-ubuntu/01-system.sh) so
+          # the two paths cannot drift.
+          #
+          # The install runs in a subshell: a `cd` here would change
+          # the step's working directory.
+          if ! command -v aliyun >/dev/null 2>&1; then
+            (
+              cd /tmp
+              curl -fsSL -o aliyun-cli.tgz \
+                https://aliyuncli.alicdn.com/aliyun-cli-linux-3.5.4-amd64.tgz
+              tar -xzf aliyun-cli.tgz
+              sudo mv aliyun /usr/local/bin/aliyun
+              sudo chmod +x /usr/local/bin/aliyun
+              rm -f aliyun-cli.tgz
+            )
+          fi
           {
             echo "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}"
             echo "ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}"
